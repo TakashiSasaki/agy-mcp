@@ -62,7 +62,7 @@ func TestStatusInterruptedNoOutput(t *testing.T) {
 // would tell a caller to wait out a wall that never clears.
 func TestClassifyAgyError(t *testing.T) {
 	// Each positive is written to match exactly ONE isQuotaError substring, so
-	// deleting any single matcher turns exactly one row red. A string matching two
+	// deleting any single matcher turns at least one row red. A string matching two
 	// matchers at once (say "429 ... rate limit") would leave a deleted matcher
 	// silently covered by its neighbour.
 	quota := []string{
@@ -82,6 +82,15 @@ func TestClassifyAgyError(t *testing.T) {
 		// agy's AI credits wall (issue #202); wording from agy's changelog for
 		// 1.2.15, NOT MEASURED. Matches no other token above.
 		"Your AI credits balance is too low to continue.", // credits wall (both phrases on one line)
+		// The unknown-agent exclusion is line-scoped: a quota line beside it still
+		// classifies, so the exclusion cannot widen into hiding a real wall.
+		"unknown agent \"revew\" (available: fact-checker)\nprovider returned a rate limit response", // rate limit
+		// The exclusion needs both unknown-agent phrases on one line, so a genuine
+		// wall that carries only one of them still classifies; and it keeps a quota
+		// line that comes before the unknown-agent line.
+		"Individual quota reached (available: 0 requests)",                                           // quota, only "(available:"
+		"rate limit hit, unknown agent \"x\" in pool",                                                // rate limit, only the unknown-agent phrase
+		"provider returned a rate limit response\nunknown agent \"revew\" (available: fact-checker)", // rate limit, before the unknown-agent line
 	}
 	for _, msg := range quota {
 		if got := classifyAgyError(msg); got != ReasonQuotaExhausted {
@@ -105,6 +114,13 @@ func TestClassifyAgyError(t *testing.T) {
 		"sample rate too low for playback",
 		"AI credits balance: 40\nlatency too low to measure",
 		"Prepaid credits balance is too low to process request. Please add funds.",
+		// agy lists the available agents on one line of its unknown-agent error
+		// (MEASURED against agy 1.4.6, four agents configured), so an agent
+		// whose name carries a quota word must not turn a typo into a quota
+		// wall. Both delivery forms: the payload error and the stderr summary
+		// line.
+		`unknown agent "revew" (available: fact-checker, quota-watcher)`,
+		`exit 1: error: unknown agent "revew" (available: fact-checker, quota-watcher)`,
 	}
 	for _, msg := range other {
 		if got := classifyAgyError(msg); got != ReasonAgyError {
