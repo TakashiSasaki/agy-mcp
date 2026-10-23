@@ -35,7 +35,8 @@ const (
 // (MEASURED against agy 1.3.1: from a git subdirectory it finds the repository
 // root's agents, outside a git repository it does not). The process also runs in
 // cwd, so a missing directory is an error rather than the empty project catalog
-// agy returns for a nonexistent --add-dir (MEASURED against agy 1.3.1). Issue
+// agy returns for a nonexistent --add-dir (MEASURED against agy 1.3.1 and again
+// against agy 1.4.6). Issue
 // #203.
 func (m *Manager) ListAgents(ctx context.Context, cwd string) ([]string, error) {
 	n, err := normalizeCwd(cwd)

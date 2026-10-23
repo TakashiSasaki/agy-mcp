@@ -107,6 +107,21 @@ import (
 // parallel jobs benefit from it. Whether those jobs actually share a database
 // file is not measured, and the floor stays put on the same reasoning.
 //
+// Later releases up to 1.4.6 were read against the flags and output agy-mcp
+// consumes, and none raises the floor. These touch behaviour a caller can see:
+//   - 1.3.4 made an unknown --agent fail the run before any model call (exit 1,
+//     an ERROR result naming the available agents; MEASURED against agy 1.4.6).
+//     Below 1.3.4 agy runs its default agent instead (changelog), which agy-mcp
+//     cannot tell from a real run, so list_agents is how a caller checks a name
+//     there.
+//   - 1.3.4 also let --model take a base name without --effort. agy-mcp forwards
+//     both flags as given and does not couple them.
+//   - 1.3.2 stopped --dangerously-skip-permissions auto-approving the plan in
+//     /plan mode (changelog). How a headless --mode plan run behaves since then
+//     is NOT MEASURED.
+//   - 1.3.5 added --mode auto (Windows support from 1.4.4); agy-mcp does not
+//     accept it, see the comment on the mode constants in internal/mcptools.
+//
 // The facts about agy releases are from agy's own changelog (run
 // `agy changelog`), except where a line is marked MEASURED; the 1.1.15 line
 // reads "Fixed streamed text corrupting non-ASCII characters into replacement

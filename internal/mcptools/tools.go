@@ -44,6 +44,15 @@ const maxJobTimeout = 24 * time.Hour
 // agy --mode accepts exactly these agent execution modes. toStartRequest
 // validates against them so a bad value fails at the tool boundary with a clear
 // message rather than reaching agy, which agy-mcp cannot surface as cleanly.
+//
+// agy 1.3.5 added a third mode, auto, which is deliberately not accepted. Every
+// run passes --dangerously-skip-permissions (buildAgyArgs), and auto is an
+// approval policy, so under that flag it either changes nothing for an agy-mcp
+// run or adds a reviewer agent's model calls; which one is NOT MEASURED. On an
+// agy older than 1.3.5 an unrecognized --mode value is only a warning (agy
+// 1.1.12 changelog; the warning and exit 0 MEASURED against agy 1.4.6 with an
+// unknown value), so accepting auto would run in the default mode and report a
+// normal run.
 const (
 	agyModeAcceptEdits = "accept-edits"
 	agyModePlan        = "plan"

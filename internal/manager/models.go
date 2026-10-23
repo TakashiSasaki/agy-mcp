@@ -77,7 +77,8 @@ func modelID(v string) string {
 // listingArgs builds the argv for a JSON listing: `--output-format json`, one
 // `--add-dir` pair per workspace directory, then the subcommand. --add-dir, like
 // --output-format, is a global flag agy rejects after the subcommand ("flags
-// provided but not defined: -add-dir"; MEASURED against agy 1.3.1), so every flag
+// provided but not defined: -add-dir"; MEASURED against agy 1.3.1 and again
+// against agy 1.4.6, on `models`), so every flag
 // sits before sub.
 func listingArgs(sub string, workspace []string) []string {
 	args := []string{outputFormatFlag, jsonOutputFormat}

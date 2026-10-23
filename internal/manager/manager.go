@@ -274,7 +274,8 @@ func readAgyVersion(ctx context.Context, agy string) (string, error) {
 // or without the space after its colon, as a precaution: agy has not been seen to
 // write either. MEASURED against agy 1.3.1 on 2026-10-07 (`agy --version` with
 // stdout and stderr captured apart): stdout is "1.3.1", stderr is empty, the exit
-// status is 0. That covers a normal run only; whether agy ever prints an
+// status is 0, and the same shape again against agy 1.4.6 (stdout "1.4.6"). That
+// covers a normal run only; whether agy ever prints an
 // AGY_ERROR line on --version, for example in a failure state, is NOT MEASURED.
 // The reduction runs before the bound, so the cut never leaves a fragment of a
 // line that was not reduced.
