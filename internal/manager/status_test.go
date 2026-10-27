@@ -531,10 +531,13 @@ type terminalCase struct {
 	out         string // streamed text on disk, "" writes no out file
 	errFile     string // captured stderr, "" writes no err file
 	args        []string
+	timeout     time.Duration // the job's recorded timeout; zero records none
+	ranFor      time.Duration // how long before the sentinel the job started
 	wantState   string
 	wantResult  string
 	wantPartial bool
 	wantErrSub  string
+	noErrSub    string // text the error must not mention, "" not asserted
 	wantReason  string // FailureReason; required on every failed row, forbidden elsewhere
 	wantConvID  string // conversation carried off the payload, "" not asserted
 	wantTurns   int    // agy's own accounting, 0 not asserted
@@ -871,6 +874,47 @@ func terminalCases() []terminalCase {
 			wantState: StateFailed, wantResult: "partial text", wantPartial: true,
 			wantErrSub: "model unavailable", wantReason: ReasonAgyError,
 		},
+		// --- agy before 1.1.28 reports an expired --print-timeout as an in-band
+		// ERROR (MEASURED against agy 1.1.15 and 1.1.27, issue #192): exit 1, the
+		// exact text below, empty stderr. It is a timeout only when the job ran
+		// its own timeout; the same text arriving early is some other failure.
+		{
+			name: "pre-1.1.28 print-timeout expiry at its deadline is a timeout",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: "timeout waiting for response", ConversationID: "c1"},
+			timeout: 8 * time.Second, ranFor: 9 * time.Second,
+			wantState: StateFailed, wantErrSub: "--print-timeout expired", wantReason: ReasonTimeout, wantConvID: "c1",
+		}, {
+			// CompletedAt is a file mtime, so a coarse filesystem can read a real
+			// expiry up to a second short.
+			name: "pre-1.1.28 expiry read within the mtime slack is still a timeout",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError, ConversationID: "c1"},
+			timeout: 8 * time.Second, ranFor: 7500 * time.Millisecond,
+			wantState: StateFailed, wantErrSub: "--print-timeout expired", wantReason: ReasonTimeout, wantConvID: "c1",
+		}, {
+			name: "the same error long before the deadline stays agy_error",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError, ConversationID: "c1"},
+			timeout:   30 * time.Minute,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError, wantReason: ReasonAgyError, wantConvID: "c1",
+		}, {
+			name: "a near-miss timeout error at the deadline stays agy_error",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError + " from MCP server"},
+			timeout: 8 * time.Second, ranFor: 9 * time.Second,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError + " from MCP server", wantReason: ReasonAgyError,
+		}, {
+			// A structured quota line on stderr outranks the print-timeout reading:
+			// the reason stays quota_exhausted and agy's own text stays the error.
+			name: "the same error at the deadline with a quota line on stderr stays quota_exhausted",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError},
+			errFile: wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true}` + "\n",
+			timeout: 8 * time.Second, ranFor: 9 * time.Second,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError, noErrSub: "--print-timeout expired",
+			wantReason: ReasonQuotaExhausted, wantRetryable: new(true),
+		}, {
+			name: "the same error on a job with no recorded timeout stays agy_error",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError},
+			ranFor:    9 * time.Second,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError, wantReason: ReasonAgyError,
+		},
 		// --- agy's structured AGY_ERROR stderr line (issue #183) ------------------
 		{
 			name: "exit 3 with an error payload reads agy's AGY_ERROR line",
@@ -1042,7 +1086,8 @@ func stageTerminalJob(t *testing.T, tc terminalCase) Status {
 	t.Helper()
 	m := newManager(t, managerOpts{})
 	dir, err := m.store.Create(jobstore.Meta{
-		ID: "j", StartedAt: time.Now(), BootID: readBootID(), Args: tc.args,
+		ID: "j", StartedAt: time.Now().Add(-tc.ranFor), BootID: readBootID(), Args: tc.args,
+		Timeout: tc.timeout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1093,6 +1138,9 @@ func assertTerminalStatus(t *testing.T, st Status, tc terminalCase) {
 		}
 	} else if !strings.Contains(st.Error, tc.wantErrSub) {
 		t.Errorf("error = %q, want it to mention %q", st.Error, tc.wantErrSub)
+	}
+	if tc.noErrSub != "" && strings.Contains(st.Error, tc.noErrSub) {
+		t.Errorf("error = %q, want it not to mention %q", st.Error, tc.noErrSub)
 	}
 	// No row may surface the cloud project or region that short_error carries
 	// (issue #205).
@@ -1892,6 +1940,111 @@ func TestStatusRecoveredFromPayload(t *testing.T) {
 			// unpinned on the recovery path.
 			if tc.wantState == StateFailed && st.Error == "" {
 				t.Fatal("a failed recovery must carry an explanation")
+			}
+		})
+	}
+}
+
+// TestStatusRecoveredLegacyPrintTimeoutIsTimeout pins that a job recovered from
+// its payload (supervisor died before writing the sentinel) gets the same
+// pre-1.1.28 print-timeout relabelling as the sentinel path (issue #192). With no
+// exit_code file the completion time falls back to the out or err mtime, and the
+// supervisor creates both when the job starts and the legacy expiry writes
+// nothing to either, so the test stages them at StartedAt: the run length then
+// has to come from result.json, which is written once agy is reaped.
+func TestStatusRecoveredLegacyPrintTimeoutIsTimeout(t *testing.T) {
+	m := newManager(t, managerOpts{})
+	started := time.Now().Add(-9 * time.Second)
+	dir, err := m.store.Create(jobstore.Meta{
+		ID: "j", StartedAt: started, PID: 999999, BootID: "old-boot",
+		Timeout: 8 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{jobstore.OutPath(dir), jobstore.ErrPath(dir)} {
+		if werr := os.WriteFile(p, nil, 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+		if werr := os.Chtimes(p, started, started); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	writeResultPayload(t, dir, streamjson.Result{Status: streamjson.StatusError, Error: "timeout waiting for response", ConversationID: "c1"})
+	st, err := m.Status("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != StateFailed || st.FailureReason != ReasonTimeout || st.ConversationID != "c1" {
+		t.Fatalf("status = %+v, want failed with reason %q and conversation c1", st, ReasonTimeout)
+	}
+	if st.Elapsed < 8*time.Second {
+		t.Fatalf("elapsed = %v, want at least the 8s timeout the relabelling rests on", st.Elapsed)
+	}
+}
+
+// TestStatusRecoveredLegacyPrintTimeoutGuards pins what keeps the legacy
+// print-timeout relabelling from firing on the recovered path (issue #192),
+// where the job has no exit_code sentinel and the run length comes from
+// result.json. The out, err and result.json mtimes are set at a fixed offset
+// from StartedAt, as the supervisor leaves a job whose agy wrote nothing after
+// the files were created.
+func TestStatusRecoveredLegacyPrintTimeoutGuards(t *testing.T) {
+	const quotaLine = wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true}` + "\n"
+	for _, tc := range []struct {
+		name       string
+		resultAge  time.Duration // result.json mtime, after StartedAt
+		stderr     string
+		wantReason string
+		wantErrSub string
+		noErrSub   string
+	}{
+		{
+			// A failure that ended a second into an 8s job is not an expiry, however
+			// long ago the job started.
+			name:      "a job that failed early stays agy_error",
+			resultAge: time.Second, wantReason: ReasonAgyError, wantErrSub: legacyPrintTimeoutError,
+			noErrSub: "--print-timeout expired",
+		}, {
+			// The quota promotion by applyAgyError comes first, so the relabelling
+			// neither fires nor rewrites agy's own error text.
+			name:      "a quota line keeps quota_exhausted and agy's error text",
+			resultAge: 9 * time.Second, stderr: quotaLine, wantReason: ReasonQuotaExhausted, wantErrSub: legacyPrintTimeoutError,
+			noErrSub: "--print-timeout expired",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManager(t, managerOpts{})
+			started := time.Now().Add(-9 * time.Second)
+			dir, err := m.store.Create(jobstore.Meta{
+				ID: "j", StartedAt: started, PID: 999999, BootID: "old-boot",
+				Timeout: 8 * time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeResultPayload(t, dir, streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError})
+			if werr := os.WriteFile(jobstore.OutPath(dir), nil, 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+			if werr := os.WriteFile(jobstore.ErrPath(dir), []byte(tc.stderr), 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+			at := started.Add(tc.resultAge)
+			for _, p := range []string{jobstore.OutPath(dir), jobstore.ErrPath(dir), jobstore.ResultPath(dir)} {
+				if werr := os.Chtimes(p, at, at); werr != nil {
+					t.Fatal(werr)
+				}
+			}
+			st, err := m.Status("j")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.State != StateFailed || st.FailureReason != tc.wantReason {
+				t.Fatalf("status = %+v, want failed with reason %q", st, tc.wantReason)
+			}
+			if !strings.Contains(st.Error, tc.wantErrSub) || strings.Contains(st.Error, tc.noErrSub) {
+				t.Fatalf("error = %q, want it to mention %q and not %q", st.Error, tc.wantErrSub, tc.noErrSub)
 			}
 		})
 	}
