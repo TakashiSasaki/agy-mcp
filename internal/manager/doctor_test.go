@@ -2,8 +2,10 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -221,6 +223,156 @@ func TestDoctorReachableFailsWhenListingUnavailable(t *testing.T) {
 	}
 	if report.OK() {
 		t.Fatal("report is OK despite an unreachable agy")
+	}
+}
+
+// TestCheckADCEnv drives the ADC environment check through an injected getenv so
+// the verdicts do not depend on the ambient shell. Each WARN row also pins the
+// variables the detail must name and that it points the reader at the README.
+func TestCheckADCEnv(t *testing.T) {
+	v := func(minor, patch int) agyver.Version { return agyver.Version{Major: 1, Minor: minor, Patch: patch} }
+	tests := []struct {
+		name    string
+		env     map[string]string
+		ver     agyver.Version
+		known   bool
+		want    CheckStatus
+		mention []string
+	}{
+		{"nothing set", nil, v(4, 8), true, CheckPass, nil},
+		{"USE_ADC without AGY_ADC_AUTH", map[string]string{envUseADC: "1"}, v(4, 8), true, CheckWarn, []string{envUseADC, envADCAuth}},
+		{"USE_ADC with AGY_ADC_AUTH=0", map[string]string{envUseADC: "1", envADCAuth: "0"}, v(4, 8), true, CheckWarn, []string{envUseADC}},
+		{"USE_ADC with AGY_ADC_AUTH on", map[string]string{envUseADC: "1", envADCAuth: "1"}, v(4, 8), true, CheckPass, nil},
+		{"on, below 1.4.7", map[string]string{envADCAuth: "true"}, v(4, 6), true, CheckWarn, []string{envADCAuth, "1.4.6", "1.4.7"}},
+		{"on, at 1.4.7", map[string]string{envADCAuth: "1"}, v(4, 7), true, CheckPass, nil},
+		// The version is deliberately below 1.4.7: a check that ignores the flag warns.
+		{"on, version unknown", map[string]string{envADCAuth: "1"}, v(4, 6), false, CheckPass, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkADCEnv(func(k string) string { return tc.env[k] }, tc.ver, tc.known)
+			if got.Name != checkADCEnvName {
+				t.Errorf("name = %q, want %q", got.Name, checkADCEnvName)
+			}
+			if got.Status != tc.want {
+				t.Fatalf("status = %v (%s), want %v", got.Status, got.Detail, tc.want)
+			}
+			if tc.want != CheckWarn {
+				return
+			}
+			for _, s := range append(tc.mention, "README") {
+				if !strings.Contains(got.Detail, s) {
+					t.Errorf("warning detail should mention %q, got: %s", s, got.Detail)
+				}
+			}
+		})
+	}
+}
+
+// TestDoctorADCEnvUsesVersionCheckVersion: Doctor hands checkADCEnv the process
+// environment and the version checkAgyVersion parsed, without a second probe.
+// agy 1.4.6 passes the version floor, so the version check primes the cache and
+// the model listing does not probe again; the ADC check then warns about 1.4.6
+// from the value the version check already parsed.
+func TestDoctorADCEnvUsesVersionCheckVersion(t *testing.T) {
+	t.Setenv(envADCAuth, "1")
+	t.Setenv(envUseADC, "")
+	m := New(config.Config{AgyPath: "/nonexistent/agy", StateDir: t.TempDir(), MaxConcurrency: 4})
+	var probes atomic.Int32
+	m.readAgyVersion = func(context.Context, string) (string, error) {
+		probes.Add(1)
+		return "1.4.6", nil
+	}
+
+	report := m.Doctor(t.Context())
+
+	adc := findCheck(t, report, checkADCEnvName)
+	if adc.Status != CheckWarn || !strings.Contains(adc.Detail, "1.4.6") {
+		t.Fatalf("ADC check = %v (%s), want a WARN naming 1.4.6", adc.Status, adc.Detail)
+	}
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("agy --version probed %d times in one Doctor run, want 1", n)
+	}
+}
+
+// TestDoctorADCEnvSkipsVersionCaveatWhenVersionCheckFails: whenever the version
+// check FAILs (the binary does not resolve, the probe errors, its output has no
+// version, or the version is below the floor), the ADC check must not warn about
+// 1.4.7 from a zero-value or below-floor version. It still runs and says the
+// version is unknown.
+func TestDoctorADCEnvSkipsVersionCaveatWhenVersionCheckFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		noAgy   bool
+		raw     string
+		probeEr error
+		branch  string // text only that version-check branch's detail carries, so a row cannot drift onto another branch
+	}{
+		{"binary not resolved", true, "", nil, "agy binary not resolved"},
+		{"probe errors", false, "", errors.New("stub probe error"), "stub probe error"},
+		{"output has no version", false, "not a version", nil, "cannot parse version"},
+		{"below the floor", false, "1.1.7", nil, "is below the required"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envADCAuth, "1")
+			t.Setenv(envUseADC, "")
+			cfg := config.Config{AgyPath: "/nonexistent/agy", StateDir: t.TempDir(), MaxConcurrency: 4}
+			if tc.noAgy {
+				noAgyOnPath(t)
+				cfg.AgyPath = ""
+			}
+			m := New(cfg)
+			m.readAgyVersion = func(context.Context, string) (string, error) {
+				return tc.raw, tc.probeEr
+			}
+
+			report := m.Doctor(t.Context())
+
+			if ver := findCheck(t, report, checkAgyVersionName); ver.Status != CheckFail || !strings.Contains(ver.Detail, tc.branch) {
+				t.Fatalf("version check = %v (%s), want FAIL containing %q", ver.Status, ver.Detail, tc.branch)
+			}
+			adc := findCheck(t, report, checkADCEnvName)
+			if adc.Status != CheckPass || !strings.Contains(adc.Detail, "unknown") {
+				t.Fatalf("ADC check = %v (%s), want PASS saying the version is unknown", adc.Status, adc.Detail)
+			}
+		})
+	}
+}
+
+// TestCheckADCEnvDetailNeverEchoesValues: USE_ADC and AGY_ADC_AUTH are read from
+// the operator's shell and can hold anything, so no branch's detail may repeat a
+// value. One row per branch; AGY_ADC_AUTH is "true" on the branches that need it
+// on, a value that those details do not otherwise contain (unlike "1", which
+// appears inside version numbers).
+func TestCheckADCEnvDetailNeverEchoesValues(t *testing.T) {
+	const useADC, authOff = "s3cret-use-adc", "s3cret-auth-off"
+	v := func(minor int) agyver.Version { return agyver.Version{Major: 1, Minor: minor, Patch: 0} }
+	tests := []struct {
+		name   string
+		env    map[string]string
+		ver    agyver.Version
+		known  bool
+		branch string // text only that branch's detail carries, so a row cannot drift onto another branch
+	}{
+		{"USE_ADC without ADC on", map[string]string{envUseADC: useADC, envADCAuth: authOff}, v(4), true, "does not read it"},
+		{"ADC off", map[string]string{envADCAuth: authOff}, v(4), true, "normal sign-in"},
+		{"on, version unknown", map[string]string{envUseADC: useADC, envADCAuth: "true"}, v(4), false, "version is unknown"},
+		{"on, below the fix", map[string]string{envUseADC: useADC, envADCAuth: "true"}, v(4), true, "may not take effect"},
+		{"on, with the fix", map[string]string{envUseADC: useADC, envADCAuth: "true"}, v(5), true, "includes the"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkADCEnv(func(k string) string { return tc.env[k] }, tc.ver, tc.known)
+			if !strings.Contains(got.Detail, tc.branch) {
+				t.Fatalf("row reached the wrong branch, detail lacks %q: %s", tc.branch, got.Detail)
+			}
+			for k, val := range tc.env {
+				if strings.Contains(got.Detail, val) {
+					t.Errorf("detail repeats the %s value %q: %s", k, val, got.Detail)
+				}
+			}
+		})
 	}
 }
 
