@@ -58,6 +58,10 @@ type Usage struct {
 // Init is the payload of the init event. Its arrival is what makes a run's
 // conversation id known long before the run finishes.
 //
+// Model is the pre-execution model field agy emits from its printmode.Options
+// before running the turn; it is not post-generation proof of which backend
+// model executed.
+//
 // agy also puts its full tool list on this event. There is deliberately no field
 // for it, because it is the one part of this payload whose cost scales: a string
 // per tool, on every run, for a value nothing reads. A key with no field is
@@ -65,6 +69,7 @@ type Usage struct {
 // the scan. Cwd and PermissionMode are unread too and stay anyway, being two
 // fixed strings that record what the event carries.
 type Init struct {
+	Model          string `json:"model,omitempty"`
 	Cwd            string `json:"cwd,omitempty"`
 	PermissionMode string `json:"permission_mode,omitempty"`
 }

@@ -101,6 +101,9 @@ func ResultPath(dir string) string   { return filepath.Join(dir, ResultFile) }
 // atomic rewrite sufficient on its own.
 type Progress struct {
 	ConversationID string `json:"conversation_id,omitempty"`
+	// InitModel is the model string agy emitted on its pre-execution stream-json
+	// init event (init.model). Empty when agy omitted it or exited before init.
+	InitModel string `json:"init_model,omitempty"`
 	// StepIndex is the index of the step the run is on. No PRODUCTION code reads it
 	// back off disk: the manager reports StepType, not the index. It is kept
 	// because the supervisor compares it against each incoming event to decide

@@ -67,6 +67,13 @@ const (
 	ReasonUnknown           = "unknown" // a failure that fits none of the above (e.g. the output could not be read)
 )
 
+// Model provenance sources reported in Status.SelectedModelSource and
+// Status.EffectiveModelSource.
+const (
+	ModelSourceUnknown = "unknown"
+	ModelSourceCLIInit = "cli_init"
+)
+
 // Status is the observable state of a job.
 type Status struct {
 	State   string // running | done | failed | cancelled
@@ -98,11 +105,31 @@ type Status struct {
 	// parse out.
 	FailureReason  string
 	ConversationID string
-	// Model is the model id agy-mcp resolved for this run and persisted to meta:
-	// the request's model, or AGY_MCP_DEFAULT_MODEL when none was given, reduced to
-	// the id column (see modelID). Empty when neither was set, meaning the server
-	// pinned no model and agy ran on its own default (which this build cannot name).
+	// Model is the legacy model id agy-mcp resolved for this run and persisted to
+	// meta: the request's model, or AGY_MCP_DEFAULT_MODEL when none was given,
+	// reduced to the id column (see modelID). Empty when neither was set, meaning
+	// the server pinned no model and agy ran on its own default. It reflects only
+	// the normalized CLI --model argument, not proof of which backend model executed.
 	Model string
+	// RequestedModel is the normalized model id requested for this run (from the
+	// request or AGY_MCP_DEFAULT_MODEL) and passed to agy via --model; empty when
+	// no model was pinned.
+	RequestedModel string
+	// SelectedModel is the model string agy reported in its pre-execution
+	// stream-json init event (from printmode.Options.Model before generation).
+	// Empty when agy did not emit init.model. Because it is emitted before the
+	// turn runs, it is not post-generation proof of actual provider execution.
+	SelectedModel string
+	// SelectedModelSource names the provenance of SelectedModel when present
+	// (ModelSourceCLIInit).
+	SelectedModelSource string
+	// EffectiveModel is the authoritative model that actually executed the turn,
+	// or nil when the CLI stream provides no post-generation execution model
+	// metadata (always nil for current agy stream-json output).
+	EffectiveModel *string
+	// EffectiveModelSource names the provenance of EffectiveModel
+	// (ModelSourceUnknown when EffectiveModel is nil).
+	EffectiveModelSource string
 	// Partial marks a Result this build cannot vouch for as the complete final
 	// answer. It follows from where the text came from, not from State:
 	//
@@ -149,9 +176,12 @@ func (m *Manager) Status(id string) (Status, error) {
 		return Status{}, err
 	}
 	st := Status{
-		Elapsed:        time.Since(meta.StartedAt),
-		ConversationID: meta.ConversationID,
-		Model:          meta.Model,
+		Elapsed:              time.Since(meta.StartedAt),
+		ConversationID:       meta.ConversationID,
+		Model:                meta.Model,
+		RequestedModel:       meta.Model,
+		EffectiveModel:       nil,
+		EffectiveModelSource: ModelSourceUnknown,
 	}
 	// The progress file is what makes a running job's conversation id readable:
 	// the supervisor records it as soon as agy's init event names the
@@ -161,11 +191,15 @@ func (m *Manager) Status(id string) (Status, error) {
 	// The file's presence proves only that a supervisor started the job, not
 	// that agy has spoken: it is created empty before agy is even exec'd (see
 	// markStreamJSON, which is why streamJSONRun can read it as a marker). So
-	// both fields below are still absent until the stream supplies them, and
-	// neither may be read as "the run has begun reporting".
+	// the fields below are still absent until the stream supplies them, and
+	// none may be read as "the run has begun reporting".
 	if prog, ok := jobstore.ReadProgressDir(dir); ok {
 		if st.ConversationID == "" {
 			st.ConversationID = prog.ConversationID
+		}
+		if prog.InitModel != "" {
+			st.SelectedModel = prog.InitModel
+			st.SelectedModelSource = ModelSourceCLIInit
 		}
 		st.StepType = prog.StepType
 	}

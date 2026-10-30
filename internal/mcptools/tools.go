@@ -32,7 +32,7 @@ type runInput struct {
 	Cwd            string   `json:"cwd,omitempty" jsonschema:"absolute path of the directory the agent runs in and may edit files under; also scopes continue_latest. Fresh runs sharing a cwd run concurrently. A relative path is resolved against the server's working directory, which is not necessarily yours, so pass an absolute one. Symlinks are resolved. Defaults to the server's own working directory. Unless project_rules is false, cwd is also passed to agy as a workspace (--add-dir); see project_rules for when that changes which rule files apply"`
 	Timeout        string   `json:"timeout,omitempty" jsonschema:"max wall-clock duration for the whole run (Go duration, e.g. 20m); a value over 24h is rejected. On expiry the job normally ends in state failed with failure_reason timeout. Usually agy-mcp kills the agy process tree mid-run; on agy 1.1.28 and later, if agy's own --print-timeout fires first, agy stops the turn itself and any text it had comes back as a partial result (on older agy that expiry is reported as agy_error). The kill is hard: any answer already streamed is offered back as a partial result, but work still in the model's reasoning or a tool call has produced no recoverable text yet, so a run killed before it streams its answer recovers nothing. To carry on, start a fresh agy_run with this run's conversation_id so the thread continues without restating the task; the killed turn's own reasoning is not recoverable. Omit to use the server's default"`
 	JSONSchema     string   `json:"json_schema,omitempty" jsonschema:"optional JSON Schema to enforce on the run's structured result: pass either an inline schema string or a path to a schema file, and agy constrains the final result to it (in stream-json mode the schema applies to the terminal result event). Omit for an unconstrained free-text result. Useful when the result is consumed programmatically, e.g. extraction, classification, or structured summaries"`
-	Priority       string   `json:"priority,omitempty" jsonschema:"normal (default) or optional. optional marks work that may be skipped, such as a peer review, a second opinion or a rubber-duck pass: when the run's model belongs to a quota group at low, critical or exhausted per agy_usage, the run is refused before any job starts, as a tool error naming the group, level, remaining percent and reset time, and the right response is to report the skip rather than retry. Quota that cannot be read, a stale reading, an omitted model with no server default, or a model outside a known group never refuses; normal always runs. Not forwarded to agy, and not part of idempotency_key matching: a retry whose key already names a job returns that job whatever the priority"`
+	Priority       string   `json:"priority,omitempty" jsonschema:"normal (default) or optional. optional marks work that may be skipped, such as a peer review, a second opinion or a rubber-duck pass: when the run's model belongs to a quota group at low, critical or exhausted per agy_usage, the run is refused before any job starts, as a tool error naming the group, level, remaining percent and reset time, and the right response is to report the skip rather than retry. When a trusted reading is present, optional also refuses/defers when the model's quota group mapping cannot be established (an omitted model with no server default, an unknown model, or an ambiguous/missing group in /usage); quota that cannot be read or a stale reading never refuses, and normal always runs. Not forwarded to agy, and not part of idempotency_key matching: a retry whose key already names a job returns that job whatever the priority"`
 	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional retry token for agy-mcp job creation. Reusing the same key with the same normalized run request returns the existing job instead of starting another; reusing it with a different request is rejected. Keys are remembered while the job remains in the job store (24h by default). Use this when a transport failure could leave it ambiguous whether a run already started"`
 }
 
@@ -223,9 +223,17 @@ type statusOutput struct {
 	// is given even without a conversation to continue: wait for the reset instead.
 	Recovery       string `json:"recovery,omitempty" jsonschema:"how to recover a run that ended with no result text: present only on a terminal failed or cancelled job that produced no text. Usually the job also has a conversation_id and the advice is to start a fresh agy_run with it to continue the thread without restating the task (the killed turn's own reasoning is not recoverable). Another exception, the other way, is a failure_reason of quota_exhausted, which is transient: the advice is to wait for the reset carried in error and then retry, and it is given even when no conversation_id was named. A background_aborted failure gets no recovery note, since simply carrying on with the same task would launch the same background command again; its error says to re-run with the verification in the foreground instead. Absent whenever any result, even a partial one, was recovered"`
 	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation this run belongs to; pass it back as conversation_id to continue the thread. Empty until agy names a fresh run's conversation, which takes about a second, so agy_status, agy_wait and agy_run_sync all report none when asked inside that window; ask again once the run is under way"`
-	// Model echoes the resolved model so a caller can see which one actually ran;
-	// see manager.Status.Model.
-	Model string `json:"model,omitempty" jsonschema:"the model id agy-mcp resolved for this run and passed to agy: the model you set, or AGY_MCP_DEFAULT_MODEL, reduced to the id column. Absent when the server pinned no model and agy ran on its own default"`
+	// Model echoes the legacy requested/normalized CLI --model argument; see
+	// manager.Status.Model.
+	Model string `json:"model,omitempty" jsonschema:"legacy alias for requested_model: the model id agy-mcp resolved for this run and passed to agy via --model (the model you set, or AGY_MCP_DEFAULT_MODEL, reduced to the id column). Absent when the server pinned no model and agy ran on its own default. Reflects only the CLI flag passed to agy, not post-generation proof of which backend model executed"`
+	// RequestedModel, SelectedModel, and EffectiveModel separate the requested
+	// CLI flag, pre-execution CLI init selection, and post-generation effective
+	// execution model.
+	RequestedModel       string  `json:"requested_model,omitempty" jsonschema:"normalized model id requested for this run (from the request or AGY_MCP_DEFAULT_MODEL) and passed to agy via --model; absent when no model was pinned"`
+	SelectedModel        string  `json:"selected_model,omitempty" jsonschema:"model string agy reported in its pre-execution stream-json init event (from CLI options before generation); absent when agy did not emit init.model. Because init is emitted before the turn runs, this is pre-execution selection metadata, not proof of actual backend execution"`
+	SelectedModelSource  string  `json:"selected_model_source,omitempty" jsonschema:"provenance of selected_model when present: cli_init"`
+	EffectiveModel       *string `json:"effective_model" jsonschema:"authoritative model that actually executed the turn, or null when the CLI stream provides no post-generation execution model metadata"`
+	EffectiveModelSource string  `json:"effective_model_source,omitempty" jsonschema:"provenance of effective_model: unknown when effective_model is null"`
 	// Partial marks a result that is not a verified final answer; see
 	// manager.Status.Partial.
 	Partial bool `json:"partial,omitempty" jsonschema:"true when result is not the verified final answer, so treat it as incomplete. It follows from provenance: streamed fallback text is partial; a non-schema SUCCESS response is complete; for a json_schema run only SUCCESS structured_output is complete, while response retained because structured_output is missing is diagnostic and partial. An authoritative result stays complete even if the process is then cancelled or killed, with two exceptions that make even an authoritative SUCCESS result partial: a clean exit (or a job recovered from agy's result after its supervisor died) whose stderr shows agy ended the run early (it killed outstanding background tasks, or its own --print-timeout expired mid-turn), and a timed-out run whose stderr shows agy's own --print-timeout had already expired"`
@@ -254,17 +262,30 @@ type usageOutput struct {
 // toStatusOutput converts a manager status into its wire shape, shared by
 // agy_status, agy_run_sync and agy_wait so they cannot drift.
 func toStatusOutput(st manager.Status) statusOutput {
+	effectiveSource := st.EffectiveModelSource
+	if st.EffectiveModel == nil && effectiveSource == "" {
+		effectiveSource = manager.ModelSourceUnknown
+	}
+	selectedSource := st.SelectedModelSource
+	if st.SelectedModel != "" && selectedSource == "" {
+		selectedSource = manager.ModelSourceCLIInit
+	}
 	out := statusOutput{
-		State:          st.State,
-		Elapsed:        st.Elapsed.Round(time.Second).String(),
-		Result:         st.Result,
-		Error:          st.Error,
-		FailureReason:  st.FailureReason,
-		ConversationID: st.ConversationID,
-		Model:          st.Model,
-		Partial:        st.Partial,
-		NumTurns:       st.NumTurns,
-		StepType:       st.StepType,
+		State:                st.State,
+		Elapsed:              st.Elapsed.Round(time.Second).String(),
+		Result:               st.Result,
+		Error:                st.Error,
+		FailureReason:        st.FailureReason,
+		ConversationID:       st.ConversationID,
+		Model:                st.Model,
+		RequestedModel:       st.RequestedModel,
+		SelectedModel:        st.SelectedModel,
+		SelectedModelSource:  selectedSource,
+		EffectiveModel:       st.EffectiveModel,
+		EffectiveModelSource: effectiveSource,
+		Partial:              st.Partial,
+		NumTurns:             st.NumTurns,
+		StepType:             st.StepType,
 	}
 	if u := st.Usage; u != nil {
 		out.Usage = &usageOutput{

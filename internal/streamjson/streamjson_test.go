@@ -80,6 +80,17 @@ func TestReadsRealCapture(t *testing.T) {
 	}
 }
 
+func TestReadsInitModelWhenPresent(t *testing.T) {
+	in := `{"event":"init","conversation_id":"c-1","init":{"model":"gemini-4-argon-medium","cwd":"/tmp/x","permission_mode":"agent"}}` + "\n"
+	evs := readAll(t, NewReader(strings.NewReader(in)))
+	if len(evs) != 1 || evs[0].Init == nil {
+		t.Fatalf("events = %+v", evs)
+	}
+	if evs[0].Init.Model != "gemini-4-argon-medium" {
+		t.Fatalf("init.model = %q, want %q", evs[0].Init.Model, "gemini-4-argon-medium")
+	}
+}
+
 func TestResultPreservesStructuredOutputShapes(t *testing.T) {
 	for _, raw := range []string{
 		`{"business":"ok"}`,

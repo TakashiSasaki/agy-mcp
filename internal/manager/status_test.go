@@ -1592,6 +1592,212 @@ func TestStatusEchoesResolvedModel(t *testing.T) {
 			if st.Model != tc.want {
 				t.Errorf("st.Model = %q, want %q (state %q)", st.Model, tc.want, st.State)
 			}
+			if st.RequestedModel != tc.want {
+				t.Errorf("st.RequestedModel = %q, want %q (state %q)", st.RequestedModel, tc.want, st.State)
+			}
+			if st.EffectiveModel != nil {
+				t.Errorf("st.EffectiveModel = %v, want nil", *st.EffectiveModel)
+			}
+			if st.EffectiveModelSource != ModelSourceUnknown {
+				t.Errorf("st.EffectiveModelSource = %q, want %q", st.EffectiveModelSource, ModelSourceUnknown)
+			}
 		})
 	}
+}
+
+// TestStatusModelProvenanceAndReadback verifies:
+//   - explicit, default (AGY_MCP_DEFAULT_MODEL), and omitted model requests;
+//   - pre-execution init.model selection (selected_model / cli_init) stays
+//     distinct from post-generation execution (effective_model: nil,
+//     effective_model_source: "unknown");
+//   - saved job readback across running, done, partial, and failed states;
+//   - terminal ERROR result preservation (a result payload with status ERROR
+//     stays StateFailed with its error message and partial text intact, while
+//     reporting honest model provenance).
+func TestStatusModelProvenanceAndReadback(t *testing.T) {
+	boot := readBootID()
+
+	t.Run("request normalization covers explicit, default, and omitted models", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			defaultModel string
+			reqModel     string
+			wantResolved string
+		}{
+			{
+				name:         "explicit model tab row normalizes to ID and overrides default",
+				defaultModel: "gemini-3-flash",
+				reqModel:     "gemini-4-argon-medium\tArgon Medium",
+				wantResolved: "gemini-4-argon-medium",
+			},
+			{
+				name:         "omitted request model falls back to AGY_MCP_DEFAULT_MODEL",
+				defaultModel: "gemini-3.1-pro-high\tGemini 3.1 Pro (High)",
+				reqModel:     "",
+				wantResolved: "gemini-3.1-pro-high",
+			},
+			{
+				name:         "omitted request and empty default leaves model unpinned",
+				defaultModel: "",
+				reqModel:     "",
+				wantResolved: "",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				m := newManager(t, managerOpts{})
+				m.cfg.DefaultModel = tc.defaultModel
+				norm, err := m.normalizeRequest(StartRequest{
+					Prompt: "test",
+					Model:  tc.reqModel,
+					Cwd:    t.TempDir(),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if norm.Model != tc.wantResolved {
+					t.Fatalf("normalizeRequest(%q) with default %q = %q, want %q", tc.reqModel, tc.defaultModel, norm.Model, tc.wantResolved)
+				}
+				dir, err := m.store.Create(jobstore.Meta{
+					ID:        "j",
+					StartedAt: time.Now(),
+					PID:       0,
+					BootID:    boot,
+					Model:     norm.Model,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeResultPayload(t, dir, streamjson.Result{Status: streamjson.StatusSuccess, Response: "ok"})
+				_ = m.store.WriteExitCode("j", 0)
+
+				st, err := m.Status("j")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if st.Model != tc.wantResolved || st.RequestedModel != tc.wantResolved {
+					t.Fatalf("Model=%q RequestedModel=%q, want %q", st.Model, st.RequestedModel, tc.wantResolved)
+				}
+				if st.SelectedModel != "" || st.SelectedModelSource != "" {
+					t.Fatalf("SelectedModel=%q SelectedModelSource=%q, want empty when init.model was not emitted", st.SelectedModel, st.SelectedModelSource)
+				}
+				if st.EffectiveModel != nil || st.EffectiveModelSource != ModelSourceUnknown {
+					t.Fatalf("EffectiveModel=%v EffectiveModelSource=%q, want nil and %q", st.EffectiveModel, st.EffectiveModelSource, ModelSourceUnknown)
+				}
+			})
+		}
+	})
+
+	t.Run("saved job readback keeps init selection distinct from effective execution", func(t *testing.T) {
+		m := newManager(t, managerOpts{})
+		dir, err := m.store.Create(jobstore.Meta{
+			ID:             "j-saved",
+			ConversationID: "ef678d02-9a14-4d0e-942c-60153d5bd4cb",
+			StartedAt:      time.Now().Add(-10 * time.Second),
+			PID:            0,
+			BootID:         boot,
+			Model:          "gemini-4-argon-medium",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := jobstore.WriteProgressDir(dir, jobstore.Progress{
+			ConversationID: "ef678d02-9a14-4d0e-942c-60153d5bd4cb",
+			InitModel:      "gemini-4-argon-medium",
+			StepIndex:      5,
+			StepType:       streamjson.StepTypeAgentResponse,
+			UpdatedAt:      time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		writeResultPayload(t, dir, streamjson.Result{
+			ConversationID: "ef678d02-9a14-4d0e-942c-60153d5bd4cb",
+			Status:         streamjson.StatusSuccess,
+			Response:       "final answer",
+			NumTurns:       1,
+		})
+		_ = m.store.WriteExitCode("j-saved", 0)
+
+		st, err := m.Status("j-saved")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.State != StateDone || st.Result != "final answer" || st.Partial {
+			t.Fatalf("status = %+v, want clean done result", st)
+		}
+		if st.Model != "gemini-4-argon-medium" || st.RequestedModel != "gemini-4-argon-medium" {
+			t.Fatalf("Model=%q RequestedModel=%q, want gemini-4-argon-medium", st.Model, st.RequestedModel)
+		}
+		if st.SelectedModel != "gemini-4-argon-medium" || st.SelectedModelSource != ModelSourceCLIInit {
+			t.Fatalf("SelectedModel=%q SelectedModelSource=%q, want gemini-4-argon-medium / %q", st.SelectedModel, st.SelectedModelSource, ModelSourceCLIInit)
+		}
+		if st.EffectiveModel != nil || st.EffectiveModelSource != ModelSourceUnknown {
+			t.Fatalf("EffectiveModel=%v EffectiveModelSource=%q, want nil / %q (init.model is pre-execution, not effective execution evidence)", st.EffectiveModel, st.EffectiveModelSource, ModelSourceUnknown)
+		}
+	})
+
+	t.Run("terminal ERROR result with response text stays failed and preserves model provenance", func(t *testing.T) {
+		m := newManager(t, managerOpts{})
+		dir, err := m.store.Create(jobstore.Meta{
+			ID:             "j-err",
+			ConversationID: "ef678d02-9a14-4d0e-942c-60153d5bd4cb",
+			StartedAt:      time.Now().Add(-30 * time.Second),
+			PID:            0,
+			BootID:         boot,
+			Model:          "gemini-4-argon-medium",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := jobstore.WriteProgressDir(dir, jobstore.Progress{
+			ConversationID: "ef678d02-9a14-4d0e-942c-60153d5bd4cb",
+			InitModel:      "gemini-4-argon-medium",
+			StepIndex:      51,
+			StepType:       streamjson.StepTypeAgentResponse,
+			UpdatedAt:      time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		const errMsg = "Model quota reached and Google One AI credits are disabled. Either enable credits or wait for quota reset at 2026-10-29 14:27:25 UTC."
+		writeResultPayload(t, dir, streamjson.Result{
+			ConversationID: "ef678d02-9a14-4d0e-942c-60153d5bd4cb",
+			Status:         streamjson.StatusError,
+			Response:       "recovered response body",
+			Error:          errMsg,
+			NumTurns:       2,
+		})
+		_ = m.store.WriteExitCode("j-err", 0)
+
+		st, err := m.Status("j-err")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.State != StateFailed {
+			t.Fatalf("st.State = %q, want %q (terminal ERROR must not be rewritten to success)", st.State, StateFailed)
+		}
+		if st.FailureReason != ReasonQuotaExhausted {
+			t.Fatalf("st.FailureReason = %q, want %q", st.FailureReason, ReasonQuotaExhausted)
+		}
+		if st.Error != errMsg {
+			t.Fatalf("st.Error = %q, want %q", st.Error, errMsg)
+		}
+		if st.Result != "recovered response body" || !st.Partial {
+			t.Fatalf("st.Result=%q st.Partial=%v, want recovered partial response", st.Result, st.Partial)
+		}
+		if st.Model != "gemini-4-argon-medium" || st.RequestedModel != "gemini-4-argon-medium" {
+			t.Fatalf("Model=%q RequestedModel=%q, want gemini-4-argon-medium", st.Model, st.RequestedModel)
+		}
+		if st.SelectedModel != "gemini-4-argon-medium" || st.SelectedModelSource != ModelSourceCLIInit {
+			t.Fatalf("SelectedModel=%q SelectedModelSource=%q, want gemini-4-argon-medium / %q", st.SelectedModel, st.SelectedModelSource, ModelSourceCLIInit)
+		}
+		if st.EffectiveModel != nil || st.EffectiveModelSource != ModelSourceUnknown {
+			t.Fatalf("EffectiveModel=%v EffectiveModelSource=%q, want nil / %q", st.EffectiveModel, st.EffectiveModelSource, ModelSourceUnknown)
+		}
+	})
+
+	t.Run("missing job returns error without fabricating status", func(t *testing.T) {
+		m := newManager(t, managerOpts{})
+		if _, err := m.Status("does-not-exist"); err == nil {
+			t.Fatal("Status on missing job must return an error")
+		}
+	})
 }

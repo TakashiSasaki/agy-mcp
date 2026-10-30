@@ -62,6 +62,11 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 			changed = true
 		}
 		switch ev.Kind {
+		case streamjson.EventInit:
+			if ev.Init != nil && ev.Init.Model != "" && ev.Init.Model != prog.InitModel {
+				prog.InitModel = ev.Init.Model
+				changed = true
+			}
 		case streamjson.EventStepUpdate:
 			if su := ev.StepUpdate; su != nil {
 				// Only rewrite when something a reader can observe actually moved.

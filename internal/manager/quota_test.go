@@ -179,28 +179,130 @@ func TestGroupQuotaBindingBucket(t *testing.T) {
 }
 
 func TestGroupForModel(t *testing.T) {
-	groups := []QuotaGroup{{Name: "Gemini Models"}, {Name: "Claude and GPT Models"}}
+	twoGroups := []QuotaGroup{{Name: "Gemini Models"}, {Name: "Claude and GPT Models"}}
+	threeGroups1410 := []QuotaGroup{
+		{
+			Name:        "Gemini Models",
+			Description: "Models within this group: Gemini Flash, Gemini Pro",
+			Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly"}},
+		},
+		{
+			Name:        "Claude and GPT models",
+			Description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+			Buckets:     []QuotaBucket{{ID: "3p-weekly", Name: "Weekly Limit Remaining", Window: "weekly"}},
+		},
+		{
+			Name:        "Gemini 4 Argon",
+			Description: "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+			Buckets:     []QuotaBucket{{ID: "gemini-argon-wtu-weekly", Name: "Gemini 4 Argon Weekly Limit", Window: "weekly"}},
+		},
+	}
+	versionedProOnProPlans := []QuotaGroup{
+		{
+			Name:        "Gemini Models",
+			Description: "Models within this group: Gemini 3.8 Flash, Gemini 3.1 Pro on Pro plans",
+			Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly"}},
+		},
+		{
+			Name:        "Gemini 4 Argon",
+			Description: "For paid Pro subscribers and Pro membership users on Pro plans, Argon quota is separate.",
+			Buckets:     []QuotaBucket{{ID: "gemini-argon-wtu-weekly", Name: "Gemini 4 Argon Weekly Limit", Window: "weekly"}},
+		},
+	}
+	subscriptionOnlyNoProModel := []QuotaGroup{
+		{
+			Name:        "Gemini Flash",
+			Description: "Models within this group: Gemini 3.8 Flash (included with Pro subscription, Pro membership, and Pro plans)",
+			Buckets:     []QuotaBucket{{ID: "gemini-flash-weekly", Name: "Weekly Limit Remaining", Window: "weekly"}},
+		},
+		{
+			Name:        "Gemini 4 Argon",
+			Description: "For paid Pro subscribers, Pro users, and Pro plans, Argon quota is separate.",
+			Buckets:     []QuotaBucket{{ID: "gemini-argon-wtu-weekly", Name: "Gemini 4 Argon Weekly Limit", Window: "weekly"}},
+		},
+	}
+	ultraPlanDescriptiveTextNoArgonGroup := []QuotaGroup{
+		{
+			Name:        "Gemini Models",
+			Description: "Models within this group: Gemini Flash, Gemini Pro. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+			Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly"}},
+		},
+		{
+			Name:        "Claude and GPT models",
+			Description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+			Buckets:     []QuotaBucket{{ID: "3p-weekly", Name: "Weekly Limit Remaining", Window: "weekly"}},
+		},
+	}
 	tests := []struct {
-		model  string
-		groups []QuotaGroup
-		want   int
-		ok     bool
+		name       string
+		model      string
+		groups     []QuotaGroup
+		want       int
+		ok         bool
+		wantStatus QuotaMatchStatus
 	}{
-		{"gemini-3.8-flash-high", groups, 0, true},
-		{"Gemini 3.8 Flash (High)", groups, 0, true},
-		{"claude-opus-4-6-thinking", groups, 0, false},
-		{"flash", groups, 0, false},
-		{"pro", groups, 0, false},
-		{"", groups, 0, false},
-		{"gemini-3.8-flash-high", []QuotaGroup{{Name: "Gemini A"}, {Name: "Gemini B"}}, 0, false},
-		{"gemini-3.8-flash-high", []QuotaGroup{{Name: "Claude"}}, 0, false},
-		{"gemini-3.8-flash-high", nil, 0, false},
+		// Single unified Gemini group + Claude/GPT group (agy 1.2.16 shape)
+		{"2g flash id", "gemini-3.8-flash-high", twoGroups, 0, true, QuotaMatchExact},
+		{"2g flash label", "Gemini 3.8 Flash (High)", twoGroups, 0, true, QuotaMatchExact},
+		{"2g pro id", "gemini-3.1-pro-high", twoGroups, 0, true, QuotaMatchExact},
+		{"2g argon missing group is unknown", "gemini-4-argon-medium", twoGroups, 0, false, QuotaMatchUnknown},
+		{"2g claude opus", "claude-opus-4-6-thinking", twoGroups, 1, true, QuotaMatchExact},
+		{"2g claude sonnet", "claude-sonnet-5-5-low", twoGroups, 1, true, QuotaMatchExact},
+		{"2g claude label", "Claude Sonnet 5.5 (Low)", twoGroups, 1, true, QuotaMatchExact},
+		{"2g gpt oss id", "gpt-oss-120b-medium", twoGroups, 1, true, QuotaMatchExact},
+		{"2g gpt oss label", "GPT-OSS 120B (Medium)", twoGroups, 1, true, QuotaMatchExact},
+		{"2g unknown claude-x remains unknown", "claude-x", twoGroups, 0, false, QuotaMatchUnknown},
+		{"2g unknown gpt-x remains unknown", "gpt-x", twoGroups, 0, false, QuotaMatchUnknown},
+		{"2g unknown gemini-x remains unknown", "gemini-x", twoGroups, 0, false, QuotaMatchUnknown},
+
+		// Separate Gemini Flash/Pro vs Gemini 4 Argon vs Claude/GPT (agy 1.4.10 shape)
+		{"3g flash high", "gemini-3.8-flash-high", threeGroups1410, 0, true, QuotaMatchExact},
+		{"3g flash tab row", "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)", threeGroups1410, 0, true, QuotaMatchExact},
+		{"3g flash label", "Gemini 3.8 Flash (Low)", threeGroups1410, 0, true, QuotaMatchExact},
+		{"3g pro high", "gemini-3.1-pro-high", threeGroups1410, 0, true, QuotaMatchExact},
+		{"3g pro label", "Gemini 3.1 Pro (High)", threeGroups1410, 0, true, QuotaMatchExact},
+		{"3g argon medium", "gemini-4-argon-medium", threeGroups1410, 2, true, QuotaMatchExact},
+		{"3g argon tab row", "gemini-4-argon-high\tGemini 4 Argon (High)", threeGroups1410, 2, true, QuotaMatchExact},
+		{"3g argon label", "Gemini 4 Argon (Low)", threeGroups1410, 2, true, QuotaMatchExact},
+		{"3g claude opus", "claude-opus-5-5-low", threeGroups1410, 1, true, QuotaMatchExact},
+		{"3g claude sonnet", "claude-sonnet-5-5-medium", threeGroups1410, 1, true, QuotaMatchExact},
+		{"3g gpt oss", "gpt-oss-120b-medium", threeGroups1410, 1, true, QuotaMatchExact},
+
+		// Versioned Pro on Pro plans and subscription-only wording
+		{"versioned Pro on Pro plans matches Pro group", "gemini-3.1-pro-high", versionedProOnProPlans, 0, true, QuotaMatchExact},
+		{"versioned Pro label on Pro plans matches Pro group", "Gemini 3.1 Pro (High)", versionedProOnProPlans, 0, true, QuotaMatchExact},
+		{"subscription-only Pro wording never matches Gemini Pro", "gemini-3.1-pro-high", subscriptionOnlyNoProModel, 0, false, QuotaMatchUnknown},
+		{"subscription-only Pro wording still matches Flash", "gemini-3.8-flash-high", subscriptionOnlyNoProModel, 0, true, QuotaMatchExact},
+		{"subscription-only Pro wording still matches Argon via bucket/name", "gemini-4-argon-medium", subscriptionOnlyNoProModel, 1, true, QuotaMatchExact},
+
+		// Descriptive Ultra plan text never infers Argon -> Gemini Models
+		{"descriptive Ultra plan text does not map Argon when Argon group missing", "gemini-4-argon-medium", ultraPlanDescriptiveTextNoArgonGroup, 0, false, QuotaMatchUnknown},
+		{"descriptive Ultra plan text still maps Flash", "gemini-3.8-flash-high", ultraPlanDescriptiveTextNoArgonGroup, 0, true, QuotaMatchExact},
+		{"descriptive Ultra plan text still maps Pro", "gemini-3.1-pro-high", ultraPlanDescriptiveTextNoArgonGroup, 0, true, QuotaMatchExact},
+
+		// Unknown, unpinned, missing-group, and ambiguous cases
+		{"bare flash is unknown", "flash", threeGroups1410, 0, false, QuotaMatchUnknown},
+		{"bare pro is unknown", "pro", threeGroups1410, 0, false, QuotaMatchUnknown},
+		{"unknown custom model", "unknown-custom-model", threeGroups1410, 0, false, QuotaMatchUnknown},
+		{"unknown claude-x", "claude-x", threeGroups1410, 0, false, QuotaMatchUnknown},
+		{"unknown gemini-ultra", "gemini-ultra", threeGroups1410, 0, false, QuotaMatchUnknown},
+		{"empty model is unpinned", "", threeGroups1410, 0, false, QuotaMatchUnpinned},
+		{"missing Argon group in 3g[:2]", "gemini-4-argon-medium", threeGroups1410[:2], 0, false, QuotaMatchUnknown},
+		{"missing Claude/GPT group", "claude-sonnet-5-5-low", []QuotaGroup{threeGroups1410[0], threeGroups1410[2]}, 0, false, QuotaMatchUnknown},
+		{"ambiguous duplicate Gemini groups", "gemini-3.8-flash-high", []QuotaGroup{{Name: "Gemini A"}, {Name: "Gemini B"}}, 0, false, QuotaMatchAmbiguous},
+		{"ambiguous duplicate Argon groups", "gemini-4-argon-medium", []QuotaGroup{{Name: "Gemini 4 Argon A"}, {Name: "Gemini 4 Argon B"}}, 0, false, QuotaMatchAmbiguous},
+		{"no Gemini group", "gemini-3.8-flash-high", []QuotaGroup{{Name: "Claude"}}, 0, false, QuotaMatchUnknown},
+		{"nil groups", "gemini-3.8-flash-high", nil, 0, false, QuotaMatchUnknown},
 	}
 	for _, tt := range tests {
-		got, ok := groupForModel(tt.groups, tt.model)
-		if ok != tt.ok || (ok && got != tt.want) {
-			t.Errorf("groupForModel(%q) = %d, %v; want %d, %v", tt.model, got, ok, tt.want, tt.ok)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			m := matchQuotaGroup(tt.groups, tt.model)
+			got, status, ok := groupForModel(tt.groups, tt.model)
+			if ok != tt.ok || m.OK != tt.ok || status != tt.wantStatus || m.Status != tt.wantStatus || (ok && (got != tt.want || m.Index != tt.want)) {
+				t.Errorf("groupForModel(%q) = {idx:%d status:%q ok:%v}, want {idx:%d status:%q ok:%v}",
+					tt.model, got, status, ok, tt.want, tt.wantStatus, tt.ok)
+			}
+		})
 	}
 }
 
@@ -215,24 +317,32 @@ func TestQuotaDecision(t *testing.T) {
 	now := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
 	reset := now.Add(time.Hour)
 	const model = "gemini-3.8-flash-high"
+	ambiguousSnap := QuotaSnapshot{CheckedAt: now, Groups: []QuotaGroup{
+		{Name: "Gemini A", Buckets: []QuotaBucket{{ID: "5h", RemainingFraction: 1, ResetTime: reset}}},
+		{Name: "Gemini B", Buckets: []QuotaBucket{{ID: "5h", RemainingFraction: 1, ResetTime: reset}}},
+	}}
 	tests := []struct {
-		name   string
-		snap   QuotaSnapshot
-		model  string
-		refuse bool
+		name       string
+		snap       QuotaSnapshot
+		model      string
+		refuse     bool
+		wantStatus QuotaMatchStatus
 	}{
-		{"ok passes", quotaFixture(now, 0.9, reset), model, false},
-		{"low refuses", quotaFixture(now, 0.2, reset), model, true},
-		{"critical refuses", quotaFixture(now, 0.03, reset), model, true},
-		{"exhausted refuses", quotaFixture(now, 0, reset), model, true},
-		{"unmapped model passes", quotaFixture(now, 0, reset), "claude-x", false},
-		{"empty model passes", quotaFixture(now, 0, reset), "", false},
+		{"ok passes", quotaFixture(now, 0.9, reset), model, false, QuotaMatchExact},
+		{"low refuses", quotaFixture(now, 0.2, reset), model, true, QuotaMatchExact},
+		{"critical refuses", quotaFixture(now, 0.03, reset), model, true, QuotaMatchExact},
+		{"exhausted refuses", quotaFixture(now, 0, reset), model, true, QuotaMatchExact},
+		{"claude ok group passes", quotaFixture(now, 0, reset), "claude-sonnet-5-5-low", false, QuotaMatchExact},
+		{"unmapped model refuses optional", quotaFixture(now, 0.9, reset), "unknown-model-x", true, QuotaMatchUnknown},
+		{"unknown claude-x refuses optional", quotaFixture(now, 0.9, reset), "claude-x", true, QuotaMatchUnknown},
+		{"empty model refuses optional", quotaFixture(now, 0.9, reset), "", true, QuotaMatchUnpinned},
+		{"ambiguous model refuses optional", ambiguousSnap, model, true, QuotaMatchAmbiguous},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			refuse, _ := quotaDecision(tt.snap, now, tt.model, testThresholds)
-			if refuse != tt.refuse {
-				t.Fatalf("refuse = %v, want %v", refuse, tt.refuse)
+			refuse, _, match := quotaDecision(tt.snap, now, tt.model, testThresholds)
+			if refuse != tt.refuse || match.Status != tt.wantStatus {
+				t.Fatalf("refuse = %v (status %q), want %v (status %q)", refuse, match.Status, tt.refuse, tt.wantStatus)
 			}
 		})
 	}
@@ -243,7 +353,7 @@ func TestQuotaDecisionTransitions(t *testing.T) {
 	reset := t0.Add(30 * time.Minute)
 	const model = "gemini-3.8-flash-high"
 	decide := func(s QuotaSnapshot, now time.Time) bool {
-		r, _ := quotaDecision(s, now, model, testThresholds)
+		r, _, _ := quotaDecision(s, now, model, testThresholds)
 		return r
 	}
 	low := quotaFixture(t0, 0.03, reset)
@@ -608,9 +718,326 @@ func TestCheckPriorityRefusalMessage(t *testing.T) {
 	if err := m.checkPriority(StartRequest{Priority: PriorityNormal, Model: "gemini-3.8-flash-high"}); err != nil {
 		t.Fatalf("normal run refused: %v", err)
 	}
-	if err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: "claude-x"}); err != nil {
-		t.Fatalf("optional run on an unmapped model refused: %v", err)
+	if err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: "claude-sonnet-5-5-low"}); err != nil {
+		t.Fatalf("optional run on an OK Claude/GPT group refused: %v", err)
 	}
+
+	// Unknown and unpinned models must refuse/defer optional runs clearly without
+	// claiming quota is exhausted, while still allowing normal runs.
+	unkErr := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: "unknown-model-x"})
+	unkRefusal, ok := errors.AsType[*QuotaRefusalError](unkErr)
+	if !ok || unkRefusal.MatchStatus != QuotaMatchUnknown || unkRefusal.Level != "" {
+		t.Fatalf("unknown optional error = %v (%+v), want QuotaMatchUnknown with empty Level", unkErr, unkRefusal)
+	}
+	if !strings.Contains(unkErr.Error(), "unknown") || !strings.Contains(unkErr.Error(), "unknown-model-x") {
+		t.Errorf("unknown refusal message = %q, want 'unknown' and model name", unkErr.Error())
+	}
+	for _, forbidden := range []string{"exhausted", "critical", "low"} {
+		if strings.Contains(unkErr.Error(), forbidden) {
+			t.Errorf("unknown refusal message %q must not claim quota is %q", unkErr.Error(), forbidden)
+		}
+	}
+	if err := m.checkPriority(StartRequest{Priority: PriorityNormal, Model: "unknown-model-x"}); err != nil {
+		t.Fatalf("normal run on unknown model refused: %v", err)
+	}
+
+	unpinnedErr := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: ""})
+	unpinnedRefusal, ok := errors.AsType[*QuotaRefusalError](unpinnedErr)
+	if !ok || unpinnedRefusal.MatchStatus != QuotaMatchUnpinned || unpinnedRefusal.Level != "" {
+		t.Fatalf("unpinned optional error = %v (%+v), want QuotaMatchUnpinned with empty Level", unpinnedErr, unpinnedRefusal)
+	}
+	if !strings.Contains(unpinnedErr.Error(), "unpinned") {
+		t.Errorf("unpinned refusal message = %q, want 'unpinned'", unpinnedErr.Error())
+	}
+	for _, forbidden := range []string{"exhausted", "critical", "low"} {
+		if strings.Contains(unpinnedErr.Error(), forbidden) {
+			t.Errorf("unpinned refusal message %q must not claim quota is %q", unpinnedErr.Error(), forbidden)
+		}
+	}
+	if err := m.checkPriority(StartRequest{Priority: PriorityNormal, Model: ""}); err != nil {
+		t.Fatalf("normal run on unpinned model refused: %v", err)
+	}
+}
+
+// TestQuotaMultiGroupFlashProVsArgonAndClaudeGPT verifies:
+//   - agy 1.4.10's 3-group /usage envelope (including a disabled 5h bucket);
+//   - exhausted Flash/Pro with available Argon (and vice versa);
+//   - Claude and GPT models mapped to "Claude and GPT models";
+//   - unknown, unpinned, ambiguous, and missing-group models refusing/deferring
+//     optional runs clearly without claiming quota is exhausted, while normal
+//     runs proceed;
+//   - all pools exhausted simultaneously;
+//   - versioned Pro on Pro plans vs subscription-only Pro wording;
+//   - rounded 0% (0.004 -> 0% critical) vs 0 (0% exhausted);
+//   - priority normal vs optional, and no hidden model fallback/mutation.
+func TestQuotaMultiGroupFlashProVsArgonAndClaudeGPT(t *testing.T) {
+	const envelopeFlashExhaustedArgonOK = `{"conversation_id":"","status":"SUCCESS","response":"x","duration_seconds":0,"num_turns":0,
+"usage":{"input_tokens":0},"command":{"name":"usage","data":{"description":"d","groups":[
+{"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[
+ {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0,"reset_time":"2026-10-31T12:11:13Z"},
+ {"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","disabled":true,"remaining_fraction":0.9912158250808716}]},
+{"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[
+ {"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.95,"reset_time":"2026-11-05T10:23:24Z"},
+ {"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.91,"reset_time":"2026-10-29T15:23:24Z"}]},
+{"name":"Gemini 4 Argon","description":"For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.","buckets":[
+ {"id":"gemini-argon-wtu-weekly","name":"Gemini 4 Argon Weekly Limit","window":"weekly","remaining_fraction":0.722382664680481,"reset_time":"2026-11-05T09:21:10Z"}]}]}}}`
+
+	t.Run("exhausted Flash/Pro blocks optional Flash/Pro, allows optional Argon and Claude/GPT, and defers unknown/unpinned", func(t *testing.T) {
+		var calls atomic.Int32
+		m, _ := quotaTestManager(t, 0, func(context.Context) ([]byte, error) {
+			calls.Add(1)
+			return []byte(envelopeFlashExhaustedArgonOK), nil
+		})
+		snap, err := m.Usage(t.Context(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Groups) != 3 {
+			t.Fatalf("len(snap.Groups) = %d, want 3", len(snap.Groups))
+		}
+		// Disabled 5h bucket on Gemini Models must be skipped.
+		if len(snap.Groups[0].Buckets) != 1 || snap.Groups[0].Buckets[0].ID != "gemini-weekly" {
+			t.Fatalf("Gemini Models buckets = %+v, want only active gemini-weekly", snap.Groups[0].Buckets)
+		}
+
+		for _, blockedModel := range []string{"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.1-pro-high"} {
+			req := StartRequest{Priority: PriorityOptional, Model: blockedModel, Cwd: t.TempDir()}
+			err := m.checkPriority(req)
+			refusal, ok := errors.AsType[*QuotaRefusalError](err)
+			if !ok {
+				t.Fatalf("checkPriority(%q, optional) = %v, want *QuotaRefusalError", blockedModel, err)
+			}
+			if refusal.Group != "Gemini Models" || refusal.Level != QuotaExhausted || refusal.Percent != 0 || refusal.MatchStatus != QuotaMatchExact {
+				t.Fatalf("refusal for %q = %+v, want group Gemini Models exhausted 0%% exact", blockedModel, refusal)
+			}
+			// Normal priority must still be allowed and must never mutate req.Model.
+			normReq := StartRequest{Priority: PriorityNormal, Model: blockedModel, Cwd: t.TempDir()}
+			if err := m.checkPriority(normReq); err != nil {
+				t.Fatalf("checkPriority(%q, normal) = %v, want nil", blockedModel, err)
+			}
+			if normReq.Model != blockedModel {
+				t.Fatalf("normReq.Model mutated to %q, want %q", normReq.Model, blockedModel)
+			}
+		}
+
+		for _, allowedModel := range []string{
+			"gemini-4-argon-medium",
+			"gemini-4-argon-high",
+			"claude-sonnet-5-5-low",
+			"claude-opus-5-5-medium",
+			"gpt-oss-120b-medium",
+		} {
+			req := StartRequest{Priority: PriorityOptional, Model: allowedModel, Cwd: t.TempDir()}
+			if err := m.checkPriority(req); err != nil {
+				t.Fatalf("checkPriority(%q, optional) = %v, want nil", allowedModel, err)
+			}
+			if req.Model != allowedModel {
+				t.Fatalf("req.Model mutated to %q, want %q", req.Model, allowedModel)
+			}
+		}
+
+		for _, deferred := range []struct {
+			model      string
+			wantStatus QuotaMatchStatus
+		}{
+			{"unknown-model-xyz", QuotaMatchUnknown},
+			{"claude-x", QuotaMatchUnknown},
+			{"gemini-ultra", QuotaMatchUnknown},
+			{"", QuotaMatchUnpinned},
+		} {
+			req := StartRequest{Priority: PriorityOptional, Model: deferred.model, Cwd: t.TempDir()}
+			err := m.checkPriority(req)
+			refusal, ok := errors.AsType[*QuotaRefusalError](err)
+			if !ok || refusal.MatchStatus != deferred.wantStatus || refusal.Level != "" {
+				t.Fatalf("checkPriority(%q, optional) = %v (%+v), want status %q with empty Level", deferred.model, err, refusal, deferred.wantStatus)
+			}
+			for _, forbidden := range []string{"exhausted", "critical", "low"} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Errorf("deferral message %q for %q must not claim quota is %q", err.Error(), deferred.model, forbidden)
+				}
+			}
+			normReq := StartRequest{Priority: PriorityNormal, Model: deferred.model, Cwd: t.TempDir()}
+			if err := m.checkPriority(normReq); err != nil {
+				t.Fatalf("checkPriority(%q, normal) = %v, want nil", deferred.model, err)
+			}
+			if normReq.Model != deferred.model {
+				t.Fatalf("normReq.Model mutated to %q, want %q", normReq.Model, deferred.model)
+			}
+		}
+	})
+
+	t.Run("vice versa: exhausted Argon and low Claude/GPT while Flash/Pro is available", func(t *testing.T) {
+		now := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+		reset := now.Add(48 * time.Hour)
+		m, _ := quotaTestManager(t, 0, nil)
+		m.quota.snap = QuotaSnapshot{
+			CheckedAt: m.now(),
+			Groups: []QuotaGroup{
+				{
+					Name:        "Gemini Models",
+					Description: "Models within this group: Gemini Flash, Gemini Pro",
+					Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly", RemainingFraction: 0.85, ResetTime: reset}},
+				},
+				{
+					Name:        "Claude and GPT models",
+					Description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+					Buckets:     []QuotaBucket{{ID: "3p-5h", Name: "Five Hour Limit Remaining", Window: "5h", RemainingFraction: 0.12, ResetTime: reset}},
+				},
+				{
+					Name:        "Gemini 4 Argon",
+					Description: "For paid Pro plans, Argon quota is separate.",
+					Buckets:     []QuotaBucket{{ID: "gemini-argon-wtu-weekly", Name: "Gemini 4 Argon Weekly Limit", Window: "weekly", RemainingFraction: 0, ResetTime: reset}},
+				},
+			},
+		}
+
+		// Argon optional is refused naming "Gemini 4 Argon" at exhausted (0%).
+		err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: "gemini-4-argon-medium"})
+		argonRefusal, ok := errors.AsType[*QuotaRefusalError](err)
+		if !ok || argonRefusal.Group != "Gemini 4 Argon" || argonRefusal.Level != QuotaExhausted || argonRefusal.Percent != 0 {
+			t.Fatalf("argon refusal = %v (%+v), want Gemini 4 Argon exhausted 0%%", err, argonRefusal)
+		}
+
+		// Claude and GPT optional are refused naming "Claude and GPT models" at low (12%).
+		for _, thirdParty := range []string{"claude-sonnet-5-5-low", "gpt-oss-120b-medium"} {
+			err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: thirdParty})
+			tpRefusal, ok := errors.AsType[*QuotaRefusalError](err)
+			if !ok || tpRefusal.Group != "Claude and GPT models" || tpRefusal.Level != QuotaLow || tpRefusal.Percent != 12 {
+				t.Fatalf("%s refusal = %v (%+v), want Claude and GPT models low 12%%", thirdParty, err, tpRefusal)
+			}
+		}
+
+		// Flash and Pro optional succeed because "Gemini Models" has 85% left.
+		for _, okModel := range []string{"gemini-3.8-flash-high", "gemini-3.1-pro-high"} {
+			if err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: okModel}); err != nil {
+				t.Fatalf("checkPriority(%q, optional) = %v, want nil", okModel, err)
+			}
+		}
+	})
+
+	t.Run("all pools exhausted, ambiguous groups, and missing model groups", func(t *testing.T) {
+		now := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+		reset := now.Add(48 * time.Hour)
+		m, _ := quotaTestManager(t, 0, nil)
+		m.quota.snap = QuotaSnapshot{
+			CheckedAt: m.now(),
+			Groups: []QuotaGroup{
+				{
+					Name:        "Gemini Models",
+					Description: "Models within this group: Gemini Flash, Gemini Pro",
+					Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly", RemainingFraction: 0, ResetTime: reset}},
+				},
+				{
+					Name:        "Claude and GPT models",
+					Description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+					Buckets:     []QuotaBucket{{ID: "3p-weekly", Name: "Weekly Limit Remaining", Window: "weekly", RemainingFraction: 0, ResetTime: reset}},
+				},
+				{
+					Name:        "Gemini 4 Argon",
+					Description: "For paid Pro plans, Argon quota is separate.",
+					Buckets:     []QuotaBucket{{ID: "gemini-argon-wtu-weekly", Name: "Gemini 4 Argon Weekly Limit", Window: "weekly", RemainingFraction: 0, ResetTime: reset}},
+				},
+			},
+		}
+
+		for _, tc := range []struct {
+			model     string
+			wantGroup string
+		}{
+			{"gemini-3.8-flash-high", "Gemini Models"},
+			{"gemini-3.1-pro-high", "Gemini Models"},
+			{"claude-sonnet-5-5-low", "Claude and GPT models"},
+			{"gpt-oss-120b-medium", "Claude and GPT models"},
+			{"gemini-4-argon-medium", "Gemini 4 Argon"},
+		} {
+			err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: tc.model})
+			refusal, ok := errors.AsType[*QuotaRefusalError](err)
+			if !ok || refusal.Group != tc.wantGroup || refusal.Level != QuotaExhausted || refusal.Percent != 0 || refusal.MatchStatus != QuotaMatchExact {
+				t.Fatalf("all-exhausted checkPriority(%q, optional) = %v (%+v), want %q exhausted 0%%", tc.model, err, refusal, tc.wantGroup)
+			}
+			normReq := StartRequest{Priority: PriorityNormal, Model: tc.model}
+			if err := m.checkPriority(normReq); err != nil {
+				t.Fatalf("all-exhausted checkPriority(%q, normal) = %v, want nil", tc.model, err)
+			}
+		}
+
+		// Missing Argon group (even when Gemini Models description contains Ultra plan prose):
+		// Argon optional must be deferred as QuotaMatchUnknown, never mapped to Gemini Models.
+		m.quota.snap = QuotaSnapshot{
+			CheckedAt: m.now(),
+			Groups: []QuotaGroup{
+				{
+					Name:        "Gemini Models",
+					Description: "Models within this group: Gemini Flash, Gemini Pro. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+					Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly", RemainingFraction: 0.9, ResetTime: reset}},
+				},
+			},
+		}
+		for _, missingModel := range []string{"gemini-4-argon-medium", "claude-sonnet-5-5-low", "gpt-oss-120b-medium"} {
+			err := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: missingModel})
+			refusal, ok := errors.AsType[*QuotaRefusalError](err)
+			if !ok || refusal.MatchStatus != QuotaMatchUnknown || refusal.Level != "" {
+				t.Fatalf("missing-group checkPriority(%q, optional) = %v (%+v), want QuotaMatchUnknown", missingModel, err, refusal)
+			}
+		}
+
+		// Ambiguous groups: duplicate Gemini groups cause optional runs to defer with QuotaMatchAmbiguous.
+		m.quota.snap = QuotaSnapshot{
+			CheckedAt: m.now(),
+			Groups: []QuotaGroup{
+				{Name: "Gemini A", Buckets: []QuotaBucket{{ID: "5h", RemainingFraction: 0.9, ResetTime: reset}}},
+				{Name: "Gemini B", Buckets: []QuotaBucket{{ID: "5h", RemainingFraction: 0.9, ResetTime: reset}}},
+			},
+		}
+		ambErr := m.checkPriority(StartRequest{Priority: PriorityOptional, Model: "gemini-3.8-flash-high"})
+		ambRefusal, ok := errors.AsType[*QuotaRefusalError](ambErr)
+		if !ok || ambRefusal.MatchStatus != QuotaMatchAmbiguous || ambRefusal.Level != "" {
+			t.Fatalf("ambiguous checkPriority = %v (%+v), want QuotaMatchAmbiguous", ambErr, ambRefusal)
+		}
+		if !strings.Contains(ambErr.Error(), "ambiguous") {
+			t.Errorf("ambiguous refusal message = %q, want 'ambiguous'", ambErr.Error())
+		}
+		for _, forbidden := range []string{"exhausted", "critical", "low"} {
+			if strings.Contains(ambErr.Error(), forbidden) {
+				t.Errorf("ambiguous refusal message %q must not claim quota is %q", ambErr.Error(), forbidden)
+			}
+		}
+		if err := m.checkPriority(StartRequest{Priority: PriorityNormal, Model: "gemini-3.8-flash-high"}); err != nil {
+			t.Fatalf("normal run on ambiguous group refused: %v", err)
+		}
+	})
+
+	t.Run("rounded 0 percent critical is distinct from 0 exhausted", func(t *testing.T) {
+		now := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+		reset := now.Add(2 * time.Hour)
+		snap := QuotaSnapshot{
+			CheckedAt: now,
+			Groups: []QuotaGroup{
+				{
+					Name:        "Gemini Models",
+					Description: "Models within this group: Gemini Flash, Gemini Pro",
+					Buckets:     []QuotaBucket{{ID: "gemini-weekly", Name: "Weekly Limit Remaining", Window: "weekly", RemainingFraction: 0.004, ResetTime: reset}},
+				},
+				{
+					Name:        "Gemini 4 Argon",
+					Description: "For paid Pro plans, Argon quota is separate.",
+					Buckets:     []QuotaBucket{{ID: "gemini-argon-wtu-weekly", Name: "Gemini 4 Argon Weekly Limit", Window: "weekly", RemainingFraction: 0, ResetTime: reset}},
+				},
+			},
+		}
+
+		refuseFlash, gqFlash, matchFlash := quotaDecision(snap, now, "gemini-3.8-flash-high", testThresholds)
+		if !refuseFlash || !matchFlash.OK || gqFlash.Percent() != 0 || gqFlash.Level != QuotaCritical {
+			t.Fatalf("0.004 remaining = refuse:%v percent:%d level:%s, want true / 0%% / critical",
+				refuseFlash, gqFlash.Percent(), gqFlash.Level)
+		}
+
+		refuseArgon, gqArgon, matchArgon := quotaDecision(snap, now, "gemini-4-argon-medium", testThresholds)
+		if !refuseArgon || !matchArgon.OK || gqArgon.Percent() != 0 || gqArgon.Level != QuotaExhausted {
+			t.Fatalf("0 remaining = refuse:%v percent:%d level:%s, want true / 0%% / exhausted",
+				refuseArgon, gqArgon.Percent(), gqArgon.Level)
+		}
+	})
 }
 
 // A model-turn reply that comes with a failure exit spent quota just like one on

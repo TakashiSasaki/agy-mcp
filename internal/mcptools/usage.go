@@ -117,10 +117,10 @@ func registerUsage(s *mcp.Server, mgr *manager.Manager) {
 		Name:        toolAgyUsage,
 		Title:       "Check agy quota",
 		Annotations: annReadExternal,
-		Description: "Report how much agy quota is left, per quota group (for example Gemini Models, shared by every Gemini model, Flash and Pro alike), with a level per group: ok, low, critical or exhausted. " +
-			"The level comes from the group's tightest window (5h or weekly), counts a window whose reset time has passed as full, and uses the server's thresholds: low below 25 percent remaining, critical below 5, exhausted at 0 (AGY_MCP_USAGE_LOW and AGY_MCP_USAGE_CRITICAL change the first two). " +
+		Description: "Report how much agy quota is left, per quota group (for example Gemini Models for Flash/Pro, Gemini 4 Argon when reported separately, and Claude and GPT models), with a level per group: ok, low, critical or exhausted. " +
+			"The level comes from the group's tightest active window (5h or weekly; disabled buckets are skipped), counts a window whose reset time has passed as full, and uses the server's thresholds: low below 25 percent remaining, critical below 5, exhausted at 0 (AGY_MCP_USAGE_LOW and AGY_MCP_USAGE_CRITICAL change the first two). " +
 			"It spends no model quota: it runs agy's /usage command, which starts no agent turn. " +
-			"Check it before optional work, and pass priority optional to agy_run or agy_run_sync so the server refuses the run while the model's group is low; the same reading rides on the quota field of run, status and wait results. " +
+			"Check it before optional work, and pass priority optional to agy_run or agy_run_sync so the server refuses the run while the model's group is low or when the model's quota group mapping cannot be established; the same reading rides on the quota field of run, status and wait results. " +
 			"max_age bounds how old a cached reading may be (default 60s, minimum 10s); a fresh reading takes a few seconds. " +
 			"Shells out to the agy CLI, so it fails if agy is missing from PATH or not authenticated.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in quotaInput) (*mcp.CallToolResult, quotaOutput, error) {

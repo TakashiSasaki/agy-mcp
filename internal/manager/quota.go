@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Run priorities. PriorityOptional lets StartJob refuse a run whose model's
-// quota group is low or worse (see checkPriority); anything else, including an
-// empty value, runs.
+// quota group is low or worse, or whose quota group mapping cannot be
+// established when a trusted snapshot is present (see checkPriority); anything
+// else, including an empty value, runs.
 const (
 	PriorityNormal   = "normal"
 	PriorityOptional = "optional"
@@ -65,7 +68,8 @@ type QuotaBucket struct {
 	ResetTime         time.Time // zero when agy did not report one
 }
 
-// QuotaGroup is a set of buckets that models share (for example the Gemini pool).
+// QuotaGroup is a set of buckets that models share (for example Gemini Models,
+// Gemini 4 Argon, or Claude and GPT models).
 type QuotaGroup struct {
 	Name        string
 	Description string
@@ -103,17 +107,31 @@ func (g GroupQuota) Percent() int {
 type quotaThresholds struct{ Low, Critical float64 }
 
 // QuotaRefusalError is returned by StartJob when an optional run is refused
-// because its model's quota group is low or worse. No job exists when it is
-// returned.
+// because its model's quota group is low or worse, or because its model's quota
+// group mapping cannot be established against a trusted snapshot (unpinned,
+// unknown, or ambiguous). No job exists when it is returned.
 type QuotaRefusalError struct {
-	Group     string
-	Level     QuotaLevel
-	Percent   int
-	Bucket    string // name of the binding bucket
-	ResetTime time.Time
+	Group       string
+	Level       QuotaLevel
+	Percent     int
+	Bucket      string // name of the binding bucket
+	ResetTime   time.Time
+	Model       string
+	MatchStatus QuotaMatchStatus
 }
 
 func (e *QuotaRefusalError) Error() string {
+	switch e.MatchStatus {
+	case QuotaMatchUnpinned:
+		return "optional run skipped (deferred), no job was started: quota group mapping is unpinned (no model was specified and no default model is configured, so quota headroom cannot be verified). " +
+			"Pass an explicit mapped model, or pass priority normal only if this run is required."
+	case QuotaMatchUnknown:
+		return fmt.Sprintf("optional run skipped (deferred), no job was started: quota group mapping for model %q is unknown (cannot verify quota headroom against reported /usage groups). "+
+			"Pass a model with a known quota group, or pass priority normal only if this run is required.", e.Model)
+	case QuotaMatchAmbiguous:
+		return fmt.Sprintf("optional run skipped (deferred), no job was started: quota group mapping for model %q is ambiguous across reported /usage groups (cannot verify quota headroom). "+
+			"Pass a model that maps to a single quota group, or pass priority normal only if this run is required.", e.Model)
+	}
 	detail := fmt.Sprintf("%s%d%% left", e.bucketPrefix(), e.Percent)
 	if !e.ResetTime.IsZero() {
 		detail += ", resets " + e.ResetTime.UTC().Format(time.RFC3339)
@@ -159,6 +177,7 @@ type usageEnvelope struct {
 					ID                string   `json:"id"`
 					Name              string   `json:"name"`
 					Window            string   `json:"window"`
+					Disabled          bool     `json:"disabled"`
 					RemainingFraction *float64 `json:"remaining_fraction"`
 					ResetTime         string   `json:"reset_time"`
 				} `json:"buckets"`
@@ -194,7 +213,7 @@ func decodeUsageEnvelope(raw []byte) ([]QuotaGroup, error) {
 	for _, rg := range rawGroups {
 		g := QuotaGroup{Name: rg.Name, Description: rg.Description}
 		for _, rb := range rg.Buckets {
-			if rb.RemainingFraction == nil {
+			if rb.Disabled || rb.RemainingFraction == nil {
 				continue
 			}
 			b := QuotaBucket{ID: rb.ID, Name: rb.Name, Window: rb.Window, RemainingFraction: *rb.RemainingFraction}
@@ -256,37 +275,342 @@ func groupQuota(g QuotaGroup, now time.Time, th quotaThresholds) GroupQuota {
 	return gq
 }
 
-// groupForModel returns the index of the quota group model draws from. Only
-// Gemini models are matched: a lower-cased id starting "gemini-", or "gemini "
-// for a display label such as "Gemini 3.8 Flash (High)", which agy accepts as
-// --model (see modelID), maps to the one group whose name or description
-// mentions gemini. Zero or several such groups, any other model, or an empty
-// model return false, so the caller fails open rather than guessing.
-func groupForModel(groups []QuotaGroup, model string) (int, bool) {
-	lm := strings.ToLower(strings.TrimSpace(model))
-	if !strings.HasPrefix(lm, "gemini-") && !strings.HasPrefix(lm, "gemini ") {
-		return 0, false
-	}
-	idx, n := 0, 0
-	for i, g := range groups {
-		if strings.Contains(strings.ToLower(g.Name+" "+g.Description), "gemini") {
-			idx = i
-			n++
-		}
-	}
-	return idx, n == 1
+// QuotaMatchStatus classifies how a model string mapped to a snapshot's quota
+// groups. Unknown, unpinned, and ambiguous mappings are explicit and cause
+// optional runs to refuse/defer clearly rather than guessing a wrong pool or
+// silently swapping models.
+type QuotaMatchStatus string
+
+const (
+	QuotaMatchExact     QuotaMatchStatus = "exact"
+	QuotaMatchUnpinned  QuotaMatchStatus = "unpinned"
+	QuotaMatchUnknown   QuotaMatchStatus = "unknown"
+	QuotaMatchAmbiguous QuotaMatchStatus = "ambiguous"
+)
+
+type modelFamily string
+
+const (
+	modelFamilyNone        modelFamily = ""
+	modelFamilyGeminiArgon modelFamily = "gemini_argon"
+	modelFamilyGeminiFlash modelFamily = "gemini_flash"
+	modelFamilyGeminiPro   modelFamily = "gemini_pro"
+	modelFamilyClaude      modelFamily = "claude"
+	modelFamilyGPT         modelFamily = "gpt"
+	modelFamilyUnknown     modelFamily = "unknown"
+)
+
+// QuotaGroupMatch holds the explicit outcome of matching a model against the
+// groups in a quota snapshot.
+type QuotaGroupMatch struct {
+	Index  int
+	Status QuotaMatchStatus
+	Family modelFamily
+	OK     bool
 }
 
-// quotaDecision reports whether an optional run on model should be refused, and
-// the group it was judged against. It never refuses when the model maps to no
-// single group; the caller has already checked that snap is young enough.
-func quotaDecision(snap QuotaSnapshot, now time.Time, model string, th quotaThresholds) (bool, GroupQuota) {
-	idx, ok := groupForModel(snap.Groups, model)
-	if !ok {
-		return false, GroupQuota{}
+func tokenizeQuotaText(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+func isDigitToken(tok string) bool {
+	if tok == "" {
+		return false
 	}
-	gq := groupQuota(snap.Groups[idx], now, th)
-	return gq.Level != QuotaOK, gq
+	for _, r := range tok {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasGeminiModelToken reports whether tokens contain a "gemini ... <target>"
+// model family reference (for example "gemini pro", "gemini 3 1 pro",
+// "gemini 3 8 flash", "gemini 4 argon", or "gemini flash and pro"). Only
+// version-number tokens and model-list conjunctions ("flash", "pro", "argon",
+// "and", "or") may appear between "gemini" and target, so subscription prose
+// such as "For paid Pro plans", "Pro subscribers", or "larger Gemini quota
+// bucket ... on Ultra plans" never matches.
+func hasGeminiModelToken(tokens []string, target string) bool {
+	for i, tok := range tokens {
+		if tok != "gemini" {
+			continue
+		}
+		for j := i + 1; j < len(tokens); j++ {
+			t := tokens[j]
+			if t == target {
+				return true
+			}
+			if isDigitToken(t) || t == "flash" || t == "pro" || t == "argon" || t == "and" || t == "or" {
+				continue
+			}
+			break
+		}
+	}
+	return false
+}
+
+// classifyModelFamily maps a known agy model ID, display label, or
+// tab-separated `id\tlabel` row into an explicit modelFamily. Unknown model
+// strings (including unknown gemini-*, claude-*, or gpt-* suffixes such as
+// "claude-x" or "gemini-ultra") remain modelFamilyUnknown.
+func classifyModelFamily(model string) modelFamily {
+	id := modelID(model)
+	lm := strings.ToLower(strings.TrimSpace(id))
+	if lm == "" {
+		return modelFamilyNone
+	}
+	toks := tokenizeQuotaText(lm)
+	switch {
+	case strings.HasPrefix(lm, "gemini-") || strings.HasPrefix(lm, "gemini "):
+		switch {
+		case slices.Contains(toks, "argon"):
+			return modelFamilyGeminiArgon
+		case slices.Contains(toks, "flash"):
+			return modelFamilyGeminiFlash
+		case slices.Contains(toks, "pro"):
+			return modelFamilyGeminiPro
+		default:
+			return modelFamilyUnknown
+		}
+	case strings.HasPrefix(lm, "claude-") || strings.HasPrefix(lm, "claude "):
+		if slices.Contains(toks, "opus") || slices.Contains(toks, "sonnet") || slices.Contains(toks, "haiku") {
+			return modelFamilyClaude
+		}
+		return modelFamilyUnknown
+	case strings.HasPrefix(lm, "gpt-") || strings.HasPrefix(lm, "gpt "):
+		if slices.Contains(toks, "oss") || slices.Contains(toks, "4o") || slices.Contains(toks, "4") || slices.Contains(toks, "5") {
+			return modelFamilyGPT
+		}
+		return modelFamilyUnknown
+	default:
+		return modelFamilyUnknown
+	}
+}
+
+type groupTraits struct {
+	isArgon   bool
+	hasFlash  bool
+	hasPro    bool
+	hasGemini bool
+	hasClaude bool
+	hasGPT    bool
+}
+
+// classifyQuotaGroup extracts family traits from a QuotaGroup using stable
+// bucket IDs (such as "gemini-argon-wtu-weekly", "gemini-weekly", "gemini-5h",
+// "3p-weekly", "3p-5h") and explicit model-family names in Name and Description
+// (via hasGeminiModelToken). Subscription-tier wording ("For paid Pro plans",
+// "Pro subscribers", "available on Ultra plans") is never treated as a model
+// family match.
+func classifyQuotaGroup(g QuotaGroup) groupTraits {
+	nameToks := tokenizeQuotaText(g.Name)
+	descToks := tokenizeQuotaText(g.Description)
+
+	var (
+		bucketHasArgon  bool
+		bucketHasFlash  bool
+		bucketHasPro    bool
+		bucketHasGemini bool
+		bucketHas3P     bool
+		bucketHasClaude bool
+		bucketHasGPT    bool
+	)
+	for _, b := range g.Buckets {
+		id := strings.ToLower(strings.TrimSpace(b.ID))
+		switch {
+		case id == "gemini-argon-wtu-weekly" || strings.HasPrefix(id, "gemini-argon"):
+			bucketHasArgon = true
+			bucketHasGemini = true
+		case id == "gemini-weekly" || id == "gemini-5h" || strings.HasPrefix(id, "gemini-"):
+			bucketHasGemini = true
+		case id == "3p-weekly" || id == "3p-5h" || strings.HasPrefix(id, "3p-"):
+			bucketHas3P = true
+		}
+		idToks := tokenizeQuotaText(b.ID)
+		btoks := append(idToks, tokenizeQuotaText(b.Name)...)
+		if slices.Contains(btoks, "argon") {
+			bucketHasArgon = true
+			bucketHasGemini = true
+		}
+		if slices.Contains(btoks, "flash") {
+			bucketHasFlash = true
+			bucketHasGemini = true
+		}
+		if slices.Contains(idToks, "pro") || hasGeminiModelToken(btoks, "pro") {
+			bucketHasPro = true
+			bucketHasGemini = true
+		}
+		if slices.Contains(btoks, "gemini") {
+			bucketHasGemini = true
+		}
+		if slices.Contains(btoks, "claude") {
+			bucketHasClaude = true
+		}
+		if slices.Contains(btoks, "gpt") {
+			bucketHasGPT = true
+		}
+	}
+
+	isArgon := bucketHasArgon ||
+		slices.Contains(nameToks, "argon") ||
+		hasGeminiModelToken(descToks, "argon")
+
+	hasFlash := bucketHasFlash ||
+		slices.Contains(nameToks, "flash") ||
+		hasGeminiModelToken(descToks, "flash")
+
+	hasPro := bucketHasPro ||
+		hasGeminiModelToken(nameToks, "pro") ||
+		(slices.Contains(nameToks, "gemini") && slices.Contains(nameToks, "pro")) ||
+		hasGeminiModelToken(descToks, "pro")
+
+	hasGemini := bucketHasGemini ||
+		slices.Contains(nameToks, "gemini") ||
+		isArgon || hasFlash || hasPro
+
+	explicitClaude := bucketHasClaude ||
+		slices.Contains(nameToks, "claude") ||
+		slices.Contains(descToks, "claude")
+
+	explicitGPT := bucketHasGPT ||
+		slices.Contains(nameToks, "gpt") ||
+		slices.Contains(descToks, "gpt")
+
+	hasClaude := explicitClaude || (bucketHas3P && !explicitGPT)
+	hasGPT := explicitGPT || (bucketHas3P && !explicitClaude)
+
+	return groupTraits{
+		isArgon:   isArgon,
+		hasFlash:  hasFlash,
+		hasPro:    hasPro,
+		hasGemini: hasGemini,
+		hasClaude: hasClaude,
+		hasGPT:    hasGPT,
+	}
+}
+
+func resolveCandidateIndices(family modelFamily, candidates []int) QuotaGroupMatch {
+	switch len(candidates) {
+	case 1:
+		return QuotaGroupMatch{Index: candidates[0], Status: QuotaMatchExact, Family: family, OK: true}
+	case 0:
+		return QuotaGroupMatch{Status: QuotaMatchUnknown, Family: family}
+	default:
+		return QuotaGroupMatch{Status: QuotaMatchAmbiguous, Family: family}
+	}
+}
+
+// matchQuotaGroup maps model to a single QuotaGroup in groups using explicit
+// model-family classification and group bucket IDs/Name/Description metadata.
+// It never assumes there is only one Gemini group: separate Gemini Flash/Pro
+// and Gemini Argon pools (as reported by agy 1.4.10) each resolve to their own
+// group, Argon never infers a fallback from descriptive plan text when the
+// Argon group is absent, and an unscoped single Gemini group still matches
+// Flash/Pro when agy reports a unified Gemini pool.
+func matchQuotaGroup(groups []QuotaGroup, model string) QuotaGroupMatch {
+	family := classifyModelFamily(model)
+	switch family {
+	case modelFamilyNone:
+		return QuotaGroupMatch{Status: QuotaMatchUnpinned, Family: family}
+	case modelFamilyUnknown:
+		return QuotaGroupMatch{Status: QuotaMatchUnknown, Family: family}
+	}
+
+	traits := make([]groupTraits, len(groups))
+	var unscopedGemini []int
+	anyScopedNonArgonGemini := false
+	for i, g := range groups {
+		t := classifyQuotaGroup(g)
+		traits[i] = t
+		if t.hasGemini && !t.isArgon {
+			if t.hasFlash || t.hasPro {
+				anyScopedNonArgonGemini = true
+			} else {
+				unscopedGemini = append(unscopedGemini, i)
+			}
+		}
+	}
+
+	switch family {
+	case modelFamilyGeminiArgon:
+		var argon []int
+		for i, t := range traits {
+			if t.isArgon {
+				argon = append(argon, i)
+			}
+		}
+		return resolveCandidateIndices(family, argon)
+
+	case modelFamilyGeminiFlash:
+		var flash []int
+		for i, t := range traits {
+			if t.hasGemini && !t.isArgon && t.hasFlash {
+				flash = append(flash, i)
+			}
+		}
+		if len(flash) > 0 || anyScopedNonArgonGemini {
+			return resolveCandidateIndices(family, flash)
+		}
+		return resolveCandidateIndices(family, unscopedGemini)
+
+	case modelFamilyGeminiPro:
+		var pro []int
+		for i, t := range traits {
+			if t.hasGemini && !t.isArgon && t.hasPro {
+				pro = append(pro, i)
+			}
+		}
+		if len(pro) > 0 || anyScopedNonArgonGemini {
+			return resolveCandidateIndices(family, pro)
+		}
+		return resolveCandidateIndices(family, unscopedGemini)
+
+	case modelFamilyClaude:
+		var claude []int
+		for i, t := range traits {
+			if t.hasClaude {
+				claude = append(claude, i)
+			}
+		}
+		return resolveCandidateIndices(family, claude)
+
+	case modelFamilyGPT:
+		var gpt []int
+		for i, t := range traits {
+			if t.hasGPT {
+				gpt = append(gpt, i)
+			}
+		}
+		return resolveCandidateIndices(family, gpt)
+
+	default:
+		return QuotaGroupMatch{Status: QuotaMatchUnknown, Family: family}
+	}
+}
+
+// groupForModel returns the index of the quota group model draws from, its
+// explicit QuotaMatchStatus, and whether a single group was matched.
+func groupForModel(groups []QuotaGroup, model string) (int, QuotaMatchStatus, bool) {
+	m := matchQuotaGroup(groups, model)
+	return m.Index, m.Status, m.OK
+}
+
+// quotaDecision reports whether an optional run on model should be refused,
+// the group it was judged against (when Match.OK is true), and the explicit
+// QuotaGroupMatch. When the model's quota group cannot be established
+// (unpinned, unknown, or ambiguous), optional runs are refused/deferred; the
+// caller has already checked that snap is young enough.
+func quotaDecision(snap QuotaSnapshot, now time.Time, model string, th quotaThresholds) (bool, GroupQuota, QuotaGroupMatch) {
+	m := matchQuotaGroup(snap.Groups, model)
+	if !m.OK {
+		return true, GroupQuota{}, m
+	}
+	gq := groupQuota(snap.Groups[m.Index], now, th)
+	return gq.Level != QuotaOK, gq, m
 }
 
 // quotaFlight is one in-progress probe that concurrent callers share.
@@ -481,8 +805,9 @@ func (m *Manager) runUsageRefresher(ctx context.Context, interval time.Duration)
 }
 
 // checkPriority refuses an optional run whose model's quota group is low or
-// worse. Everything else, including every case where the quota is unknown, lets
-// the run proceed.
+// worse, or whose model's quota group mapping cannot be established against a
+// trusted snapshot (unpinned, unknown, or ambiguous). Normal priority and
+// missing/stale snapshots let the run proceed.
 func (m *Manager) checkPriority(req StartRequest) error {
 	if req.Priority != PriorityOptional {
 		return nil
@@ -491,16 +816,32 @@ func (m *Manager) checkPriority(req StartRequest) error {
 	if !trusted {
 		return nil
 	}
-	refuse, gq := quotaDecision(snap, m.now(), req.Model, m.quotaThresholds())
+	model := req.Model
+	if model == "" {
+		model = m.cfg.DefaultModel
+	}
+	model = modelID(model)
+	refuse, gq, match := quotaDecision(snap, m.now(), model, m.quotaThresholds())
 	if !refuse {
 		return nil
+	}
+	if !match.OK {
+		return &QuotaRefusalError{
+			Model:       model,
+			MatchStatus: match.Status,
+		}
 	}
 	bucket := gq.Binding.Name
 	if bucket == "" {
 		bucket = gq.Binding.Window
 	}
 	return &QuotaRefusalError{
-		Group: gq.Group.Name, Level: gq.Level, Percent: gq.Percent(),
-		Bucket: bucket, ResetTime: gq.Binding.ResetTime,
+		Group:       gq.Group.Name,
+		Level:       gq.Level,
+		Percent:     gq.Percent(),
+		Bucket:      bucket,
+		ResetTime:   gq.Binding.ResetTime,
+		Model:       model,
+		MatchStatus: match.Status,
 	}
 }

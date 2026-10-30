@@ -61,6 +61,21 @@ func TestConsumeStreamHappyPath(t *testing.T) {
 	}
 }
 
+func TestConsumeStreamRecordsInitModelInProgress(t *testing.T) {
+	stream := `{"event":"init","conversation_id":"c-1","init":{"model":"gemini-4-argon-medium","cwd":"/tmp/x"}}
+{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"ok"}}
+{"event":"result","result":{"conversation_id":"c-1","status":"SUCCESS","response":"ok","num_turns":1}}
+`
+	dir, _, oc := consume(t, stream)
+	if oc.malformed != 0 {
+		t.Fatalf("malformed = %d", oc.malformed)
+	}
+	p := readProgress(t, dir)
+	if p.InitModel != "gemini-4-argon-medium" {
+		t.Fatalf("progress.InitModel = %q, want %q", p.InitModel, "gemini-4-argon-medium")
+	}
+}
+
 // Only agent_response deltas make up the response. A step of any other type
 // carries progress but must not be mixed into the answer.
 func TestConsumeStreamOnlyAppendsAgentResponse(t *testing.T) {

@@ -524,6 +524,79 @@ func TestStatusOutputFailureReason(t *testing.T) {
 	if strings.Contains(string(done), `"failure_reason"`) {
 		t.Errorf("failure_reason key must be absent on a clean done: %s", done)
 	}
+}
+
+func TestStatusOutputModelProvenanceWireShape(t *testing.T) {
+	t.Parallel()
+
+	t.Run("explicit model and init selection still serialize effective_model as null", func(t *testing.T) {
+		out := toStatusOutput(manager.Status{
+			State:                manager.StateDone,
+			Result:               "ok",
+			Model:                "gemini-4-argon-medium",
+			RequestedModel:       "gemini-4-argon-medium",
+			SelectedModel:        "gemini-4-argon-medium",
+			SelectedModelSource:  manager.ModelSourceCLIInit,
+			EffectiveModel:       nil,
+			EffectiveModelSource: manager.ModelSourceUnknown,
+		})
+		raw, err := json.Marshal(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["model"] != "gemini-4-argon-medium" {
+			t.Errorf("model = %v, want gemini-4-argon-medium", m["model"])
+		}
+		if m["requested_model"] != "gemini-4-argon-medium" {
+			t.Errorf("requested_model = %v, want gemini-4-argon-medium", m["requested_model"])
+		}
+		if m["selected_model"] != "gemini-4-argon-medium" {
+			t.Errorf("selected_model = %v, want gemini-4-argon-medium", m["selected_model"])
+		}
+		if m["selected_model_source"] != "cli_init" {
+			t.Errorf("selected_model_source = %v, want cli_init", m["selected_model_source"])
+		}
+		if val, exists := m["effective_model"]; !exists || val != nil {
+			t.Errorf("effective_model = %v (exists=%v), want explicit null on wire", val, exists)
+		}
+		if m["effective_model_source"] != "unknown" {
+			t.Errorf("effective_model_source = %v, want unknown", m["effective_model_source"])
+		}
+	})
+
+	t.Run("omitted model omits requested and selected fields while keeping effective_model null", func(t *testing.T) {
+		out := toStatusOutput(manager.Status{
+			State:  manager.StateDone,
+			Result: "ok",
+		})
+		raw, err := json.Marshal(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, omittedKey := range []string{"model", "requested_model", "selected_model", "selected_model_source"} {
+			if _, exists := m[omittedKey]; exists {
+				t.Errorf("%s must be omitted when empty, got %s", omittedKey, raw)
+			}
+		}
+		if val, exists := m["effective_model"]; !exists || val != nil {
+			t.Errorf("effective_model = %v (exists=%v), want explicit null on wire", val, exists)
+		}
+		if m["effective_model_source"] != "unknown" {
+			t.Errorf("effective_model_source = %v, want unknown", m["effective_model_source"])
+		}
+	})
+}
+
+func TestStatusOutputQuotaRecovery(t *testing.T) {
+	t.Parallel()
 
 	// Quota recovery: present, names the transient/reset nature, and reuses the
 	// conversation when one exists.

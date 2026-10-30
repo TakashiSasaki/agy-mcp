@@ -143,13 +143,54 @@ func TestOptionalRunRefusedOverMCP(t *testing.T) {
 }
 
 func TestOptionalRunUnmappedModelRuns(t *testing.T) {
-	cs, _ := quotaManagerFor(t, 0.03)
+	cs, stateDir := quotaManagerFor(t, 0.03)
 	if res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "agy_usage"}); err != nil || res.IsError {
 		t.Fatalf("agy_usage: err=%v res=%+v", err, res)
 	}
+
+	// An optional run on an unknown or unpinned model is refused/deferred clearly
+	// without claiming quota is exhausted, and leaves no job in stateDir.
+	for _, tc := range []struct {
+		args       map[string]any
+		wantSubstr string
+	}{
+		{map[string]any{"prompt": "x", "model": "unknown-model-x", "priority": "optional", "wait": "30s"}, "unknown"},
+		{map[string]any{"prompt": "x", "model": "claude-x", "priority": "optional", "wait": "30s"}, "unknown"},
+		{map[string]any{"prompt": "x", "priority": "optional", "wait": "30s"}, "unpinned"},
+	} {
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "agy_run_sync", Arguments: tc.args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.IsError {
+			t.Fatalf("optional run with args %v was not refused: %+v", tc.args, res)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if !strings.Contains(text, tc.wantSubstr) {
+			t.Errorf("refusal %q lacks %q", text, tc.wantSubstr)
+		}
+		for _, forbidden := range []string{"exhausted", "critical", "low"} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("refusal %q must not claim quota is %q", text, forbidden)
+			}
+		}
+	}
+	if entries, _ := os.ReadDir(stateDir); len(entries) != 0 {
+		t.Fatalf("state dir holds %d entries after unknown/unpinned optional refusals, want none", len(entries))
+	}
+
+	// A mapped non-Gemini model in an OK group ("Claude and GPT Models" at 100%)
+	// is allowed under priority optional.
 	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "agy_run_sync",
-		Arguments: map[string]any{"prompt": "x", "model": "claude-x", "priority": "optional", "wait": "30s"}})
+		Arguments: map[string]any{"prompt": "x", "model": "claude-sonnet-5-5-low", "priority": "optional", "wait": "30s"}})
 	if err != nil || res.IsError {
-		t.Fatalf("optional run on an unmapped model: err=%v res=%+v", err, res)
+		t.Fatalf("optional run on mapped OK Claude model: err=%v res=%+v", err, res)
+	}
+
+	// Normal priority on an unknown model retains documented behavior and runs.
+	res, err = cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "agy_run_sync",
+		Arguments: map[string]any{"prompt": "x", "model": "unknown-model-x", "priority": "normal", "wait": "30s"}})
+	if err != nil || res.IsError {
+		t.Fatalf("normal run on unknown model: err=%v res=%+v", err, res)
 	}
 }
