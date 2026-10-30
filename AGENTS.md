@@ -16,7 +16,7 @@ Module path: `github.com/tphakala/agy-mcp/v2`. Go version: see `go.mod`.
 
 | Path | Role |
 |---|---|
-| `main.go` | Entry point. Subcommands `run-job` (`internal/supervisor`), and `wait-job`, `hook-wait`, `doctor` (the root package's `waitcmd.go`, `hookwait.go`, `doctor.go`); otherwise serves MCP over stdio or HTTP. |
+| `main.go` | Entry point. Subcommands `run-job` (`internal/supervisor`), and `wait-job`, `hook-wait`, `doctor` (the root package's `waitcmd.go`, `hookwait.go`, `doctor.go`), plus `version`/`--version`/`-version`; otherwise serves MCP over stdio or HTTP. |
 | `internal/mcptools` | MCP tools. Tool descriptions are the `Description:` strings (plus `serverInstructions`); field descriptions are the `jsonschema` struct tags. Both live in `tools.go`, `run_sync.go` and `wait.go`. |
 | `internal/manager` | Job lifecycle: request normalization, spawning, status derivation (`status.go`), cancel, models, agents, sessions. |
 | `internal/supervisor` | The per-job process that runs agy and writes the job directory. |
@@ -41,6 +41,38 @@ go build -tags ruleguard ./rules/ # a broken rule otherwise compiles clean and s
 
 CI runs build, vet and tests on Linux, macOS and Windows (Windows without `-race`) and lint on Linux.
 Run the full suite before proposing a change; several tests exercise real child processes and timing.
+
+## Building a binary (also for forks and other users' machines)
+
+These steps assume nothing about the host: no fixed directories, no particular user, no service manager.
+
+1. **Prerequisites:** Git and Go. The required Go version is the `go` line in `go.mod`. With Go 1.21+ an
+   older `go` downloads that toolchain itself (`GOTOOLCHAIN=auto`), which needs network access once. If
+   the build fails with a toolchain download error, report it instead of editing `go.mod`.
+2. **Build from the repository root of the branch you were asked to build:**
+   `go build -trimpath -o agy-mcp .` (add `.exe` on Windows). Then run `./agy-mcp --version`.
+3. **Verify before delivering:** `go vet ./...` and `go test ./...`. The tests build and run the binary
+   and need no agy installation (they use a fake agy), but they spawn real processes, so allow a minute.
+4. **Install only where the user asked.** Build to a temporary path first and move it over the target, so a
+   running server never has its binary overwritten in place. Restarting whatever supervises the server
+   (systemd, launchd, an MCP client) is the user's call; ask before doing it.
+5. **Do not commit build output.** `/agy-mcp`, `/dist/` and `*.exe` are gitignored.
+
+### Version string of fork and local builds
+
+A binary built from a fork or a local branch must be distinguishable from an unmodified upstream
+release. The version is `<base>+local.<short-sha>[.dirty]`, SemVer 2.0.0 build metadata, for example
+`v2.9.0+local.d734728`. `FormatVersion` in `internal/mcptools/tools.go` derives it from the VCS data Go
+embeds, so a plain `go build` inside a Git checkout is self-identifying. The same string is printed by
+`agy-mcp --version`, written to the startup log and sent as the MCP `serverInfo.version`.
+
+- **A tarball or `-buildvcs=false` build has no VCS data and reports `dev`.** Do not deliver such a
+  build as a fork build; build from the Git checkout, or pass the version explicitly with
+  `-ldflags "-X github.com/tphakala/agy-mcp/v2/internal/mcptools.Version=<string>"`.
+- **`BaseVersion` (same file) is the upstream release the branch is based on.** Update it, and the
+  expected prefix in `TestVersionSubcommandReportsSemVerBuildMetadata` (`main_test.go`) together, when
+  rebasing onto a newer upstream release. Keep `Version` empty in the source.
+- **Never drop the `+local.` suffix from a modified build** to make it look like a release.
 
 ## The job directory contract
 

@@ -106,6 +106,40 @@ go install github.com/tphakala/agy-mcp/v2@latest
 
 The module path carries a `/v2` suffix from v2.0.0 on, as Go requires for a major version. `go install github.com/tphakala/agy-mcp@latest` still resolves, but to the last v1 release.
 
+### Build from source (forks and local branches)
+
+Requirements: Git, and a Go toolchain new enough for the `go` line in [go.mod](go.mod) (currently Go 1.27). With Go 1.21 or newer, an older local `go` fetches the toolchain named in `go.mod` automatically (`GOTOOLCHAIN=auto`, the default), which needs network access on the first build. Nothing else is required: the build is pure Go and has no code generation step.
+
+```bash
+git clone https://github.com/<owner>/agy-mcp.git   # your fork, or the upstream repository
+cd agy-mcp
+git checkout <branch>                               # the branch you want to build
+go build -trimpath -o agy-mcp .                     # writes ./agy-mcp (agy-mcp.exe on Windows)
+./agy-mcp --version
+```
+
+To install the result somewhere on your `PATH`, build straight to the destination, for example `go build -trimpath -o "$HOME/.local/bin/agy-mcp" .`. Build into a temporary file and move it into place if a running server already uses that path.
+
+**Version string.** `agy-mcp --version` (also `agy-mcp version` and `agy-mcp -version`), the server startup log line and the MCP `serverInfo.version` all report the same string, so you can tell which build a running server is:
+
+| Build | Reported version |
+|-------|------------------|
+| `go install github.com/tphakala/agy-mcp/v2@vX.Y.Z` (tagged release, no VCS data) | `vX.Y.Z` |
+| `go build` inside a Git checkout, clean tree | `v2.9.0+local.<short-sha>` |
+| `go build` inside a Git checkout with uncommitted changes | `v2.9.0+local.<short-sha>.dirty` |
+| Source tarball or `-buildvcs=false`, so there is no VCS data | `dev` |
+
+The `+local.<short-sha>` suffix is [SemVer 2.0.0 build metadata](https://semver.org/#spec-item-10): it keeps the upstream base version and identifies the exact commit, so a modified build is never mistaken for an unmodified release. The base is the `BaseVersion` variable in [internal/mcptools/tools.go](internal/mcptools/tools.go); update it when you rebase a fork onto a newer upstream release. Both values can be overridden at link time:
+
+```bash
+go build -trimpath \
+  -ldflags "-X github.com/tphakala/agy-mcp/v2/internal/mcptools.BaseVersion=v2.10.0" -o agy-mcp .
+# or set the whole string:
+#   -X github.com/tphakala/agy-mcp/v2/internal/mcptools.Version=v2.10.0+local.mybuild
+```
+
+To verify a change before using the binary, run `go vet ./...` and `go test ./...` (see [AGENTS.md](AGENTS.md) for the full list including lint).
+
 ## Use with Claude Code (stdio)
 
 ```bash
