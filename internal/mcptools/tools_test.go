@@ -3,6 +3,7 @@ package mcptools
 import (
 	"encoding/json"
 	"errors"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -743,5 +744,70 @@ func TestServerInstructionsKeepNotesInView(t *testing.T) {
 		if i < 0 || i >= clientLimit {
 			t.Errorf("note %q starts at %d, want inside the first %d characters", note, i, clientLimit)
 		}
+	}
+}
+
+func TestFormatVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		bi              *debug.BuildInfo
+		ok              bool
+		explicitVersion string
+		baseVersion     string
+		want            string
+	}{
+		{
+			name:            "explicit ldflags version wins",
+			bi:              &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
+			ok:              true,
+			explicitVersion: "v2.9.0+local.custom",
+			baseVersion:     "v2.9.0",
+			want:            "v2.9.0+local.custom",
+		},
+		{
+			name:        "local checkout with pseudo-version formats SemVer build metadata",
+			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.9.1-0.20261030100619-2735d07e4633"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "2735d07e463385b0ec5b2ab584f00a3bc9341752"}, {Key: "vcs.modified", Value: "false"}}},
+			ok:          true,
+			baseVersion: "v2.9.0",
+			want:        "v2.9.0+local.2735d07",
+		},
+		{
+			name:        "local checkout with (devel) and dirty worktree",
+			bi:          &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "2735d07e463385b0ec5b2ab584f00a3bc9341752"}, {Key: "vcs.modified", Value: "true"}}},
+			ok:          true,
+			baseVersion: "v2.9.0",
+			want:        "v2.9.0+local.2735d07.dirty",
+		},
+		{
+			name:        "tagged checkout with vcs revision preserves tag as base",
+			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.10.0+dirty"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "abcdef1234567890"}, {Key: "vcs.modified", Value: "true"}}},
+			ok:          true,
+			baseVersion: "v2.9.0",
+			want:        "v2.10.0+local.abcdef1.dirty",
+		},
+		{
+			name:        "module install without vcs settings keeps module version",
+			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.9.0"}},
+			ok:          true,
+			baseVersion: "v2.9.0",
+			want:        "v2.9.0",
+		},
+		{
+			name:        "plain test binary without vcs settings returns dev",
+			bi:          &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
+			ok:          true,
+			baseVersion: "v2.9.0",
+			want:        "dev",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatVersion(tc.bi, tc.ok, tc.explicitVersion, tc.baseVersion)
+			if got != tc.want {
+				t.Errorf("FormatVersion() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

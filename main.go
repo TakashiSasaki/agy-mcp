@@ -54,6 +54,11 @@ func main() {
 		os.Exit(doctorMain(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Printf("agy-mcp %s\n", mcptools.ServerVersion())
+		return
+	}
+
 	if err := serve(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
@@ -123,14 +128,14 @@ func serve() error {
 		if cfg.HTTPToken != "" {
 			authNote = "bearer-token auth enabled"
 		}
-		log.Printf("serving Streamable HTTP on %s (%s)", *httpAddr, authNote)
+		log.Printf("%s serving Streamable HTTP on %s (%s)", mcptools.ServerVersion(), *httpAddr, authNote)
 		if err := mcptools.ServeHTTP(ctx, mgr, *httpAddr, cfg.HTTPToken); err != nil {
 			return fmt.Errorf("http serve: %w", err)
 		}
 		return nil
 	}
 
-	log.Print("serving over stdio")
+	log.Printf("%s serving over stdio", mcptools.ServerVersion())
 	if err := mcptools.ServeStdio(ctx, mgr); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("stdio serve: %w", err)
 	}

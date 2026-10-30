@@ -370,16 +370,132 @@ type sessionsOutput struct {
 	Sessions []manager.Session `json:"sessions" jsonschema:"one entry per workspace directory, each holding that directory's most recent conversation id"`
 }
 
-// serverVersion reports the module version the Go toolchain stamped into the
-// binary (e.g. v1.0.0 for a tagged `go install`, a pseudo-version for builds
-// past a tag), or "dev" when no version was stamped (plain `go test` binaries).
+// BaseVersion is the upstream release version that this build is based on.
+// Override at link time with -ldflags "-X github.com/tphakala/agy-mcp/v2/internal/mcptools.BaseVersion=vX.Y.Z",
+// or override the full version string with -ldflags "-X github.com/tphakala/agy-mcp/v2/internal/mcptools.Version=...".
+var (
+	BaseVersion = "v2.9.0"
+	Version     = ""
+)
+
+// ServerVersion returns the resolved SemVer version string for this binary.
+// For local or modified builds carrying VCS metadata, it formats SemVer 2.0.0
+// build metadata (Section 10) as "<base>+local.<short-sha>[.dirty]" so custom
+// builds are immediately distinguishable from unmodified upstream releases.
+func ServerVersion() string {
+	return serverVersion()
+}
+
+// FormatVersion derives the SemVer string from debug.BuildInfo and optional
+// linker overrides. Extracted for deterministic unit testing across tagged,
+// pseudo-version, devel, dirty, and ldflags-overridden build shapes.
+func FormatVersion(bi *debug.BuildInfo, ok bool, explicitVersion, baseVersion string) string {
+	if explicitVersion != "" {
+		return explicitVersion
+	}
+	if baseVersion == "" {
+		baseVersion = "v2.9.0"
+	}
+	if !ok || bi == nil {
+		return baseVersion
+	}
+	var rev string
+	var dirty bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	shortRev := rev
+	if len(shortRev) > 7 {
+		shortRev = shortRev[:7]
+	}
+	mainVer := bi.Main.Version
+	// When built from a git checkout with VCS stamping, attach +local.<shortRev>[.dirty]
+	// whenever the module version is (devel) or a pseudo-version (which contains a
+	// timestamp-commit suffix after a hyphen).
+	if shortRev != "" {
+		base := baseVersion
+		if mainVer != "" && mainVer != "(devel)" && !isPseudoVersion(mainVer) {
+			// Clean tagged version, strip any +dirty suffix Go may have appended.
+			if idx := indexByte(mainVer, '+'); idx >= 0 {
+				base = mainVer[:idx]
+			} else {
+				base = mainVer
+			}
+		}
+		meta := "+local." + shortRev
+		if dirty {
+			meta += ".dirty"
+		}
+		return base + meta
+	}
+	if mainVer != "" && mainVer != "(devel)" {
+		return mainVer
+	}
+	return "dev"
+}
+
+func indexByte(s string, c byte) int {
+	for i := range len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// isPseudoVersion reports whether v looks like a Go module pseudo-version
+// (e.g. v2.9.1-0.20261030100619-2735d07e4633 or v0.0.0-20261030100619-2735d07e4633+dirty).
+func isPseudoVersion(v string) bool {
+	if idx := indexByte(v, '+'); idx >= 0 {
+		v = v[:idx]
+	}
+	dash := -1
+	for i := len(v) - 1; i >= 0; i-- {
+		if v[i] == '-' {
+			dash = i
+			break
+		}
+	}
+	if dash < 0 || len(v)-dash-1 < 7 {
+		return false
+	}
+	prefix := v[:dash]
+	prevDash := -1
+	for i := len(prefix) - 1; i >= 0; i-- {
+		if prefix[i] == '-' {
+			prevDash = i
+			break
+		}
+	}
+	if prevDash < 0 {
+		return false
+	}
+	ts := prefix[prevDash+1:]
+	// Go pseudo-versions carry a 14-digit UTC timestamp (YYYYMMDDHHMMSS), optionally
+	// preceded by "0." or similar pre-release prefix.
+	if len(ts) >= 14 {
+		digits := ts[len(ts)-14:]
+		for i := range len(digits) {
+			if digits[i] < '0' || digits[i] > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// serverVersion reports the resolved SemVer string for this binary.
 // It is memoized with sync.OnceValue: the build info is fixed for a process's
 // life, but NewServer (and thus this) is called once per HTTP session.
 var serverVersion = sync.OnceValue(func() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		return bi.Main.Version
-	}
-	return "dev"
+	bi, ok := debug.ReadBuildInfo()
+	return FormatVersion(bi, ok, Version, BaseVersion)
 })
 
 // serverInstructions is the MCP instructions string sent to clients at

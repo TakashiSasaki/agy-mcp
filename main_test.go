@@ -215,3 +215,20 @@ func TestCheckLoopbackAddrResolvesHostnames(t *testing.T) {
 		t.Error("a literal IP must not trigger a hostname lookup")
 	}
 }
+
+func TestVersionSubcommandReportsSemVerBuildMetadata(t *testing.T) {
+	bin, err := buildBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{"version", "--version", "-version"} {
+		out, err := exec.Command(bin, arg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("agy-mcp %s failed: %v\n%s", arg, err, out)
+		}
+		line := strings.TrimSpace(string(out))
+		if !strings.HasPrefix(line, "agy-mcp v2.9.0+local.") {
+			t.Errorf("agy-mcp %s = %q, want prefix \"agy-mcp v2.9.0+local.\"", arg, line)
+		}
+	}
+}
