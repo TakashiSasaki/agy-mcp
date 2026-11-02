@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -28,23 +29,38 @@ func parseWait(s string) (time.Duration, error) {
 	return min(d, maxSyncWait()), nil
 }
 
+const defaultProgressHeartbeat = 10 * time.Second
+
+func progressHeartbeat() time.Duration {
+	if v := os.Getenv("AGY_MCP_PROGRESS_HEARTBEAT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultProgressHeartbeat
+}
+
 // awaitJob blocks until the job is terminal or the deadline passes, emitting
-// once-per-second MCP progress notifications when the client supplied a
-// progress token. It is the wait phase shared by agy_run_sync and agy_wait,
-// so their semantics cannot drift. On a wait-cap overrun the returned output
-// carries the standard still-running note, which names agy_wait before
-// agy_status. A terminal outcome is recorded as collected (see markCollected).
+// MCP progress notifications when the client supplied a progress token.
+// Notifications are throttled to fire on step changes or a 10s heartbeat to avoid
+// overwhelming network transports while remaining responsive.
 func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manager, jobID string, deadline time.Time) (runSyncOutput, error) {
 	token := req.Params.GetProgressToken()
-	// Notify once per elapsed second, not per poll tick: the message has
-	// whole-second granularity, so finer cadence is pure stream noise.
 	lastNotified := time.Duration(-1)
+	lastStepType := ""
+	heartbeat := progressHeartbeat()
 	onTick := func(st manager.Status) {
 		sec := st.Elapsed.Truncate(time.Second)
-		if token == nil || sec == lastNotified {
+		if token == nil {
+			return
+		}
+		stepChanged := st.StepType != "" && st.StepType != lastStepType
+		heartbeatDue := lastNotified < 0 || sec-lastNotified >= heartbeat
+		if !stepChanged && !heartbeatDue {
 			return
 		}
 		lastNotified = sec
+		lastStepType = st.StepType
 		// Best effort: the result, not the notifications, is the contract. Bound
 		// each send to one poll tick so a client that stopped draining the stream
 		// cannot park the wait loop past its cap.

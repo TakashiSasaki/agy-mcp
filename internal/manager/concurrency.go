@@ -62,6 +62,12 @@ func (g *gate) tryAcquire(key string) acquireOutcome {
 // limit in an at-capacity error. It is set once in newGate and never mutated.
 func (g *gate) cap() int { return g.max }
 
+func (g *gate) hasInFlight() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.inFlight > 0
+}
+
 // forceAcquire reserves a slot and key for a job that is already running (a
 // restored job whose agy session exists regardless of the gate), so the gate
 // accounts for it. Unlike tryAcquire it ignores the cap: a live job must be

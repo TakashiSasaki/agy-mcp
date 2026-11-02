@@ -28,9 +28,10 @@ const (
 	// the background (a Go duration; 0 disables background probing).
 	// EnvUsageLow and EnvUsageCritical are the remaining-quota percentages below
 	// which a group reports the low and critical levels.
-	EnvUsageInterval = "AGY_MCP_USAGE_INTERVAL"
-	EnvUsageLow      = "AGY_MCP_USAGE_LOW"
-	EnvUsageCritical = "AGY_MCP_USAGE_CRITICAL"
+	EnvUsageInterval      = "AGY_MCP_USAGE_INTERVAL"
+	EnvUsageLow           = "AGY_MCP_USAGE_LOW"
+	EnvUsageCritical      = "AGY_MCP_USAGE_CRITICAL"
+	EnvConversationIDWait = "AGY_MCP_CONVERSATION_ID_WAIT"
 )
 
 // Defaults for the quota settings.
@@ -92,16 +93,21 @@ func baseConfig() Config {
 // DefaultConversationIDWait is how long agy_run waits for agy's init event to name the
 // conversation. agy emits it before any model work but after its own startup,
 // which includes launching whatever MCP servers it is configured with, so the
-// budget is generous relative to the roughly one second observed against a warm
-// 1.1.8. Expiry is not a failure: agy_status reports the id once the event
+// budget is generous relative to the roughly 4.5 seconds observed against agy 1.4.12.
+// Expiry is not a failure: agy_status reports the id once the event
 // lands.
-const DefaultConversationIDWait = 2 * time.Second
+const DefaultConversationIDWait = 5 * time.Second
 
 // Resolve builds a Config from environment variables and defaults.
 func Resolve() (Config, error) {
 	c := baseConfig()
 	c.DefaultModel = os.Getenv(EnvDefaultModel)
 	c.HTTPToken = os.Getenv(EnvHTTPToken)
+	if v := os.Getenv(EnvConversationIDWait); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.ConversationIDWait = d
+		}
+	}
 
 	// The two lookup branches fail differently, on purpose.
 	//

@@ -48,6 +48,7 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 	var oc streamOutcome
 	sr := streamjson.NewReader(r)
 	var prog jobstore.Progress
+	stepUsages := make(map[int]streamjson.Usage)
 	for {
 		ev, err := sr.Next()
 		if err != nil {
@@ -69,6 +70,9 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 			}
 		case streamjson.EventStepUpdate:
 			if su := ev.StepUpdate; su != nil {
+				if su.Usage != nil {
+					stepUsages[su.StepIndex] = *su.Usage
+				}
 				// Only rewrite when something a reader can observe actually moved.
 				// The conversation branch above already guards this way; without the
 				// same guard here, a repeated update for one step (agy stamps its id
@@ -119,6 +123,26 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 			// Best effort for the same reason: progress is a hint the manager treats
 			// as absent when unreadable, never a correctness gate.
 			_ = jobstore.WriteProgressDir(jobDir, prog)
+		}
+	}
+	if oc.result != nil {
+		if len(stepUsages) > 0 {
+			var ju streamjson.Usage
+			for _, u := range stepUsages {
+				ju.InputTokens += u.InputTokens
+				ju.OutputTokens += u.OutputTokens
+				ju.ThinkingTokens += u.ThinkingTokens
+				ju.CacheReadTokens += u.CacheReadTokens
+				ju.TotalTokens += u.TotalTokens
+			}
+			oc.result.JobUsage = &ju
+		} else if oc.result.Usage != nil && oc.result.NumTurns <= 1 {
+			oc.result.JobUsage = oc.result.Usage
+		}
+		if oc.result.NumTurns > 1 {
+			oc.result.UsageScope = streamjson.UsageScopeConversationCumulative
+		} else {
+			oc.result.UsageScope = streamjson.UsageScopeJob
 		}
 	}
 	oc.malformed = sr.Malformed()

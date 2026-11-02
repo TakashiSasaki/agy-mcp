@@ -155,8 +155,10 @@ type Status struct {
 	Partial bool
 	// NumTurns and Usage are agy's own accounting, present only once a terminal
 	// result event has been recorded.
-	NumTurns int
-	Usage    *streamjson.Usage
+	NumTurns   int
+	Usage      *streamjson.Usage
+	JobUsage   *streamjson.Usage
+	UsageScope string
 	// StepType names the stream step the job is on, for progress reporting. It
 	// is a hint: empty until the first step arrives, and stale by up to one poll.
 	// It is read from progress.json before the exit-code sentinel is consulted,
@@ -706,6 +708,18 @@ func carryResultMetadata(st Status, res streamjson.Result) Status {
 	}
 	st.NumTurns = res.NumTurns
 	st.Usage = res.Usage
+	st.JobUsage = res.JobUsage
+	st.UsageScope = res.UsageScope
+	if st.UsageScope == "" && res.Usage != nil {
+		if res.NumTurns > 1 {
+			st.UsageScope = streamjson.UsageScopeConversationCumulative
+		} else {
+			st.UsageScope = streamjson.UsageScopeJob
+		}
+	}
+	if st.JobUsage == nil && res.Usage != nil && st.UsageScope == streamjson.UsageScopeJob {
+		st.JobUsage = res.Usage
+	}
 	return st
 }
 

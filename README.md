@@ -32,12 +32,14 @@ Every job runs `agy --output-format stream-json`, and the supervisor decodes tha
 - `agy_run` / `agy_status` / `agy_cancel`: start an `agy` prompt, poll for completion, cancel if needed.
 - `agy_run_sync`: start a prompt and wait for it inline (bounded, with MCP progress notifications); returns the `job_id` to wait on or poll if it outlives the wait cap.
 - `agy_wait`: block until an already-started job finishes (bounded, with MCP progress notifications); one call replaces an `agy_status` poll loop.
+- `agy_list_artifacts`: list artifact, receipt, and report files produced by an `agy` job within its allowed directories, with file sizes and SHA-256 digests.
+- `agy_read_artifact`: read contents of a specific artifact, receipt, or log file produced by an `agy` job, with line range or tail limits and boundary confinement checks.
 - `list_models`: enumerate available `agy` models, as the ids the `model` parameter accepts plus their display labels.
 - `list_agents`: enumerate available `agy` agents, as the names the `agent` parameter accepts. Unlike `list_models` there is no id/label split, because `agy` takes an agent name verbatim; an empty list just means no agents are configured.
 - `agy_usage`: report the remaining `agy` quota per quota group (for example `Gemini Models`, `Gemini 4 Argon`, and `Claude and GPT models`) with a level of `ok`, `low`, `critical` or `exhausted`. It spends no model quota. See [Quota](#quota).
 - `list_sessions`: list known conversations so review threads can be continued. An unfiltered call omits the ephemeral per-call workspaces the agy-openai-shim helper creates; pass a `dir` to fetch a specific one.
 
-`agy_run` and `agy_run_sync` also take optional per-run controls: pick the `model`, reasoning `effort` (`low`/`medium`/`high`), execution `mode` (including a `plan`-only pass), a named `agent`, `sandbox` terminal restrictions, and a `json_schema` to constrain the result to structured output. Those run-shaping values are forwarded to `agy`; `idempotency_key` is handled only by agy-mcp and is never forwarded.
+`agy_run` and `agy_run_sync` also take optional per-run controls: pick the `model`, reasoning `effort` (`low`/`medium`/`high`/`xhigh`/`max`), execution `mode` (`accept-edits`/`auto`/`plan`), a named `agent`, `sandbox` terminal restrictions, and a `json_schema` to constrain the result to structured output. Those run-shaping values are forwarded to `agy`; `idempotency_key` is handled only by agy-mcp and is never forwarded.
 
 For retry-safe job creation, supply `idempotency_key` when a transport failure could leave it ambiguous whether the run started. Reusing the same key with the same normalized request returns the existing job instead of starting another; using the key for a different request is rejected. The binding lasts while that job remains in the job store (24 hours by default), so this is transport-retry protection rather than a permanent business-level deduplication key.
 
@@ -159,11 +161,13 @@ Or add to your MCP client config:
 ## Tools
 
 - `agy_run(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?)` -> `{ job_id, conversation_id?, state, quota? }`
-- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, step_type?, quota?, note? }`
-- `agy_status(job_id)` -> `{ state, elapsed, result?, error?, failure_reason?, recovery?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, step_type?, quota? }`
-- `agy_wait(job_id, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, step_type?, quota?, note? }`
+- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
+- `agy_status(job_id)` -> `{ state, elapsed, result?, error?, failure_reason?, recovery?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota? }`
+- `agy_wait(job_id, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
 - `agy_cancel(job_id)` -> `{ state }`
 - `agy_usage(max_age?)` -> `{ checked_at, groups }`, each group `{ name, description?, level, remaining_percent, window, reset_time?, buckets }`
+- `agy_list_artifacts(job_id, subpath?, pattern?, max_entries?)` -> `{ job_id, root, entries }`
+- `agy_read_artifact(job_id, path, start_line?, end_line?, tail_lines?, max_bytes?)` -> `{ job_id, path, size_bytes, sha256, total_lines, start_line, end_line, truncated, content }`
 - `list_models()` -> `{ models, model_details }`
 - `list_agents()` -> `{ agents }`
 - `list_sessions(dir?)` -> `{ sessions }`
@@ -172,7 +176,7 @@ Or add to your MCP client config:
 
 `models` holds ids alone, so its entries can be passed straight to `model`; `model_details` pairs each id with the display label `agy` prints for it, in the same order, for showing a readable name. Through v2.1.0 `models` carried each `agy models` row whole, which was a tab-joined `id<TAB>label` string that `agy` does not accept as a model at all, so a client had to split it and pick a column ([#135](https://github.com/tphakala/agy-mcp/issues/135)).
 
-`usage` is agy's own token accounting (`input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `total_tokens`), and together with `num_turns` it appears once a run reports a terminal result.
+`usage` is agy's own token accounting (`input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `total_tokens`), and together with `num_turns` it appears once a run reports a terminal result. On resumed multi-turn runs (`num_turns > 1` or continuation), `usage` is conversation-cumulative, while `job_usage` reports the tokens billed specifically for that single job run, and `usage_scope` indicates whether `usage` is `"job"` or `"conversation_cumulative"`.
 
 `model` (kept for backward compatibility) and `requested_model` echo the normalized model id agy-mcp resolved for the run and passed to `agy` via `--model` (the one you passed, or `AGY_MCP_DEFAULT_MODEL`, reduced to its id); both are absent when no model was pinned and `agy` ran on its own default. When `agy` emits `init.model` in its pre-execution `stream-json` `init` event, `selected_model` carries that pre-execution CLI selection with `selected_model_source: "cli_init"`. Because `agy`'s `stream-json` output does not include post-generation execution model metadata, `effective_model` is `null` with `effective_model_source: "unknown"` rather than fabricated from request or `init` flags.
 
@@ -343,6 +347,8 @@ v2 requires agy 1.1.15 and drives it through `--output-format stream-json`. The 
 | `AGY_MCP_DEFAULT_MODEL` | agy default | default model, as an id (`gemini-3.1-pro-high`), not a display label |
 | `AGY_MCP_HTTP_TOKEN` | (none) | optional bearer token for HTTP mode; empty = unauthenticated |
 | `AGY_MCP_SYNC_WAIT_CAP` | `90s` | inline-wait ceiling for `agy_run_sync` / `agy_wait` (the default when no `wait` is given, and the clamp for a larger one); the 90s default stays below common MCP clients' ~120s per-call timeout, and this variable raises or lowers it; a Go duration that does not parse as positive is ignored |
+| `AGY_MCP_CONVERSATION_ID_WAIT` | `5s` | how long `agy_run` blocks waiting for `agy` to emit its stream `init` event and name the conversation id; a Go duration that does not parse as positive is ignored |
+| `AGY_MCP_PROGRESS_HEARTBEAT` | `10s` | heartbeat interval for MCP progress notifications during `agy_wait` / `agy_run_sync` while step type is unchanged; notifications still fire immediately on step changes |
 | `AGY_MCP_USAGE_INTERVAL` | `5m` | how often the server refreshes its quota reading in the background (a Go duration of at least 1m); `0` disables background probing, leaving only explicit `agy_usage` calls to probe; a bad value fails startup |
 | `AGY_MCP_USAGE_LOW` | `25` | remaining quota percent (`25` or `25%`) below which a group reports `low`; a bad value, or `AGY_MCP_USAGE_CRITICAL` above it, fails startup |
 | `AGY_MCP_USAGE_CRITICAL` | `5` | remaining quota percent below which a group reports `critical` |

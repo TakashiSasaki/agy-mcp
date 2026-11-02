@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -97,7 +98,7 @@ func TestDecodeUsageEnvelopeDetectsModelTurn(t *testing.T) {
 
 func TestUsageProbeArgsSpendNoQuota(t *testing.T) {
 	got := usageProbeArgs()
-	want := []string{"--output-format", "json", "-p", "/usage"}
+	want := []string{"--log-file", os.DevNull, "--output-format", "json", "-p", "/usage"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("usageProbeArgs() = %q, want %q", got, want)
 	}

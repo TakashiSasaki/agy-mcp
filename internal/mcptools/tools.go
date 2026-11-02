@@ -21,8 +21,8 @@ import (
 type runInput struct {
 	Prompt         string   `json:"prompt" jsonschema:"the complete task for the delegated agent: what to do, the context needed to do it, and the output wanted back; the agent cannot see this conversation, so the prompt must stand alone. It is sent to agy literally, so a leading slash-command or skill name (a prompt starting with /) is treated as text, not expanded"`
 	Model          string   `json:"model,omitempty" jsonschema:"agy model id, e.g. gemini-3.1-pro-high; omit to use the server's default model, or agy's own default when the server sets none. Call list_models for the accepted values and pass one from its models field, not a display label from model_details, because agy rejects a display label whenever effort is also set. Not every id accepts every effort either, and some accept none, so omit effort unless you need a specific one"`
-	Effort         string   `json:"effort,omitempty" jsonschema:"reasoning effort for this run (agy --effort): low, medium or high. Omit to use agy's default"`
-	Mode           string   `json:"mode,omitempty" jsonschema:"agy agent execution mode for this run (agy --mode): accept-edits or plan. Omit to use agy's default mode"`
+	Effort         string   `json:"effort,omitempty" jsonschema:"reasoning effort for this run (agy --effort): low, medium, high, xhigh or max. Omit to use agy's default"`
+	Mode           string   `json:"mode,omitempty" jsonschema:"agy agent execution mode for this run (agy --mode): accept-edits, auto or plan. Omit to use agy's default mode"`
 	Agent          string   `json:"agent,omitempty" jsonschema:"name of a specific agy agent to run for this session (agy --agent); omit to use agy's default agent"`
 	Sandbox        bool     `json:"sandbox,omitempty" jsonschema:"run the agent with agy's sandbox (terminal restrictions) enabled (agy --sandbox); off by default"`
 	Dirs           []string `json:"dirs,omitempty" jsonschema:"extra directories to grant the agent beyond cwd (agy --add-dir), e.g. a spec or a sibling repo. The agent can read and write there exactly as under cwd, so this widens the blast radius; prefer absolute paths. Each entry is also an agy workspace, so its own rule files load regardless of project_rules"`
@@ -46,6 +46,7 @@ const maxJobTimeout = 24 * time.Hour
 // message rather than reaching agy, which agy-mcp cannot surface as cleanly.
 const (
 	agyModeAcceptEdits = "accept-edits"
+	agyModeAuto        = "auto"
 	agyModePlan        = "plan"
 )
 
@@ -56,6 +57,8 @@ const (
 	agyEffortLow    = "low"
 	agyEffortMedium = "medium"
 	agyEffortHigh   = "high"
+	agyEffortXHigh  = "xhigh"
+	agyEffortMax    = "max"
 )
 
 // ToolAgyRunSync is the agy_run_sync tool name, exported so out-of-package
@@ -152,14 +155,14 @@ func (in runInput) toStartRequest() (manager.StartRequest, error) {
 		// project_rules defaults to true, so only an explicit false opts out.
 		SkipProjectRules: in.ProjectRules != nil && !*in.ProjectRules,
 	}
-	if in.Effort != "" && in.Effort != agyEffortLow && in.Effort != agyEffortMedium && in.Effort != agyEffortHigh {
-		return manager.StartRequest{}, fmt.Errorf("invalid effort %q: want %s, %s or %s", in.Effort, agyEffortLow, agyEffortMedium, agyEffortHigh)
+	if in.Effort != "" && in.Effort != agyEffortLow && in.Effort != agyEffortMedium && in.Effort != agyEffortHigh && in.Effort != agyEffortXHigh && in.Effort != agyEffortMax {
+		return manager.StartRequest{}, fmt.Errorf("invalid effort %q: want %s, %s, %s, %s or %s", in.Effort, agyEffortLow, agyEffortMedium, agyEffortHigh, agyEffortXHigh, agyEffortMax)
 	}
 	if in.Priority != "" && in.Priority != manager.PriorityNormal && in.Priority != manager.PriorityOptional {
 		return manager.StartRequest{}, fmt.Errorf("invalid priority %q: want %s or %s", in.Priority, manager.PriorityNormal, manager.PriorityOptional)
 	}
-	if in.Mode != "" && in.Mode != agyModeAcceptEdits && in.Mode != agyModePlan {
-		return manager.StartRequest{}, fmt.Errorf("invalid mode %q: want %s or %s", in.Mode, agyModeAcceptEdits, agyModePlan)
+	if in.Mode != "" && in.Mode != agyModeAcceptEdits && in.Mode != agyModeAuto && in.Mode != agyModePlan {
+		return manager.StartRequest{}, fmt.Errorf("invalid mode %q: want %s, %s or %s", in.Mode, agyModeAcceptEdits, agyModeAuto, agyModePlan)
 	}
 	if in.Timeout != "" {
 		d, err := parsePositiveDuration("timeout", in.Timeout, "20m")
@@ -239,8 +242,10 @@ type statusOutput struct {
 	Partial bool `json:"partial,omitempty" jsonschema:"true when result is not the verified final answer, so treat it as incomplete. It follows from provenance: streamed fallback text is partial; a non-schema SUCCESS response is complete; for a json_schema run only SUCCESS structured_output is complete, while response retained because structured_output is missing is diagnostic and partial. An authoritative result stays complete even if the process is then cancelled or killed, with two exceptions that make even an authoritative SUCCESS result partial: a clean exit (or a job recovered from agy's result after its supervisor died) whose stderr shows agy ended the run early (it killed outstanding background tasks, or its own --print-timeout expired mid-turn), and a timed-out run whose stderr shows agy's own --print-timeout had already expired"`
 	// NumTurns and Usage are agy's own accounting, present once the run reported
 	// a terminal result.
-	NumTurns int          `json:"num_turns,omitempty" jsonschema:"how many turns the conversation has taken, as reported by agy"`
-	Usage    *usageOutput `json:"usage,omitempty" jsonschema:"token accounting for the run, as reported by agy"`
+	NumTurns   int          `json:"num_turns,omitempty" jsonschema:"how many turns the conversation has taken, as reported by agy"`
+	Usage      *usageOutput `json:"usage,omitempty" jsonschema:"token accounting as reported by agy: conversation-cumulative on resumed/multi-turn runs (see usage_scope)"`
+	JobUsage   *usageOutput `json:"job_usage,omitempty" jsonschema:"token accounting spent specifically within this job's execution (useful for cost comparison)"`
+	UsageScope string       `json:"usage_scope,omitempty" jsonschema:"scope of usage: 'job' for fresh single-turn runs, 'conversation_cumulative' for resumed/multi-turn conversations"`
 	// StepType answers "what is it doing" for a running job, which is the whole
 	// point of polling one. It reaches the wire as well as the progress
 	// notification because Claude Code never surfaces notifications to the model.
@@ -296,6 +301,16 @@ func toStatusOutput(st manager.Status) statusOutput {
 			TotalTokens:     u.TotalTokens,
 		}
 	}
+	if ju := st.JobUsage; ju != nil {
+		out.JobUsage = &usageOutput{
+			InputTokens:     ju.InputTokens,
+			OutputTokens:    ju.OutputTokens,
+			ThinkingTokens:  ju.ThinkingTokens,
+			CacheReadTokens: ju.CacheReadTokens,
+			TotalTokens:     ju.TotalTokens,
+		}
+	}
+	out.UsageScope = st.UsageScope
 	// Recovery is tool-facing advice for a terminal run that ended with no result
 	// text but is still actionable. BOTH branches require out.Result == "": a run
 	// that produced any text (even a partial one) has its output in Result and
@@ -604,6 +619,7 @@ func NewServer(mgr *manager.Manager) *mcp.Server {
 	registerRunSync(s, mgr)
 	registerWait(s, mgr)
 	registerUsage(s, mgr)
+	registerArtifacts(s, mgr)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolListModels,

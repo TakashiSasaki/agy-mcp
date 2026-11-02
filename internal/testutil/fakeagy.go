@@ -183,7 +183,8 @@ func (cfg FakeAgy) version() string {
 //     decoder, which pins the probe's argv end to end. Served from usagePath, with
 //     the configured Stderr and Exit like the listings.
 func (cfg FakeAgy) subcommandPreamble(modelsPath, agentsPath, usagePath, errPath string) string {
-	return fmt.Sprintf("if [ \"$1\" = \"--version\" ]; then printf '%%s\\n' %q; exit 0; fi\n", cfg.version()) +
+	return "if [ \"$1\" = \"--log-file\" ]; then shift 2; fi\n" +
+		fmt.Sprintf("if [ \"$1\" = \"--version\" ]; then printf '%%s\\n' %q; exit 0; fi\n", cfg.version()) +
 		fmt.Sprintf("if [ \"$1\" = \"--output-format\" ] && [ \"$2\" = \"json\" ] && [ \"$3\" = \"models\" ]; then cat %q; cat %q 1>&2; exit %d; fi\n", modelsPath, errPath, cfg.Exit) +
 		fmt.Sprintf("if [ \"$1\" = \"--output-format\" ] && [ \"$2\" = \"json\" ] && [ \"$3\" = \"agents\" ]; then cat %q; cat %q 1>&2; exit %d; fi\n", agentsPath, errPath, cfg.Exit) +
 		fmt.Sprintf("if [ \"$1\" = \"--output-format\" ] && [ \"$2\" = \"json\" ] && [ \"$3\" = \"-p\" ] && [ \"$4\" = \"/usage\" ]; then cat %q; cat %q 1>&2; exit %d; fi\n", usagePath, errPath, cfg.Exit)

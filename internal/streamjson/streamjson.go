@@ -28,6 +28,12 @@ const (
 	StatusError   = "ERROR"
 )
 
+// Usage scope values.
+const (
+	UsageScopeJob                    = "job"
+	UsageScopeConversationCumulative = "conversation_cumulative"
+)
+
 // StepTypeAgentResponse marks the step whose TextDelta values make up the
 // assistant's answer. Other step types (tool calls, checkpoints) carry
 // progress information but do not contribute to the response text.
@@ -95,6 +101,8 @@ type Result struct {
 	DurationSeconds  float64         `json:"duration_seconds,omitempty"`
 	NumTurns         int             `json:"num_turns,omitempty"`
 	Usage            *Usage          `json:"usage,omitempty"`
+	JobUsage         *Usage          `json:"job_usage,omitempty"`
+	UsageScope       string          `json:"usage_scope,omitempty"`
 }
 
 // Event is one decoded line of the stream. agy sets exactly one payload pointer,

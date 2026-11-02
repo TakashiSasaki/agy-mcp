@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -157,7 +158,7 @@ func (e *QuotaRefusalError) bucketPrefix() string {
 // starting an agent turn, spending quota, or leaving a conversation behind"),
 // and agyver.Required is above that version.
 func usageProbeArgs() []string {
-	return []string{outputFormatFlag, jsonOutputFormat, promptFlag, "/" + usageCommandName}
+	return []string{"--log-file", os.DevNull, outputFormatFlag, jsonOutputFormat, promptFlag, "/" + usageCommandName}
 }
 
 // usageEnvelope is the subset of `agy --output-format json -p /usage` the decoder
@@ -773,10 +774,15 @@ func (m *Manager) RunUsageRefresherFromConfig(ctx context.Context) {
 	m.runUsageRefresher(ctx, m.cfg.UsageInterval)
 }
 
+func (m *Manager) hasRunningJobs() bool {
+	return m.gate != nil && m.gate.hasInFlight()
+}
+
 // runUsageRefresher probes immediately and then every interval, skipping a tick
-// that falls inside the failure backoff (see startRefreshLocked). It stops when
-// ctx ends or once a probe has spent a model turn (see errUsageModelTurn). A
-// non-positive interval is a no-op.
+// that falls inside the failure backoff (see startRefreshLocked) or while jobs are
+// currently in flight (to avoid SQLite and language server contention with active jobs).
+// It stops when ctx ends or once a probe has spent a model turn (see errUsageModelTurn).
+// A non-positive interval is a no-op.
 func (m *Manager) runUsageRefresher(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		return
@@ -790,7 +796,10 @@ func (m *Manager) runUsageRefresher(ctx context.Context, interval time.Duration)
 			c.mu.Unlock()
 			return
 		}
-		f := m.startRefreshLocked()
+		var f *quotaFlight
+		if !m.hasRunningJobs() {
+			f = m.startRefreshLocked()
+		}
 		c.mu.Unlock()
 		// The outcome is recorded in the cache and logged by fetchQuota.
 		if f != nil {
