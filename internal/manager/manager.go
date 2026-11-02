@@ -31,8 +31,10 @@ type Manager struct {
 	store     jobStore   // *jobstore.Store in production; an interface so tests can inject failures
 	gate      *gate      // serializes conflicting jobs and caps total concurrency within this process
 	xlock     *crossLock // serializes same-key jobs across sibling processes sharing the state dir
-	cacheFile string     // agy conversation cache (last_conversations.json); injectable for tests
-	idemMu    sync.Mutex
+	cacheFile   string // agy conversation cache (last_conversations.json); injectable for tests
+	projectsDir string // config directory for projects (~/.gemini/config/projects); injectable for tests
+	dataDir     string // root directory for repositories (/data); injectable for tests
+	idemMu      sync.Mutex
 	idemKeys  map[string]bool // short-lived in-process idempotency claims; cross-process half lives in xlock
 
 	// verifiedAgy is the agy path whose version has been checked and accepted in
@@ -94,6 +96,8 @@ func New(c config.Config) *Manager {
 		gate:                 newGate(c.MaxConcurrency),
 		xlock:                newCrossLock(c.StateDir),
 		cacheFile:            cacheFile,
+		projectsDir:          defaultProjectsConfigDir(),
+		dataDir:              "/data",
 		idemKeys:             map[string]bool{},
 		conversationIDWait:   c.ConversationIDWait,
 		restoredPollInterval: 2 * time.Second,
@@ -105,6 +109,12 @@ func New(c config.Config) *Manager {
 		return m.runJSONProbe(ctx, "/"+usageCommandName, usageProbeArgs(), "", true, usageProbeTimeout, usageProbeKillGrace)
 	}
 	return m
+}
+
+// SetProjectDirsForTest configures mock projectsDir and dataDir paths for testing.
+func (m *Manager) SetProjectDirsForTest(projectsDir, dataDir string) {
+	m.projectsDir = projectsDir
+	m.dataDir = dataDir
 }
 
 // StartRequest describes a run to start.
@@ -692,11 +702,16 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		m.releaseKey(key)
 		return Job{}, fmt.Errorf("generate job id: %w", err)
 	}
+	gitBranch, gitHead, gitDirty := DetectGitMetadata(req.Cwd)
 	meta := jobstore.Meta{
 		ID:             id,
 		AgyPath:        agy,
 		Args:           args,
 		Cwd:            req.Cwd,
+		ExecutionCwd:   req.Cwd,
+		GitBranch:      gitBranch,
+		GitHead:        gitHead,
+		GitDirty:       gitDirty,
 		Model:          req.Model,
 		ConversationID: req.ConversationID,
 		IdempotencyKey: req.IdempotencyKey,

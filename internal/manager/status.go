@@ -183,6 +183,12 @@ type Status struct {
 	Usage      *streamjson.Usage
 	JobUsage   *streamjson.Usage
 	UsageScope string
+	// ExecutionCwd is the directory the job executed under.
+	ExecutionCwd string
+	// GitBranch and GitHead report git repository context of ExecutionCwd if inside a git repo.
+	GitBranch string
+	GitHead   string
+	GitDirty  *bool
 	// StepType names the stream step the job is on, for progress reporting. It
 	// is a hint: empty until the first step arrives, and stale by up to one poll.
 	// It is read from progress.json before the exit-code sentinel is consulted,
@@ -206,8 +212,15 @@ func (m *Manager) Status(id string) (Status, error) {
 		ConversationID:       meta.ConversationID,
 		Model:                meta.Model,
 		RequestedModel:       meta.Model,
+		ExecutionCwd:         meta.ExecutionCwd,
+		GitBranch:            meta.GitBranch,
+		GitHead:              meta.GitHead,
+		GitDirty:             meta.GitDirty,
 		EffectiveModel:       nil,
 		EffectiveModelSource: ModelSourceUnknown,
+	}
+	if st.ExecutionCwd == "" {
+		st.ExecutionCwd = meta.Cwd
 	}
 	// The progress file is what makes a running job's conversation id readable:
 	// the supervisor records it as soon as agy's init event names the

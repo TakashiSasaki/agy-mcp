@@ -37,7 +37,9 @@ Every job runs `agy --output-format stream-json`, and the supervisor decodes tha
 - `list_models`: enumerate available `agy` models, as the ids the `model` parameter accepts plus their display labels.
 - `list_agents`: enumerate available `agy` agents, as the names the `agent` parameter accepts. Unlike `list_models` there is no id/label split, because `agy` takes an agent name verbatim; an empty list just means no agents are configured. Pass `cwd` (the directory you give `agy_run`) to include that repository's project agents from `.agents/agents/`; agy lists them only for a workspace directory, so without `cwd` they are absent. On agy 1.3.4 and later a name that is not in the list fails the run before any model call, as `failed` with `failure_reason: agy_error` and an error that lists the available agents (MEASURED against agy 1.4.6); an older agy runs its default agent instead (agy changelog 1.3.4), so check the name with `list_agents` first.
 - `agy_usage`: report the remaining `agy` quota per quota group (for example `Gemini Models`, `Gemini 4 Argon`, and `Claude and GPT models`) with a level of `ok`, `low`, `critical` or `exhausted`. It spends no model quota. See [Quota](#quota).
-- `list_sessions`: list known conversations so review threads can be continued. An unfiltered call omits the ephemeral per-call workspaces the agy-openai-shim helper creates; pass a `dir` to fetch a specific one.
+- `list_sessions`: list known conversations so review threads can be continued. By default, it excludes defunct or ephemeral workspaces (/tmp, /var/tmp, scratch); supports pagination via `limit` and `offset`.
+- `agy_list_projects`: discover and list registered Antigravity projects and repositories under /data with their paths, git remote URLs, default branches, and active linked worktrees.
+- `agy_resolve_workspace`: resolve a project name, project ID, repository URL, or directory path and optional branch into an unambiguous concrete filesystem directory for `agy_run`.
 
 `agy_run` and `agy_run_sync` also take optional per-run controls: pick the `model`, reasoning `effort` (`low`/`medium`/`high`/`xhigh`/`max`), execution `mode` (`accept-edits`/`auto`; `plan` is refused, see the constraints below), a named `agent`, `sandbox` terminal restrictions, and a `json_schema` to constrain the result to structured output. Those run-shaping values are forwarded to `agy`; `idempotency_key` is handled only by agy-mcp and is never forwarded.
 
@@ -161,18 +163,24 @@ Or add to your MCP client config:
 ## Tools
 
 - `agy_run(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?)` -> `{ job_id, conversation_id?, state, quota? }`
-- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
-- `agy_status(job_id)` -> `{ state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota? }`
-- `agy_wait(job_id, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
+- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
+- `agy_status(job_id)` -> `{ state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota? }`
+- `agy_wait(job_id, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
 - `agy_cancel(job_id)` -> `{ state }`
 - `agy_usage(max_age?)` -> `{ checked_at, groups }`, each group `{ name, description?, level, remaining_percent, window, reset_time?, buckets }`
 - `agy_list_artifacts(job_id, subpath?, pattern?, max_entries?)` -> `{ job_id, root, entries }`
 - `agy_read_artifact(job_id, path, start_line?, end_line?, tail_lines?, max_bytes?)` -> `{ job_id, path, size_bytes, sha256, total_lines, start_line, end_line, truncated, content }`
+- `agy_list_projects(query?)` -> `{ projects }`
+- `agy_resolve_workspace(project, branch?)` -> `{ resolved, path?, branch?, head?, ambiguous?, candidates?, error? }`
 - `list_models()` -> `{ models, model_details }`
 - `list_agents(cwd?)` -> `{ agents }`
-- `list_sessions(dir?)` -> `{ sessions }`
+- `list_sessions(dir?, exclude_transient?, limit?, offset?)` -> `{ sessions, total_count }`
 
-`list_sessions` without `dir` omits the ephemeral per-call workspaces the agy-openai-shim helper creates: the server never starts a run in one and on a busy cache they can outnumber the real workspaces many times over ([#167](https://github.com/tphakala/agy-mcp/issues/167)). Pass a `dir` to fetch a specific workspace, transient or not; the filter is canonicalized (made absolute, with best-effort symlink resolution) before matching.
+`list_sessions` lists known conversations. By default, `exclude_transient` is true, omitting defunct or missing directories as well as ephemeral scratch and test directories (/tmp, /var/tmp, scratch, and shim directories). Pass `exclude_transient: false` to include all cached entries. Supports pagination with `limit` and `offset`, returning `total_count` of matching entries before slicing.
+
+`execution_cwd`, `git_branch`, `git_head` (short commit SHA), and `git_dirty` in job status outputs capture the concrete directory and Git metadata at job invocation time, allowing callers to verify which branch and commit were active during execution.
+
+`agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
 
 `models` holds ids alone, so its entries can be passed straight to `model`; `model_details` pairs each id with the display label `agy` prints for it, in the same order, for showing a readable name. Through v2.1.0 `models` carried each `agy models` row whole, which was a tab-joined `id<TAB>label` string that `agy` does not accept as a model at all, so a client had to split it and pick a column ([#135](https://github.com/tphakala/agy-mcp/issues/135)).
 

@@ -228,3 +228,67 @@ func TestIsTransientWorkspace(t *testing.T) {
 		})
 	}
 }
+
+func TestListSessionsWithOptionsPaginationAndTransientFilter(t *testing.T) {
+	t.Parallel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot get user home dir")
+	}
+	base := filepath.Join(home, ".cache", "test-agy-sessions-"+filepath.Base(t.TempDir()))
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+
+	cacheFile := filepath.Join(base, "last_conversations.json")
+
+	// Create real directories
+	realDir1 := filepath.Join(base, "real1")
+	realDir2 := filepath.Join(base, "real2")
+	if err := os.MkdirAll(realDir1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(realDir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nonExistentDir := filepath.Join(base, "deleted_dir")
+
+	data := map[string]string{
+		realDir1:       "uuid-real1",
+		realDir2:       "uuid-real2",
+		nonExistentDir: "uuid-nonexistent",
+		"/tmp/eval-1":  "uuid-tmp",
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheFile, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. With ExcludeTransient: true
+	res, err := readSessionsWithOptions(cacheFile, SessionFilter{ExcludeTransient: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sessions) != 2 {
+		t.Fatalf("expected 2 real sessions, got %d: %+v", len(res.Sessions), res.Sessions)
+	}
+	if res.TotalCount != 2 {
+		t.Errorf("TotalCount = %d, want 2", res.TotalCount)
+	}
+
+	// 2. Pagination Limit: 1, Offset: 1
+	paged, err := readSessionsWithOptions(cacheFile, SessionFilter{ExcludeTransient: true, Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paged.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(paged.Sessions))
+	}
+	if paged.TotalCount != 2 {
+		t.Errorf("TotalCount = %d, want 2", paged.TotalCount)
+	}
+}

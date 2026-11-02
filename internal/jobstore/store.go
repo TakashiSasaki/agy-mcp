@@ -30,6 +30,10 @@ type Meta struct {
 	AgyPath        string        `json:"agy_path"`
 	Args           []string      `json:"args"`
 	Cwd            string        `json:"cwd"`
+	ExecutionCwd   string        `json:"execution_cwd,omitempty"`
+	GitBranch      string        `json:"git_branch,omitempty"`
+	GitHead        string        `json:"git_head,omitempty"`
+	GitDirty       *bool         `json:"git_dirty,omitempty"`
 	Model          string        `json:"model,omitempty"`
 	ConversationID string        `json:"conversation_id,omitempty"`
 	IdempotencyKey string        `json:"idempotency_key,omitempty"`

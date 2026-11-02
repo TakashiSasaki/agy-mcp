@@ -288,6 +288,11 @@ type statusOutput struct {
 	Usage      *usageOutput `json:"usage,omitempty" jsonschema:"token accounting as reported by agy: conversation-cumulative on resumed/multi-turn runs (see usage_scope)"`
 	JobUsage   *usageOutput `json:"job_usage,omitempty" jsonschema:"token accounting spent specifically within this job's execution (useful for cost comparison)"`
 	UsageScope string       `json:"usage_scope,omitempty" jsonschema:"scope of usage: 'job' for fresh single-turn runs, 'conversation_cumulative' for resumed/multi-turn conversations"`
+	// Git and workspace execution metadata
+	ExecutionCwd string `json:"execution_cwd,omitempty" jsonschema:"absolute working directory where the job was executed"`
+	GitBranch    string `json:"git_branch,omitempty" jsonschema:"git branch of execution_cwd when inside a git repository"`
+	GitHead      string `json:"git_head,omitempty" jsonschema:"git commit SHA of execution_cwd when inside a git repository"`
+	GitDirty     *bool  `json:"git_dirty,omitempty" jsonschema:"true when the git worktree at execution_cwd has uncommitted changes"`
 	// StepType answers "what is it doing" for a running job, which is the whole
 	// point of polling one. It reaches the wire as well as the progress
 	// notification because Claude Code never surfaces notifications to the model.
@@ -348,6 +353,10 @@ func toStatusOutput(st manager.Status) statusOutput {
 		Partial:              st.Partial,
 		NumTurns:             st.NumTurns,
 		StepType:             st.StepType,
+		ExecutionCwd:         st.ExecutionCwd,
+		GitBranch:            st.GitBranch,
+		GitHead:              st.GitHead,
+		GitDirty:             st.GitDirty,
 	}
 	if u := st.Usage; u != nil {
 		out.Usage = &usageOutput{
@@ -471,10 +480,14 @@ type agentsInput struct {
 }
 
 type sessionsInput struct {
-	Dir string `json:"dir,omitempty" jsonschema:"absolute path of a workspace directory to filter to; omit to list known conversations, minus the ephemeral agy-openai-shim per-call workspaces. The filter is canonicalized (made absolute against the server's working directory, with best-effort symlink resolution) before matching, so a path agy cached in some other spelling may not match"`
+	Dir              string `json:"dir,omitempty" jsonschema:"absolute path of a workspace directory to filter to; omit to list known conversations. The filter is canonicalized before matching"`
+	ExcludeTransient *bool  `json:"exclude_transient,omitempty" jsonschema:"exclude ephemeral workspaces such as deleted directories, /tmp, /var/tmp, scratch, and shim directories; defaults to true"`
+	Limit            int    `json:"limit,omitempty" jsonschema:"maximum number of sessions to return (0 or omitted returns all)"`
+	Offset           int    `json:"offset,omitempty" jsonschema:"number of sessions to skip for pagination"`
 }
 type sessionsOutput struct {
-	Sessions []manager.Session `json:"sessions" jsonschema:"one entry per workspace directory, each holding that directory's most recent conversation id"`
+	Sessions   []manager.Session `json:"sessions" jsonschema:"one entry per workspace directory, each holding that directory's most recent conversation id"`
+	TotalCount int               `json:"total_count" jsonschema:"total number of matching sessions before pagination"`
 }
 
 // BaseVersion is the upstream release version that this build is based on.
@@ -713,6 +726,7 @@ func NewServer(mgr *manager.Manager) *mcp.Server {
 	registerWait(s, mgr)
 	registerUsage(s, mgr)
 	registerArtifacts(s, mgr)
+	registerProjects(s, mgr)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        toolListModels,
@@ -759,16 +773,24 @@ func NewServer(mgr *manager.Manager) *mcp.Server {
 		Name:        toolListSessions,
 		Title:       "List agy conversations",
 		Annotations: annReadLocal,
-		Description: "List known agy conversations as workspace-directory to conversation-id pairs. Use it to recover a conversation_id to pass to agy_run or agy_run_sync when resuming an earlier thread, which beats restating context in a fresh prompt. To continue the latest thread for a directory you do not need this: set continue_latest instead. Reads agy's own conversation cache, so it also lists conversations this server never started, and it holds only the most recent id per workspace rather than full history. An unfiltered listing omits the ephemeral per-call workspaces the agy-openai-shim helper creates (agy-mcp never starts a run in one and they can dominate the cache); pass dir to fetch a specific one anyway.",
+		Description: "List known agy conversations as workspace-directory to conversation-id pairs. Use it to recover a conversation_id to pass to agy_run or agy_run_sync when resuming an earlier thread, which beats restating context in a fresh prompt. To continue the latest thread for a directory you do not need this: set continue_latest instead. Reads agy's own conversation cache, so it also lists conversations this server never started, and it holds only the most recent id per workspace rather than full history. An unfiltered listing by default omits defunct, missing, or ephemeral workspaces (/tmp, /var/tmp, scratch); pass exclude_transient false to include them.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in sessionsInput) (*mcp.CallToolResult, sessionsOutput, error) {
-		sessions, err := mgr.ListSessions(in.Dir)
+		res, err := mgr.ListSessionsWithOptions(manager.SessionFilter{
+			Dir:              in.Dir,
+			ExcludeTransient: in.ExcludeTransient == nil || *in.ExcludeTransient,
+			Limit:            in.Limit,
+			Offset:           in.Offset,
+		})
 		if err != nil {
 			return nil, sessionsOutput{}, err
 		}
-		if sessions == nil {
-			sessions = []manager.Session{}
+		if res.Sessions == nil {
+			res.Sessions = []manager.Session{}
 		}
-		return nil, sessionsOutput{Sessions: sessions}, nil
+		return nil, sessionsOutput{
+			Sessions:   res.Sessions,
+			TotalCount: res.TotalCount,
+		}, nil
 	})
 
 	return s

@@ -17,6 +17,20 @@ type Session struct {
 	ConversationID string `json:"conversation_id" jsonschema:"most recent conversation id agy recorded for this workspace; pass it as conversation_id to agy_run or agy_run_sync"`
 }
 
+// SessionFilter controls filtering and pagination for ListSessionsWithOptions.
+type SessionFilter struct {
+	Dir              string
+	ExcludeTransient bool
+	Limit            int
+	Offset           int
+}
+
+// SessionListResult wraps the returned sessions along with the total count matching criteria.
+type SessionListResult struct {
+	Sessions   []Session
+	TotalCount int
+}
+
 // agyCachePath returns the path to last_conversations.json, honoring HOME. An
 // empty return (the home dir is unresolvable) disables both features that read the
 // cache, continue_latest and session listing, so log it rather than failing
@@ -30,37 +44,44 @@ func agyCachePath() string {
 	return filepath.Join(home, ".gemini", "antigravity-cli", "cache", "last_conversations.json")
 }
 
-// ListSessions returns known conversations, optionally filtered to one dir. It
-// reads m.cacheFile so it shares the manager's single source of truth for the agy
-// cache path (and is injectable in tests), as resolveLatest does.
-//
-// An unfiltered listing omits the ephemeral agy-openai-shim per-call workspaces
-// (see isTransientWorkspace); passing dir returns whatever matches it, transient
-// or not.
+// ListSessions returns known conversations, optionally filtered to one dir.
 func (m *Manager) ListSessions(dir string) ([]Session, error) {
 	return readSessions(m.cacheFile, dir)
 }
 
+// ListSessionsWithOptions returns known conversations with optional transient filtering and pagination.
+func (m *Manager) ListSessionsWithOptions(filter SessionFilter) (SessionListResult, error) {
+	return readSessionsWithOptions(m.cacheFile, filter)
+}
+
 func readSessions(cacheFile, filterDir string) ([]Session, error) {
+	res, err := readSessionsWithOptions(cacheFile, SessionFilter{Dir: filterDir})
+	if err != nil {
+		return nil, err
+	}
+	return res.Sessions, nil
+}
+
+func readSessionsWithOptions(cacheFile string, filter SessionFilter) (SessionListResult, error) {
 	// loadCache is the single reader for last_conversations.json: it treats a
 	// missing file as an empty cache and reports a torn or corrupt read as an
 	// error, so this no longer duplicates the read+unmarshal (issue #36).
 	raw, err := loadCache(cacheFile)
 	if err != nil {
-		return nil, err
+		return SessionListResult{}, err
 	}
 	cleanFilter := ""
-	if filterDir != "" {
+	if filter.Dir != "" {
 		// Canonicalize the filter the same way StartJob canonicalizes a run's cwd
 		// (filepath.Abs + best-effort EvalSymlinks; see normalizeCwd), so the filter
 		// matches the resolved paths agy keys its cache by. A symlinked or relative
 		// filter would otherwise never match a stored entry. normalizeCwd only errors
 		// when Abs fails (a relative path with no working directory); fall back to
 		// Clean so a filter is still applied.
-		if norm, nerr := normalizeCwd(filterDir); nerr == nil {
+		if norm, nerr := normalizeCwd(filter.Dir); nerr == nil {
 			cleanFilter = norm
 		} else {
-			cleanFilter = filepath.Clean(filterDir)
+			cleanFilter = filepath.Clean(filter.Dir)
 		}
 	}
 	var out []Session
@@ -75,10 +96,26 @@ func readSessions(cacheFile, filterDir string) ([]Session, error) {
 		if cleanFilter == "" && isTransientWorkspace(ws) {
 			continue
 		}
+		// If ExcludeTransient is enabled, drop /tmp/, /var/tmp/, scratch dirs, and non-existent directories
+		if filter.ExcludeTransient && cleanFilter == "" && isExtendedTransient(ws) {
+			continue
+		}
 		out = append(out, Session{Workspace: ws, ConversationID: id})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Workspace < out[j].Workspace })
-	return out, nil
+
+	totalCount := len(out)
+	if filter.Offset > 0 {
+		if filter.Offset >= len(out) {
+			out = nil
+		} else {
+			out = out[filter.Offset:]
+		}
+	}
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return SessionListResult{Sessions: out, TotalCount: totalCount}, nil
 }
 
 // Transient agy-openai-shim workspaces are laid out as
@@ -101,4 +138,23 @@ func isTransientWorkspace(ws string) bool {
 	ws = filepath.Clean(ws)
 	return filepath.Base(filepath.Dir(ws)) == agyShimDir &&
 		strings.HasPrefix(filepath.Base(ws), agyCallPrefix)
+}
+
+// isExtendedTransient checks for /tmp, /var/tmp, /scratch/ paths, and checks if
+// the directory exists on disk.
+func isExtendedTransient(ws string) bool {
+	ws = filepath.Clean(ws)
+	if isTransientWorkspace(ws) {
+		return true
+	}
+	if strings.HasPrefix(ws, "/tmp/") || strings.HasPrefix(ws, "/var/tmp/") || ws == "/tmp" || ws == "/var/tmp" {
+		return true
+	}
+	if strings.Contains(ws, "/scratch/") || strings.HasSuffix(ws, "/scratch") {
+		return true
+	}
+	if fi, err := os.Stat(ws); err != nil || !fi.IsDir() {
+		return true
+	}
+	return false
 }
