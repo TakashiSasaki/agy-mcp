@@ -19,6 +19,12 @@ import (
 // mid-turn, as MEASURED against agy 1.2.9.
 const printTimeoutNotice = "[agy] print timeout after 8s with turn in progress; returning partial output"
 
+// signInStderr is the stderr of a run with no usable sign-in (issue #214), as
+// MEASURED against agy 1.4.8 with AGY_ADC_AUTH=1 on a host that signs in another
+// way: exit 1, and an ERROR payload carrying only "authentication failed or
+// timed out".
+const signInStderr = "Error: authentication required. Run 'agy' to log in.\nerror: authentication failed or timed out\n"
+
 // The two stderr lines agy leaves when a run ends with a background task still
 // running. Shape MEASURED against agy 1.2.7 and 1.2.9 (see matchesBackgroundAbort
 // in status.go). The matchers ignore the grace and the count, so one fixed
@@ -62,7 +68,7 @@ func TestStatusInterruptedNoOutput(t *testing.T) {
 // would tell a caller to wait out a wall that never clears.
 func TestClassifyAgyError(t *testing.T) {
 	// Each positive is written to match exactly ONE isQuotaError substring, so
-	// deleting any single matcher turns exactly one row red. A string matching two
+	// deleting any single matcher turns at least one row red. A string matching two
 	// matchers at once (say "429 ... rate limit") would leave a deleted matcher
 	// silently covered by its neighbour.
 	quota := []string{
@@ -79,6 +85,18 @@ func TestClassifyAgyError(t *testing.T) {
 		// disk-quota exclusion to the quota token alone: a whole-function early
 		// return on "disk quota" would misclassify this as a hard error.
 		"disk quota note aside, you hit a rate limit; retry later",
+		// agy's AI credits wall (issue #202); wording from agy's changelog for
+		// 1.2.15, NOT MEASURED. Matches no other token above.
+		"Your AI credits balance is too low to continue.", // credits wall (both phrases on one line)
+		// The unknown-agent exclusion is line-scoped: a quota line beside it still
+		// classifies, so the exclusion cannot widen into hiding a real wall.
+		"unknown agent \"revew\" (available: fact-checker)\nprovider returned a rate limit response", // rate limit
+		// The exclusion needs both unknown-agent phrases on one line, so a genuine
+		// wall that carries only one of them still classifies; and it keeps a quota
+		// line that comes before the unknown-agent line.
+		"Individual quota reached (available: 0 requests)",                                           // quota, only "(available:"
+		"rate limit hit, unknown agent \"x\" in pool",                                                // rate limit, only the unknown-agent phrase
+		"provider returned a rate limit response\nunknown agent \"revew\" (available: fact-checker)", // rate limit, before the unknown-agent line
 	}
 	for _, msg := range quota {
 		if got := classifyAgyError(msg); got != ReasonQuotaExhausted {
@@ -95,6 +113,20 @@ func TestClassifyAgyError(t *testing.T) {
 		// wall; it must fall to ReasonAgyError so the caller is not told to wait
 		// for a reset that never comes.
 		"write /var/data/out.tmp: disk quota exceeded",
+		// Near-misses of the credits wall (issue #202): each lacks one phrase, splits
+		// the phrases across lines, or names a prepaid credits balance, which is not
+		// agy's AI credits wall.
+		"AI credits balance refreshed",
+		"sample rate too low for playback",
+		"AI credits balance: 40\nlatency too low to measure",
+		"Prepaid credits balance is too low to process request. Please add funds.",
+		// agy lists the available agents on one line of its unknown-agent error
+		// (MEASURED against agy 1.4.6, four agents configured), so an agent
+		// whose name carries a quota word must not turn a typo into a quota
+		// wall. Both delivery forms: the payload error and the stderr summary
+		// line.
+		`unknown agent "revew" (available: fact-checker, quota-watcher)`,
+		`exit 1: error: unknown agent "revew" (available: fact-checker, quota-watcher)`,
 	}
 	for _, msg := range other {
 		if got := classifyAgyError(msg); got != ReasonAgyError {
@@ -172,6 +204,28 @@ func TestLineHasAllIgnoresPhraseCase(t *testing.T) {
 	}
 	if lineHasAll("[agy] print timeout after 8s", "Print Timeout", "missing") {
 		t.Error("lineHasAll matched although one phrase is absent")
+	}
+}
+
+func TestMatchesSignInRequired(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{"measured stderr", signInStderr, true},
+		{"changelog expiry wording", "Authentication expired. Please log back in.", true},
+		// The payload text alone also reads as a timeout, so it is not a key.
+		{"payload text alone", "error: authentication failed or timed out", false},
+		{"phrases split across lines", "authentication required.\nRun 'agy' to log in.\n", false},
+		{"unrelated server needing authentication", "MCP server github: authentication required", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesSignInRequired(tt.msg); got != tt.want {
+				t.Errorf("matchesSignInRequired(%q) = %v, want %v", tt.msg, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -268,7 +322,12 @@ func TestErrorSummaryDistinguishesEmptyStderr(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got := errorSummary(dir, tc.code)
+			got, classify := errorSummary(dir, tc.code)
+			// None of these stderr texts holds an AGY_ERROR line, so the reduction
+			// changes nothing and the classified text is the shown text.
+			if classify != got {
+				t.Errorf("classifyMsg = %q, want it equal to msg %q", classify, got)
+			}
 			if tc.wantPrefix {
 				if !strings.HasPrefix(got, tc.want) {
 					t.Errorf("errorSummary = %q, want prefix %q", got, tc.want)
@@ -280,6 +339,124 @@ func TestErrorSummaryDistinguishesEmptyStderr(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCopyWindow(t *testing.T) {
+	a := func(n int) string { return strings.Repeat("a", n) }
+	for _, tc := range []struct {
+		name      string
+		raw       string
+		fromStart bool
+		wantHead  bool
+	}{
+		{name: "short raw from the file start", raw: "abc", fromStart: true},
+		{name: "a whole AGY_ERROR line opens the window", raw: "junk\n" + wireAgyErrorPrefix + a(errTailBytes-len(wireAgyErrorPrefix)), fromStart: true},
+		{name: "the window opens inside an AGY_ERROR line whose start is in the lookback", raw: "old\n" + wireAgyErrorPrefix + a(3000), fromStart: true, wantHead: true},
+		{name: "the window opens inside the prefix itself", raw: "old\nAGY_ERROR: {" + a(errTailBytes-len("ERROR: {")), fromStart: true, wantHead: true},
+		{name: "the window opens inside an ordinary line", raw: "old\n" + a(3000), fromStart: true},
+		{name: "a lone AGY_ERROR line from the file start", raw: wireAgyErrorPrefix + a(3000), fromStart: true, wantHead: true},
+		{name: "a lone ordinary line from the file start", raw: a(3000), fromStart: true},
+		{name: "no line start found and the read did not reach the file start", raw: a(3000), fromStart: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window, head := copyWindow(tc.raw, tc.fromStart)
+			if want := tc.raw[max(0, len(tc.raw)-errTailBytes):]; window != want {
+				t.Errorf("window = %d bytes, want the last %d bytes of raw", len(window), len(want))
+			}
+			if head != tc.wantHead {
+				t.Errorf("headInAgyError = %v, want %v", head, tc.wantHead)
+			}
+		})
+	}
+}
+
+func TestErrorSummaryReducesAgyErrorLines(t *testing.T) {
+	const reduced = wireAgyErrorPrefix + "NOT_FOUND (code 404)"
+	measuredReduced := "error: " + measuredAgyErrorLine1 + "\n" + reduced
+	// longLine is an AGY_ERROR line longer than errTailBytes whose leaky text sits
+	// near its start, so the errTailBytes window opens inside it.
+	longLine := wireAgyErrorPrefix + `{"short_error":"NOT_FOUND (code 404): example-project ` + strings.Repeat("x", 2500) + `","retryable":false}`
+	for _, tc := range []struct {
+		name         string
+		stderr       string
+		want         string
+		wantSuffix   string // when set, msg is only checked to end with it
+		wantClassify string // "" means msg itself
+	}{
+		{name: "measured stderr", stderr: measuredAgyErrorStderr,
+			want:         "exit 3: " + measuredReduced,
+			wantClassify: "exit 3: " + strings.TrimRight(measuredAgyErrorStderr, "\n")},
+		{name: "measured stderr after filler that pushes the window into the lookback",
+			stderr:     strings.Repeat("filler line\n", 275) + measuredAgyErrorStderr,
+			wantSuffix: measuredReduced, wantClassify: "-",
+		},
+		{name: "the window opens inside a long AGY_ERROR line, then another line", stderr: longLine + "\nlast line\n",
+			want: "exit 3: last line", wantClassify: "-"},
+		{name: "the window opens inside a long AGY_ERROR line with nothing after it", stderr: longLine + "\n",
+			want: "exit 3: " + agyErrorWithheld, wantClassify: "-"},
+		{name: "only a malformed AGY_ERROR line", stderr: wireAgyErrorPrefix + `{"retryable":fal` + "\n",
+			want:         "exit 3: " + agyErrorWithheld,
+			wantClassify: "exit 3: " + wireAgyErrorPrefix + `{"retryable":fal`},
+		{name: "an ordinary first line longer than the lookback is kept",
+			stderr: strings.Repeat("x", errTailBytes+agyErrorLookback+10) + "\nend",
+			want:   "exit 3: " + strings.Repeat("x", errTailBytes-len("\nend")) + "\nend"},
+		{name: "a newline-free stderr longer than the lookback is kept",
+			stderr: strings.Repeat("y", errTailBytes+agyErrorLookback+10),
+			want:   "exit 3: " + strings.Repeat("y", errTailBytes)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(jobstore.ErrPath(dir), []byte(tc.stderr), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, classify := errorSummary(dir, 3)
+			if tc.wantSuffix != "" {
+				// The window keeps only the last errTailBytes of the filler, so the
+				// start of the message is not pinned byte for byte.
+				if !strings.HasPrefix(got, "exit 3: ") || !strings.Contains(got, "filler line") || !strings.HasSuffix(got, tc.wantSuffix) {
+					t.Errorf("msg = %q, want filler text ending in %q", got, tc.wantSuffix)
+				}
+			} else if got != tc.want {
+				t.Errorf("msg = %q, want %q", got, tc.want)
+			}
+			assertNoLeak(t, got)
+			switch tc.wantClassify {
+			case "":
+				if classify != got {
+					t.Errorf("classifyMsg = %q, want it equal to msg", classify)
+				}
+			case "-":
+				// The unreduced text is exactly what the pre-reduction reader,
+				// cleanTail, returns for the same file.
+				tail, err := cleanTail(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := "exit 3: " + tail; classify != want {
+					t.Errorf("classifyMsg = %q, want %q", classify, want)
+				}
+			default:
+				if classify != tc.wantClassify {
+					t.Errorf("classifyMsg = %q, want %q", classify, tc.wantClassify)
+				}
+			}
+		})
+	}
+
+	t.Run("an ordinary cut tail is byte-identical to cleanTail", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(jobstore.ErrPath(dir), []byte(strings.Repeat("plain text ", 300)+"\nend"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tail, err := cleanTail(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, classify := errorSummary(dir, 3)
+		if got != "exit 3: "+tail || classify != got {
+			t.Errorf("msg = %q, classifyMsg = %q, want both %q", got, classify, "exit 3: "+tail)
+		}
+	})
 }
 
 // The same absence, seen through Status, which is where a caller actually meets
@@ -354,13 +531,23 @@ type terminalCase struct {
 	out         string // streamed text on disk, "" writes no out file
 	errFile     string // captured stderr, "" writes no err file
 	args        []string
+	timeout     time.Duration // the job's recorded timeout; zero records none
+	ranFor      time.Duration // how long before the sentinel the job started
 	wantState   string
 	wantResult  string
 	wantPartial bool
 	wantErrSub  string
+	noErrSub    string // text the error must not mention, "" not asserted
 	wantReason  string // FailureReason; required on every failed row, forbidden elsewhere
 	wantConvID  string // conversation carried off the payload, "" not asserted
 	wantTurns   int    // agy's own accounting, 0 not asserted
+	// wantRetryable and wantErrorID are asserted on every row (nil and "" mean
+	// none), so no row without an AGY_ERROR line can gain either.
+	wantRetryable *bool
+	wantErrorID   string
+	// wantSignIn is asserted on every row, so no path can gain the sign-in flag
+	// unnoticed.
+	wantSignIn bool
 }
 
 // terminalCases is the whole Result/Partial contract in one table, consumed by
@@ -432,6 +619,15 @@ func terminalCases() []terminalCase {
 				Error:  "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 21m50s.",
 			},
 			wantState: StateFailed, wantErrSub: "Resets in 21m50s", wantReason: ReasonQuotaExhausted,
+		}, {
+			// agy's AI credits wall (issue #202) is the same retryable class, carried
+			// in an ERROR payload like a quota wall.
+			name: "a credits wall in an error payload is retryable",
+			code: 0, res: &streamjson.Result{
+				Status: streamjson.StatusError,
+				Error:  "Your AI credits balance is too low to continue.",
+			},
+			wantState: StateFailed, wantErrSub: "credits balance", wantReason: ReasonQuotaExhausted,
 		}, {
 			// The bug: a response with no status used to report done and NOT partial,
 			// so a future agy that renames the status field would have a run cut
@@ -664,6 +860,12 @@ func terminalCases() []terminalCase {
 			code: 1, errFile: "Error: 429 Too Many Requests: rate limit exceeded",
 			wantState: StateFailed, wantErrSub: "rate limit", wantReason: ReasonQuotaExhausted,
 		}, {
+			// The credits wall on one stderr line among others still classifies (the
+			// matcher is line-scoped, not whole-message).
+			name: "a non-zero exit with a credits wall on a stderr line is retryable",
+			code: 1, errFile: "starting turn\nYour AI credits balance is too low to continue.\n",
+			wantState: StateFailed, wantErrSub: "credits balance", wantReason: ReasonQuotaExhausted,
+		}, {
 			// A payload's own message outranks the stderr tail: agy reports failures
 			// it survives in band, where the exit code says less.
 			name: "a crash with an error payload uses its message and text",
@@ -671,6 +873,168 @@ func terminalCases() []terminalCase {
 			out: "streamed", errFile: "some stderr",
 			wantState: StateFailed, wantResult: "partial text", wantPartial: true,
 			wantErrSub: "model unavailable", wantReason: ReasonAgyError,
+		},
+		// --- agy before 1.1.28 reports an expired --print-timeout as an in-band
+		// ERROR (MEASURED against agy 1.1.15 and 1.1.27, issue #192): exit 1, the
+		// exact text below, empty stderr. It is a timeout only when the job ran
+		// its own timeout; the same text arriving early is some other failure.
+		{
+			name: "pre-1.1.28 print-timeout expiry at its deadline is a timeout",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: "timeout waiting for response", ConversationID: "c1"},
+			timeout: 8 * time.Second, ranFor: 9 * time.Second,
+			wantState: StateFailed, wantErrSub: "--print-timeout expired", wantReason: ReasonTimeout, wantConvID: "c1",
+		}, {
+			// CompletedAt is a file mtime, so a coarse filesystem can read a real
+			// expiry up to a second short.
+			name: "pre-1.1.28 expiry read within the mtime slack is still a timeout",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError, ConversationID: "c1"},
+			timeout: 8 * time.Second, ranFor: 7500 * time.Millisecond,
+			wantState: StateFailed, wantErrSub: "--print-timeout expired", wantReason: ReasonTimeout, wantConvID: "c1",
+		}, {
+			name: "the same error long before the deadline stays agy_error",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError, ConversationID: "c1"},
+			timeout:   30 * time.Minute,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError, wantReason: ReasonAgyError, wantConvID: "c1",
+		}, {
+			name: "a near-miss timeout error at the deadline stays agy_error",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError + " from MCP server"},
+			timeout: 8 * time.Second, ranFor: 9 * time.Second,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError + " from MCP server", wantReason: ReasonAgyError,
+		}, {
+			// A structured quota line on stderr outranks the print-timeout reading:
+			// the reason stays quota_exhausted and agy's own text stays the error.
+			name: "the same error at the deadline with a quota line on stderr stays quota_exhausted",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError},
+			errFile: wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true}` + "\n",
+			timeout: 8 * time.Second, ranFor: 9 * time.Second,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError, noErrSub: "--print-timeout expired",
+			wantReason: ReasonQuotaExhausted, wantRetryable: new(true),
+		}, {
+			name: "the same error on a job with no recorded timeout stays agy_error",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError},
+			ranFor:    9 * time.Second,
+			wantState: StateFailed, wantErrSub: legacyPrintTimeoutError, wantReason: ReasonAgyError,
+		},
+		// --- agy's structured AGY_ERROR stderr line (issue #183) ------------------
+		{
+			name: "exit 3 with an error payload reads agy's AGY_ERROR line",
+			code: 3, res: &streamjson.Result{Status: streamjson.StatusError, Error: measuredAgyErrorLine1, ConversationID: "c1"},
+			errFile:   measuredAgyErrorStderr,
+			wantState: StateFailed, wantErrSub: measuredAgyErrorLine1, wantReason: ReasonAgyError, wantConvID: "c1",
+			wantRetryable: new(false), wantErrorID: measuredAgyErrorID,
+		}, {
+			name: "exit 0 error payload reads agy's AGY_ERROR line",
+			code: 0, res: &streamjson.Result{Status: streamjson.StatusError, Error: measuredAgyErrorLine1, ConversationID: "c1"},
+			errFile:   measuredAgyErrorStderr,
+			wantState: StateFailed, wantErrSub: measuredAgyErrorLine1, wantReason: ReasonAgyError, wantConvID: "c1",
+			wantRetryable: new(false), wantErrorID: measuredAgyErrorID,
+		}, {
+			// The error text is the stderr tail with its AGY_ERROR line reduced to the
+			// canonical status (issue #205); the retryable and error_id fields come
+			// from the line itself.
+			name: "exit 3 with no payload reads agy's AGY_ERROR line",
+			code: 3, errFile: measuredAgyErrorStderr,
+			wantState: StateFailed, wantErrSub: "exit 3: error: " + measuredAgyErrorLine1 + "\n" + wireAgyErrorPrefix + "NOT_FOUND (code 404)", wantReason: ReasonAgyError,
+			wantRetryable: new(false), wantErrorID: measuredAgyErrorID,
+		}, {
+			name: "a 127 reduces agy's AGY_ERROR line in the stderr it appends",
+			code: jobstore.ExitSpawnFail, errFile: measuredAgyErrorStderr,
+			wantState: StateFailed, wantErrSub: "; stderr: error: " + measuredAgyErrorLine1 + "\n" + wireAgyErrorPrefix + "NOT_FOUND (code 404)", wantReason: ReasonSpawnFailed,
+		}, {
+			// Synthetic wording. The status UNAVAILABLE does not promote in
+			// applyAgyError, so the quota_exhausted reason can only come from
+			// classifying the stderr text before the reduction removed "quota".
+			name: "classification reads short_error wording before the reduction",
+			code: 3, errFile: wireAgyErrorPrefix + `{"short_error":"UNAVAILABLE (code 503): Individual quota reached. Resets in 21m50s.","retryable":true,"error_id":"e-2"}` + "\n",
+			wantState: StateFailed, wantErrSub: "exit 3: AGY_ERROR: UNAVAILABLE (code 503)", wantReason: ReasonQuotaExhausted,
+			wantRetryable: new(true), wantErrorID: "e-2",
+		}, {
+			// Synthetic: no captured RESOURCE_EXHAUSTED sample exists.
+			name: "a RESOURCE_EXHAUSTED status is a quota wall",
+			code: 3, res: &streamjson.Result{Status: streamjson.StatusError, Error: "request failed"},
+			errFile:   wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true,"error_id":"e-1"}` + "\n",
+			wantState: StateFailed, wantErrSub: "request failed", wantReason: ReasonQuotaExhausted,
+			wantRetryable: new(true), wantErrorID: "e-1",
+		}, {
+			name: "a wording-matched quota wall is not demoted by another status",
+			code: 3, res: &streamjson.Result{Status: streamjson.StatusError, Error: "Individual quota reached. Resets in 21m50s."},
+			errFile:   measuredAgyErrorStderr,
+			wantState: StateFailed, wantErrSub: "Individual quota reached", wantReason: ReasonQuotaExhausted,
+			wantRetryable: new(false), wantErrorID: measuredAgyErrorID,
+		}, {
+			name: "a malformed AGY_ERROR line changes nothing",
+			code: 3, res: &streamjson.Result{Status: streamjson.StatusError, Error: "boom"},
+			errFile:   wireAgyErrorPrefix + `{"retryable":fal` + "\n",
+			wantState: StateFailed, wantErrSub: "boom", wantReason: ReasonAgyError,
+		}, {
+			name: "a success payload ignores an AGY_ERROR line",
+			code: 0, res: &streamjson.Result{Status: streamjson.StatusSuccess, Response: "final"},
+			errFile: measuredAgyErrorStderr, wantState: StateDone, wantResult: "final",
+		}, {
+			name: "a non-zero exit after a SUCCESS payload ignores an AGY_ERROR line",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusSuccess, Response: "final"},
+			errFile:   measuredAgyErrorStderr,
+			wantState: StateFailed, wantResult: "final", wantErrSub: "exit 1", wantReason: ReasonAgyError,
+		}, {
+			// The payload error alone is ambiguous; the flag comes from stderr. State,
+			// reason and error stay what they were before the flag existed (issue #214).
+			name: "a sign-in failure keeps agy_error and is flagged for recovery advice",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: "authentication failed or timed out"},
+			errFile:   signInStderr,
+			wantState: StateFailed, wantErrSub: "authentication failed or timed out", wantReason: ReasonAgyError,
+			wantSignIn: true,
+		}, {
+			// Changelog wording, NOT MEASURED; carried by the payload on a clean exit.
+			name: "agy's changelog expiry wording in an error payload is flagged",
+			code: 0, res: &streamjson.Result{Status: streamjson.StatusError, Error: "Authentication expired. Please log back in."},
+			wantState: StateFailed, wantErrSub: "Authentication expired", wantReason: ReasonAgyError,
+			wantSignIn: true,
+		}, {
+			name: "a quota wall is not flagged as a sign-in failure even beside the sign-in notice",
+			code: 1, res: &streamjson.Result{
+				Status: streamjson.StatusError,
+				Error:  "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 21m50s.",
+			},
+			errFile:   signInStderr,
+			wantState: StateFailed, wantErrSub: "Resets in 21m50s", wantReason: ReasonQuotaExhausted,
+		}, {
+			name: "a non-zero exit with the changelog expiry wording in the payload is flagged without stderr",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: "Authentication expired. Please log back in."},
+			wantState: StateFailed, wantErrSub: "Authentication expired", wantReason: ReasonAgyError,
+			wantSignIn: true,
+		}, {
+			// The payload text alone also reads as a timeout, so without the stderr
+			// line there is nothing to flag.
+			name: "a non-zero exit with only the ambiguous payload text is not flagged",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: "authentication failed or timed out"},
+			wantState: StateFailed, wantErrSub: "authentication failed or timed out", wantReason: ReasonAgyError,
+		}, {
+			name: "a non-zero exit after a SUCCESS payload is not flagged beside the sign-in notice",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusSuccess, Response: "final"},
+			errFile:   signInStderr,
+			wantState: StateFailed, wantResult: "final", wantErrSub: "exit 1", wantReason: ReasonAgyError,
+		}, {
+			// The quota promotion comes from the AGY_ERROR line, so the sign-in check
+			// has to run after applyAgyError for the flag to stay off.
+			name: "a quota promotion from an AGY_ERROR line beats the sign-in notice at a non-zero exit",
+			code: 1, res: &streamjson.Result{Status: streamjson.StatusError, Error: "request failed"},
+			errFile:   wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true,"error_id":"e-1"}` + "\n" + signInStderr,
+			wantState: StateFailed, wantErrSub: "request failed", wantReason: ReasonQuotaExhausted,
+			wantRetryable: new(true), wantErrorID: "e-1",
+		}, {
+			// On a clean exit, an agy_error that did not come from an ERROR payload
+			// gets no flag: there the ERROR branch of applyResult is the only sign-in
+			// check.
+			name: "an unrecognized status on a clean exit is not flagged beside the sign-in notice",
+			code: 0, res: &streamjson.Result{Status: "MAX_TURNS"},
+			errFile:   signInStderr,
+			wantState: StateFailed, wantErrSub: "unrecognized result status", wantReason: ReasonAgyError,
+		}, {
+			name: "a quota promotion from an AGY_ERROR line beats the sign-in notice on a clean exit",
+			code: 0, res: &streamjson.Result{Status: streamjson.StatusError, Error: "request failed"},
+			errFile:   wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true,"error_id":"e-1"}` + "\n" + signInStderr,
+			wantState: StateFailed, wantErrSub: "request failed", wantReason: ReasonQuotaExhausted,
+			wantRetryable: new(true), wantErrorID: "e-1",
 		},
 	}
 }
@@ -705,6 +1069,14 @@ func TestStatusTerminalContractTableIsWellFormed(t *testing.T) {
 		if tc.wantState != StateFailed && tc.wantReason != "" {
 			t.Errorf("row %q is not a failure yet declares failure_reason %q", tc.name, tc.wantReason)
 		}
+		// Retryable and ErrorID are set only alongside StateFailed.
+		if tc.wantState != StateFailed && (tc.wantRetryable != nil || tc.wantErrorID != "") {
+			t.Errorf("row %q is not a failure yet declares retryable or error_id", tc.name)
+		}
+		// SignInRequired is set only on an agy_error failure.
+		if tc.wantSignIn && (tc.wantState != StateFailed || tc.wantReason != ReasonAgyError) {
+			t.Errorf("row %q declares a sign-in flag on something other than a failed agy_error", tc.name)
+		}
 	}
 }
 
@@ -714,7 +1086,8 @@ func stageTerminalJob(t *testing.T, tc terminalCase) Status {
 	t.Helper()
 	m := newManager(t, managerOpts{})
 	dir, err := m.store.Create(jobstore.Meta{
-		ID: "j", StartedAt: time.Now(), BootID: readBootID(), Args: tc.args,
+		ID: "j", StartedAt: time.Now().Add(-tc.ranFor), BootID: readBootID(), Args: tc.args,
+		Timeout: tc.timeout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -766,6 +1139,12 @@ func assertTerminalStatus(t *testing.T, st Status, tc terminalCase) {
 	} else if !strings.Contains(st.Error, tc.wantErrSub) {
 		t.Errorf("error = %q, want it to mention %q", st.Error, tc.wantErrSub)
 	}
+	if tc.noErrSub != "" && strings.Contains(st.Error, tc.noErrSub) {
+		t.Errorf("error = %q, want it not to mention %q", st.Error, tc.noErrSub)
+	}
+	// No row may surface the cloud project or region that short_error carries
+	// (issue #205).
+	assertNoLeak(t, st.Error)
 	if st.FailureReason != tc.wantReason {
 		t.Errorf("failure_reason = %q, want %q", st.FailureReason, tc.wantReason)
 	}
@@ -774,6 +1153,15 @@ func assertTerminalStatus(t *testing.T, st Status, tc terminalCase) {
 	}
 	if tc.wantTurns != 0 && st.NumTurns != tc.wantTurns {
 		t.Errorf("num_turns = %d, want %d carried off the payload", st.NumTurns, tc.wantTurns)
+	}
+	if !equalBoolPtr(st.Retryable, tc.wantRetryable) {
+		t.Errorf("retryable = %v, want %v", derefBool(st.Retryable), derefBool(tc.wantRetryable))
+	}
+	if st.ErrorID != tc.wantErrorID {
+		t.Errorf("error_id = %q, want %q", st.ErrorID, tc.wantErrorID)
+	}
+	if st.SignInRequired != tc.wantSignIn {
+		t.Errorf("sign_in_required = %v, want %v", st.SignInRequired, tc.wantSignIn)
 	}
 }
 
@@ -1288,28 +1676,77 @@ func TestStatusElapsedFrozenAtCompletion(t *testing.T) {
 }
 
 // TestStatusRecoveredElapsedFrozen: a job recovered without a completion
-// sentinel (process gone, output present) is terminal, so its elapsed must
-// freeze at the best available end time (the out file's mtime) rather than
-// growing forever as time.Since(StartedAt).
+// sentinel (process gone) is terminal, so its elapsed must freeze at the best
+// available end time rather than growing forever as time.Since(StartedAt). That
+// is the out file's mtime for a recovery with no payload, and result.json's
+// mtime when there is one, because out is created at spawn and stays at the
+// spawn time when the run streamed no text (issue #233).
 func TestStatusRecoveredElapsedFrozen(t *testing.T) {
-	m := newManager(t, managerOpts{})
-	start := time.Now().Add(-time.Hour)
-	dir, _ := m.store.Create(jobstore.Meta{ID: "j", StartedAt: start, PID: 999999, BootID: "old-boot"})
-	outPath := filepath.Join(dir, "out")
-	_ = os.WriteFile(outPath, []byte("recovered"), 0o644)
-	// Pin the out mtime to 10 minutes after start; a correct elapsed is ~10m, not
-	// the ~1h time.Since(start) would give for a job that "finished" an hour ago.
-	end := start.Add(10 * time.Minute)
-	if err := os.Chtimes(outPath, end, end); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name        string
+		stage       func(t *testing.T, dir string, start, end time.Time)
+		wantState   string
+		wantPartial bool
+	}{
+		{
+			name: "out mtime bounds a recovery with no payload",
+			stage: func(t *testing.T, dir string, _, end time.Time) {
+				t.Helper()
+				outPath := jobstore.OutPath(dir)
+				if err := os.WriteFile(outPath, []byte("recovered"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(outPath, end, end); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantState:   StateDone,
+			wantPartial: true,
+		},
+		{
+			name: "result.json bounds a recovery that streamed no text",
+			stage: func(t *testing.T, dir string, start, end time.Time) {
+				t.Helper()
+				for _, p := range []string{jobstore.OutPath(dir), jobstore.ErrPath(dir)} {
+					if err := os.WriteFile(p, nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(p, start, start); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writeResultPayload(t, dir, streamjson.Result{Status: streamjson.StatusError, Error: "model unavailable"})
+				if err := os.Chtimes(jobstore.ResultPath(dir), end, end); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantState: StateFailed,
+		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManager(t, managerOpts{})
+			start := time.Now().Add(-time.Hour)
+			dir, err := m.store.Create(jobstore.Meta{ID: "j", StartedAt: start, PID: 999999, BootID: "old-boot"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Pin the end to 10 minutes after start; a correct elapsed is ~10m, not
+			// the ~1h time.Since(start) would give for a job that "finished" an hour
+			// ago, nor the ~0 a file left at the spawn time would give.
+			tc.stage(t, dir, start, start.Add(10*time.Minute))
 
-	st, _ := m.Status("j")
-	if st.State != StateDone || !st.Partial {
-		t.Fatalf("status = %+v, want done+partial", st)
-	}
-	if d := st.Elapsed; d < 9*time.Minute || d > 11*time.Minute {
-		t.Fatalf("elapsed = %v, want ~10m frozen at the recovered end", d)
+			st, err := m.Status("j")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.State != tc.wantState || st.Partial != tc.wantPartial {
+				t.Fatalf("status = %+v, want state %q partial=%v", st, tc.wantState, tc.wantPartial)
+			}
+			if d := st.Elapsed; d < 9*time.Minute || d > 11*time.Minute {
+				t.Fatalf("elapsed = %v, want ~10m frozen at the recovered end", d)
+			}
+		})
 	}
 }
 
@@ -1552,6 +1989,111 @@ func TestStatusRecoveredFromPayload(t *testing.T) {
 			// unpinned on the recovery path.
 			if tc.wantState == StateFailed && st.Error == "" {
 				t.Fatal("a failed recovery must carry an explanation")
+			}
+		})
+	}
+}
+
+// TestStatusRecoveredLegacyPrintTimeoutIsTimeout pins that a job recovered from
+// its payload (supervisor died before writing the sentinel) gets the same
+// pre-1.1.28 print-timeout relabelling as the sentinel path (issue #192). With no
+// exit_code file the completion time is result.json's mtime (issue #233). The
+// supervisor creates out and err when the job starts and the legacy expiry
+// writes nothing to either, so the test stages them at StartedAt: the elapsed
+// check fails if the run length were measured from them.
+func TestStatusRecoveredLegacyPrintTimeoutIsTimeout(t *testing.T) {
+	m := newManager(t, managerOpts{})
+	started := time.Now().Add(-9 * time.Second)
+	dir, err := m.store.Create(jobstore.Meta{
+		ID: "j", StartedAt: started, PID: 999999, BootID: "old-boot",
+		Timeout: 8 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{jobstore.OutPath(dir), jobstore.ErrPath(dir)} {
+		if werr := os.WriteFile(p, nil, 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+		if werr := os.Chtimes(p, started, started); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	writeResultPayload(t, dir, streamjson.Result{Status: streamjson.StatusError, Error: "timeout waiting for response", ConversationID: "c1"})
+	st, err := m.Status("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != StateFailed || st.FailureReason != ReasonTimeout || st.ConversationID != "c1" {
+		t.Fatalf("status = %+v, want failed with reason %q and conversation c1", st, ReasonTimeout)
+	}
+	if st.Elapsed < 8*time.Second {
+		t.Fatalf("elapsed = %v, want at least the 8s timeout the relabelling rests on", st.Elapsed)
+	}
+}
+
+// TestStatusRecoveredLegacyPrintTimeoutGuards pins what keeps the legacy
+// print-timeout relabelling from firing on the recovered path (issue #192),
+// where the job has no exit_code sentinel and the run length comes from
+// result.json. The out, err and result.json mtimes are set at a fixed offset
+// from StartedAt, as the supervisor leaves a job whose agy wrote nothing after
+// the files were created.
+func TestStatusRecoveredLegacyPrintTimeoutGuards(t *testing.T) {
+	const quotaLine = wireAgyErrorPrefix + `{"short_error":"RESOURCE_EXHAUSTED (code 429): try later","retryable":true}` + "\n"
+	for _, tc := range []struct {
+		name       string
+		resultAge  time.Duration // result.json mtime, after StartedAt
+		stderr     string
+		wantReason string
+		wantErrSub string
+		noErrSub   string
+	}{
+		{
+			// A failure that ended a second into an 8s job is not an expiry, however
+			// long ago the job started.
+			name:      "a job that failed early stays agy_error",
+			resultAge: time.Second, wantReason: ReasonAgyError, wantErrSub: legacyPrintTimeoutError,
+			noErrSub: "--print-timeout expired",
+		}, {
+			// The quota promotion by applyAgyError comes first, so the relabelling
+			// neither fires nor rewrites agy's own error text.
+			name:      "a quota line keeps quota_exhausted and agy's error text",
+			resultAge: 9 * time.Second, stderr: quotaLine, wantReason: ReasonQuotaExhausted, wantErrSub: legacyPrintTimeoutError,
+			noErrSub: "--print-timeout expired",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManager(t, managerOpts{})
+			started := time.Now().Add(-9 * time.Second)
+			dir, err := m.store.Create(jobstore.Meta{
+				ID: "j", StartedAt: started, PID: 999999, BootID: "old-boot",
+				Timeout: 8 * time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeResultPayload(t, dir, streamjson.Result{Status: streamjson.StatusError, Error: legacyPrintTimeoutError})
+			if werr := os.WriteFile(jobstore.OutPath(dir), nil, 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+			if werr := os.WriteFile(jobstore.ErrPath(dir), []byte(tc.stderr), 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+			at := started.Add(tc.resultAge)
+			for _, p := range []string{jobstore.OutPath(dir), jobstore.ErrPath(dir), jobstore.ResultPath(dir)} {
+				if werr := os.Chtimes(p, at, at); werr != nil {
+					t.Fatal(werr)
+				}
+			}
+			st, err := m.Status("j")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.State != StateFailed || st.FailureReason != tc.wantReason {
+				t.Fatalf("status = %+v, want failed with reason %q", st, tc.wantReason)
+			}
+			if !strings.Contains(st.Error, tc.wantErrSub) || strings.Contains(st.Error, tc.noErrSub) {
+				t.Fatalf("error = %q, want it to mention %q and not %q", st.Error, tc.wantErrSub, tc.noErrSub)
 			}
 		})
 	}

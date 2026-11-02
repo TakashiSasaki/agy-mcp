@@ -227,8 +227,8 @@ func TestVersionSubcommandReportsSemVerBuildMetadata(t *testing.T) {
 			t.Fatalf("agy-mcp %s failed: %v\n%s", arg, err, out)
 		}
 		line := strings.TrimSpace(string(out))
-		if !strings.HasPrefix(line, "agy-mcp v2.9.0+local.") {
-			t.Errorf("agy-mcp %s = %q, want prefix \"agy-mcp v2.9.0+local.\"", arg, line)
+		if !strings.HasPrefix(line, "agy-mcp v2.10.0+local.") {
+			t.Errorf("agy-mcp %s = %q, want prefix \"agy-mcp v2.10.0+local.\"", arg, line)
 		}
 	}
 }

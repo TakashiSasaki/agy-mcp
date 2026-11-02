@@ -43,16 +43,16 @@ func TestGateBlocksSameKey(t *testing.T) {
 // misconfigured MaxConcurrency cannot disable the gate (which would let every
 // run proceed concurrently and re-expose the session-lock hang).
 func TestNewGateClampsNonPositive(t *testing.T) {
-	for _, max := range []int{0, -1, -100} {
-		g := newGate(max)
+	for _, limit := range []int{0, -1, -100} {
+		g := newGate(limit)
 		if g.cap() != 1 {
-			t.Fatalf("newGate(%d).cap() = %d, want 1", max, g.cap())
+			t.Fatalf("newGate(%d).cap() = %d, want 1", limit, g.cap())
 		}
 		if g.tryAcquire("a") != acquireOK {
-			t.Fatalf("newGate(%d): first acquire should succeed", max)
+			t.Fatalf("newGate(%d): first acquire should succeed", limit)
 		}
 		if g.tryAcquire("b") != acquireAtCap {
-			t.Fatalf("newGate(%d): a second distinct key must hit the clamped cap of 1", max)
+			t.Fatalf("newGate(%d): a second distinct key must hit the clamped cap of 1", limit)
 		}
 	}
 }

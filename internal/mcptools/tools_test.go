@@ -255,15 +255,15 @@ func TestToStartRequestPassesIdempotencyKey(t *testing.T) {
 // dropped field here would silently ignore a caller's run-shaping request.
 func TestToStartRequestPassesRunOptions(t *testing.T) {
 	t.Parallel()
-	req, err := runInput{Prompt: "x", Effort: "high", Mode: "plan", Agent: "reviewer", Sandbox: true}.toStartRequest()
+	req, err := runInput{Prompt: "x", Effort: "high", Mode: "accept-edits", Agent: "reviewer", Sandbox: true}.toStartRequest()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if req.Effort != "high" {
 		t.Errorf("Effort = %q, want high", req.Effort)
 	}
-	if req.Mode != "plan" {
-		t.Errorf("Mode = %q, want plan", req.Mode)
+	if req.Mode != "accept-edits" {
+		t.Errorf("Mode = %q, want accept-edits", req.Mode)
 	}
 	if req.Agent != "reviewer" {
 		t.Errorf("Agent = %q, want reviewer", req.Agent)
@@ -293,33 +293,33 @@ func TestToStartRequestPassesModel(t *testing.T) {
 	}
 }
 
-// TestToStartRequestValidatesMode: mode is an agy enum (accept-edits, plan), so a
-// bad value must fail fast at the tool boundary with a message that quotes the bad
-// value and names the accepted values, rather than reaching agy. An empty mode is
-// valid and means "omit the flag". Validation is exact, so a wrong case is rejected.
+// TestToStartRequestValidatesMode: accept-edits (or empty, meaning omit the flag)
+// is the only mode accepted. plan gets a dedicated refusal that names the cause
+// (issue #219); any other value is rejected with a message quoting it. Validation
+// is exact, so a wrong case is rejected, not folded into plan.
 func TestToStartRequestValidatesMode(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, mode string
-		wantErr    bool
+		wantIn     []string // non-empty means the mode must be rejected with these substrings
 	}{
-		{name: "empty is ok", mode: "", wantErr: false},
-		{name: "accept-edits ok", mode: "accept-edits", wantErr: false},
-		{name: "plan ok", mode: "plan", wantErr: false},
-		{name: "unknown rejected", mode: "planning", wantErr: true},
-		{name: "wrong case rejected", mode: "Plan", wantErr: true},
+		{name: "empty is ok", mode: ""},
+		{name: "accept-edits ok", mode: "accept-edits"},
+		{name: "plan refused", mode: "plan", wantIn: []string{`"plan"`, "not supported", "slash command expansion"}},
+		{name: "unknown rejected", mode: "planning", wantIn: []string{"planning", "accept-edits"}},
+		{name: "wrong case rejected", mode: "Plan", wantIn: []string{"Plan", "accept-edits"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			req, err := runInput{Prompt: "x", Mode: tc.mode}.toStartRequest()
-			if tc.wantErr {
+			if len(tc.wantIn) > 0 {
 				if err == nil {
 					t.Fatalf("mode %q was accepted, want a rejection", tc.mode)
 				}
-				if !strings.Contains(err.Error(), tc.mode) ||
-					!strings.Contains(err.Error(), "accept-edits") ||
-					!strings.Contains(err.Error(), "plan") {
-					t.Fatalf("err = %v, want it to quote %q and name the accepted values", err, tc.mode)
+				for _, want := range tc.wantIn {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("err = %v, want it to contain %q", err, want)
+					}
 				}
 				return
 			}
@@ -504,6 +504,49 @@ func TestStatusOutputRecoveryHint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStatusOutputRecoverySignIn: a sign-in failure (issue #214) gets its own
+// recovery note, given even without a conversation, naming the sign-in on the
+// server host first and the conversation_id only as a follow-up. A run that
+// produced text gets none, whatever the flag says.
+func TestStatusOutputRecoverySignIn(t *testing.T) {
+	t.Parallel()
+	signIn := func(mut func(*manager.Status)) manager.Status {
+		st := manager.Status{State: manager.StateFailed, FailureReason: manager.ReasonAgyError, SignInRequired: true}
+		if mut != nil {
+			mut(&st)
+		}
+		return st
+	}
+	t.Run("no conversation says to sign in and retry the run", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(signIn(nil)).Recovery
+		if !strings.Contains(got, "not signed in") || !strings.Contains(got, "AGY_ADC_AUTH") || !strings.Contains(got, "retry the run") || strings.Contains(got, "conversation_id") {
+			t.Errorf("Recovery = %q, want sign-in advice ending in retry the run, without conversation_id", got)
+		}
+	})
+	t.Run("with a conversation the sign-in advice still comes first", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(signIn(func(s *manager.Status) { s.ConversationID = "c1" })).Recovery
+		if !strings.Contains(got, "not signed in") || !strings.Contains(got, "fresh agy_run with this conversation_id") {
+			t.Errorf("Recovery = %q, want sign-in advice then the conversation_id continuation", got)
+		}
+	})
+	t.Run("recovered text means no recovery note", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(signIn(func(s *manager.Status) { s.Result, s.Partial = "as far as I got", true })).Recovery
+		if got != "" {
+			t.Errorf("Recovery = %q, want none when a result was recovered", got)
+		}
+	})
+	t.Run("a retryable=false verdict does not hide the sign-in advice", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(signIn(func(s *manager.Status) { s.Retryable = new(false) })).Recovery
+		if !strings.Contains(got, "not signed in") {
+			t.Errorf("Recovery = %q, want sign-in advice despite retryable=false", got)
+		}
+	})
 }
 
 // TestStatusOutputFailureReason: toStatusOutput echoes FailureReason to the wire
@@ -761,43 +804,43 @@ func TestFormatVersion(t *testing.T) {
 			name:            "explicit ldflags version wins",
 			bi:              &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
 			ok:              true,
-			explicitVersion: "v2.9.0+local.custom",
-			baseVersion:     "v2.9.0",
-			want:            "v2.9.0+local.custom",
+			explicitVersion: "v2.10.0+local.custom",
+			baseVersion:     "v2.10.0",
+			want:            "v2.10.0+local.custom",
 		},
 		{
 			name:        "local checkout with pseudo-version formats SemVer build metadata",
 			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.9.1-0.20261030100619-2735d07e4633"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "2735d07e463385b0ec5b2ab584f00a3bc9341752"}, {Key: "vcs.modified", Value: "false"}}},
 			ok:          true,
-			baseVersion: "v2.9.0",
-			want:        "v2.9.0+local.2735d07",
+			baseVersion: "v2.10.0",
+			want:        "v2.10.0+local.2735d07",
 		},
 		{
 			name:        "local checkout with (devel) and dirty worktree",
 			bi:          &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "2735d07e463385b0ec5b2ab584f00a3bc9341752"}, {Key: "vcs.modified", Value: "true"}}},
 			ok:          true,
-			baseVersion: "v2.9.0",
-			want:        "v2.9.0+local.2735d07.dirty",
+			baseVersion: "v2.10.0",
+			want:        "v2.10.0+local.2735d07.dirty",
 		},
 		{
 			name:        "tagged checkout with vcs revision preserves tag as base",
 			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.10.0+dirty"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "abcdef1234567890"}, {Key: "vcs.modified", Value: "true"}}},
 			ok:          true,
-			baseVersion: "v2.9.0",
+			baseVersion: "v2.10.0",
 			want:        "v2.10.0+local.abcdef1.dirty",
 		},
 		{
 			name:        "module install without vcs settings keeps module version",
-			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.9.0"}},
+			bi:          &debug.BuildInfo{Main: debug.Module{Version: "v2.10.0"}},
 			ok:          true,
-			baseVersion: "v2.9.0",
-			want:        "v2.9.0",
+			baseVersion: "v2.10.0",
+			want:        "v2.10.0",
 		},
 		{
 			name:        "plain test binary without vcs settings returns dev",
 			bi:          &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
 			ok:          true,
-			baseVersion: "v2.9.0",
+			baseVersion: "v2.10.0",
 			want:        "dev",
 		},
 	}
@@ -810,4 +853,115 @@ func TestFormatVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStatusOutputRecoveryNotRetryable: when agy reported retryable=false (issue
+// #183), the recovery text stops advising a continuation, while whether a note is
+// present is unchanged.
+func TestStatusOutputRecoveryNotRetryable(t *testing.T) {
+	t.Parallel()
+	no, yes := new(false), new(true)
+	const genericHint = "no result text was recovered. Start a fresh agy_run with this conversation_id to continue the thread without restating the task."
+	failed := func(r *bool, mut func(*manager.Status)) manager.Status {
+		st := manager.Status{State: manager.StateFailed, FailureReason: manager.ReasonAgyError, ConversationID: "c1", Retryable: r}
+		if mut != nil {
+			mut(&st)
+		}
+		return st
+	}
+	quota := func(r *bool, mut func(*manager.Status)) manager.Status {
+		st := failed(r, func(s *manager.Status) { s.FailureReason = manager.ReasonQuotaExhausted })
+		if mut != nil {
+			mut(&st)
+		}
+		return st
+	}
+
+	t.Run("generic note says fix the cause", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(failed(no, nil)).Recovery
+		if got == "" || strings.Contains(got, "conversation_id") || !strings.Contains(got, "not retryable") {
+			t.Errorf("Recovery = %q, want a not-retryable note without conversation_id", got)
+		}
+	})
+	t.Run("retryable true or unknown keeps today's text", func(t *testing.T) {
+		t.Parallel()
+		for _, r := range []*bool{yes, nil} {
+			if got := toStatusOutput(failed(r, nil)).Recovery; got != genericHint {
+				t.Errorf("Recovery = %q, want %q", got, genericHint)
+			}
+		}
+	})
+	t.Run("quota note keeps the reset advice, drops the conversation clause and names the verdict", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(quota(no, nil)).Recovery
+		if !strings.Contains(got, "wait for that reset") || !strings.Contains(got, "then retry the run") || strings.Contains(got, "conversation_id") {
+			t.Errorf("Recovery = %q, want the wait-for-reset and retry-the-run advice without conversation_id", got)
+		}
+		if !strings.Contains(got, "not retryable") || !strings.Contains(got, "fix the cause") || strings.Contains(got, "transient") {
+			t.Errorf("Recovery = %q, want it to say agy marked the error not retryable and to fix the cause, without calling it transient", got)
+		}
+	})
+	// The literals are written out, not built from quotaTransientAdvice, so a reword
+	// of the production text fails here instead of moving the expectation with it.
+	t.Run("quota note for a retryable or absent verdict is pinned exactly", func(t *testing.T) {
+		t.Parallel()
+		const withConv = "agy's model quota, rate limit or AI credits balance is exhausted. This is transient, not a hard failure: wait for the quota reset (the error message carries the reset time when agy gives one, and agy_usage reports reset times), then retry with this conversation_id to continue the thread without restating the task."
+		const noConv = "agy's model quota, rate limit or AI credits balance is exhausted. This is transient, not a hard failure: wait for the quota reset (the error message carries the reset time when agy gives one, and agy_usage reports reset times), then retry the run."
+		for _, r := range []*bool{yes, nil} {
+			if got := toStatusOutput(quota(r, nil)).Recovery; got != withConv {
+				t.Errorf("Recovery with a conversation = %q, want %q", got, withConv)
+			}
+			noID := func(s *manager.Status) { s.ConversationID = "" }
+			if got := toStatusOutput(quota(r, noID)).Recovery; got != noConv {
+				t.Errorf("Recovery without a conversation = %q, want %q", got, noConv)
+			}
+		}
+	})
+	t.Run("quota note with no verdict keeps the conversation clause", func(t *testing.T) {
+		t.Parallel()
+		if got := toStatusOutput(quota(nil, nil)).Recovery; !strings.Contains(got, "conversation_id") {
+			t.Errorf("Recovery = %q, want conversation_id", got)
+		}
+	})
+	t.Run("a result keeps recovery absent", func(t *testing.T) {
+		t.Parallel()
+		if got := toStatusOutput(failed(no, func(s *manager.Status) { s.Result = "partial" })).Recovery; got != "" {
+			t.Errorf("Recovery = %q, want none", got)
+		}
+	})
+	t.Run("no conversation keeps recovery absent", func(t *testing.T) {
+		t.Parallel()
+		if got := toStatusOutput(failed(no, func(s *manager.Status) { s.ConversationID = "" })).Recovery; got != "" {
+			t.Errorf("Recovery = %q, want none", got)
+		}
+	})
+	t.Run("a promoted quota job with no conversation gets the quota note", func(t *testing.T) {
+		t.Parallel()
+		got := toStatusOutput(quota(yes, func(s *manager.Status) { s.ConversationID = "" })).Recovery
+		if !strings.HasSuffix(got, "then retry the run.") {
+			t.Errorf("Recovery = %q, want a note ending %q", got, "then retry the run.")
+		}
+	})
+	t.Run("wire", func(t *testing.T) {
+		t.Parallel()
+		b, err := json.Marshal(toStatusOutput(failed(no, func(s *manager.Status) { s.ErrorID = "e-1" })))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{`"retryable":false`, `"error_id":"e-1"`} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("wire output missing %s: %s", want, b)
+			}
+		}
+		b, err = json.Marshal(toStatusOutput(failed(nil, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{`"retryable"`, `"error_id"`} {
+			if strings.Contains(string(b), bad) {
+				t.Errorf("wire output has %s with no verdict: %s", bad, b)
+			}
+		}
+	})
 }

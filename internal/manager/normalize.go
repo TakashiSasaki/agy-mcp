@@ -25,9 +25,9 @@ func normalizeCwd(cwd string) (string, error) {
 		// turn "no directory" into a confident claim about an unrelated one: a cache
 		// lookup against the manager's own cwd, or a cmd.Dir the caller never asked
 		// for. An empty cwd has no canonical form, so keep it empty and let each
-		// consumer decide what to do with it. Every live caller already guarantees a
-		// non-empty value (StartJob fails closed, readSessions guards, dirsInclude
-		// skips empty entries), so this is defence in depth.
+		// consumer decide what to do with it. ListAgents relies on this: an omitted
+		// cwd stays empty, so the listing adds no workspace and keeps the server's
+		// working directory.
 		return "", nil
 	}
 	abs, err := filepath.Abs(cwd)
@@ -57,7 +57,7 @@ func normalizeCwd(cwd string) (string, error) {
 // volume-relative entry (see rootRelative) never counts. Whenever the checks
 // disagree, or cwd cannot be stat'ed, the entry does not count: agy then gets
 // cwd as well as the entry, and a duplicate --add-dir was MEASURED harmless on
-// agy 1.2.9 (macOS), while dropping cwd would lose the project's rule files on
+// agy 1.2.9 and 1.4.8 (macOS; Windows not measured, issue #192), while dropping cwd would lose the project's rule files on
 // agy that needs --add-dir to load them.
 func dirsInclude(dirs []string, cwd string) bool {
 	if cwd == "" {

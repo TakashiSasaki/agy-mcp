@@ -83,9 +83,12 @@ import (
 // Three later releases change how a headless run ends. None raises the floor,
 // because agy-mcp classifies the run on both sides of each change:
 //   - 1.1.28 made an expired --print-timeout return the partial output and exit
-//     0 instead of failing. Below 1.1.28 the expiry is an in-band ERROR and is
-//     reported as agy_error. From 1.1.28 status derivation reads agy's stderr
-//     notice and reports a timeout (markPrintTimeout in internal/manager).
+//     0 instead of failing. Below 1.1.28 the expiry is an in-band ERROR (exit 1,
+//     error "timeout waiting for response", MEASURED against agy 1.1.15 and
+//     1.1.27), reported as a timeout when the job ran its full timeout
+//     (markLegacyPrintTimeout in internal/manager). From 1.1.28 status
+//     derivation reads agy's stderr notice and reports a timeout
+//     (markPrintTimeout in internal/manager).
 //     agy-mcp passes the job timeout as --print-timeout and its supervisor arms
 //     the same deadline, so the two race; the hard kill won the one run MEASURED
 //     against agy 1.2.9.
@@ -106,6 +109,32 @@ import (
 // substitute for, and agy-mcp runs concurrent agy processes, so users running
 // parallel jobs benefit from it. Whether those jobs actually share a database
 // file is not measured, and the floor stays put on the same reasoning.
+//
+// Later releases up to 1.4.8 were read against the flags and output agy-mcp
+// consumes, and none raises the floor. These touch behaviour a caller can see:
+//   - 1.3.4 made an unknown --agent fail the run before any model call (exit 1,
+//     an ERROR result naming the available agents; MEASURED against agy 1.4.6).
+//     Below 1.3.4 agy runs its default agent instead (changelog), which agy-mcp
+//     cannot tell from a real run, so list_agents is how a caller checks a name
+//     there.
+//   - 1.3.4 also let --model take a base name without --effort. agy-mcp forwards
+//     both flags as given and does not couple them.
+//   - 1.3.2 stopped --dangerously-skip-permissions auto-approving the plan in
+//     /plan mode (changelog). MEASURED against agy 1.1.15, 1.1.27, 1.4.6 and
+//     1.4.8 (issues #219, #221): --mode
+//     plan has no effect while --disable-slash-commands is set, so agy-mcp
+//     refuses plan (see internal/mcptools).
+//   - 1.3.5 added --mode auto (Windows support from 1.4.4); agy-mcp does not
+//     accept it, see the comment on the mode constants in internal/mcptools.
+//   - 1.4.7 fixed skills, rules, custom agents, plugins, plugin MCP servers
+//     and hooks not loading under Application Default Credentials sign-in
+//     (AGY_ADC_AUTH); the README's auth note carries the caveat (issue #222),
+//     and `agy-mcp doctor` warns when AGY_ADC_AUTH is set on an older agy
+//     (issue #224).
+//   - 1.4.8 passes a failed tool call back to the agent as an error instead of
+//     an ordinary result. State stays exit-code-driven (see 1.1.14 above), and
+//     MEASURED against agy 1.4.8 a shell command that exits non-zero still ends
+//     the run with exit 0 and status SUCCESS.
 //
 // The facts about agy releases are from agy's own changelog (run
 // `agy changelog`), except where a line is marked MEASURED; the 1.1.15 line
@@ -347,7 +376,7 @@ func submatches(line string, loc []int) []string {
 // There are exactly two such things, and the list is short on purpose. A triple
 // spliced onto a word ("agy1.0.5") is deliberately NOT one of them: demoting it
 // meant a real version lost to unrelated noise elsewhere in the output, and the
-// splice is something this code causes itself, since CombinedOutput merges
+// splice is something this code causes itself, since readAgyVersion merges
 // stdout and stderr onto one fd and a concurrent stderr write lands mid-line.
 func classify(line string, start, end int) tier {
 	before, after := line[:start], line[end:]

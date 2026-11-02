@@ -29,6 +29,17 @@ const maxReadBytes = 32 << 20 // 32 MiB
 // (not the head) is what matters: the final lines carry the actual error.
 const errTailBytes = 2000
 
+// agyErrorLookback is how many bytes before the errTailBytes window readStderrCopy
+// reads, to find where the window's first line starts. When that line is cut by
+// the window and begins with the AGY_ERROR prefix, its remainder is dropped
+// instead of copied (issue #205).
+const agyErrorLookback = 64 << 10
+
+// agyErrorWithheld stands in for a stderr tail that held text but reduced to
+// nothing once its AGY_ERROR lines were redacted, so Error never claims "no
+// stderr output" for a stderr that had content.
+const agyErrorWithheld = "<AGY_ERROR line withheld>"
+
 // Job states reported by Status. These are shared with StartJob and the gate
 // watchdog so the producer and consumer of a job's state cannot drift apart.
 const (
@@ -51,8 +62,8 @@ const (
 // state already is the reason), and a running or done job has no failure to
 // name.
 const (
-	ReasonQuotaExhausted = "quota_exhausted" // agy hit a provider quota or rate-limit wall; transient
-	ReasonTimeout        = "timeout"         // the run outlived its timeout: agy-mcp killed it, or (agy 1.1.28 and later) agy's own --print-timeout cut the turn short
+	ReasonQuotaExhausted = "quota_exhausted" // agy hit a provider quota, rate-limit or AI credits wall; transient unless Status.Retryable is false
+	ReasonTimeout        = "timeout"         // the run outlived its timeout: agy-mcp killed it, or agy's own --print-timeout cut the turn short
 	ReasonSpawnFailed    = "spawn_failed"    // the agy binary could not be started, or agy itself exited 127 (one exit sentinel covers both)
 	ReasonAgyError       = "agy_error"       // agy itself reported an error, exited non-zero, or returned an indeterminate result
 	ReasonInterrupted    = "interrupted"     // the job process vanished without writing a result
@@ -95,15 +106,28 @@ type Status struct {
 	// mid-stream text is not an answer. Collect a result once the state is
 	// terminal.
 	Result string
-	Error  string // present when failed: agy's own message, or a stderr tail + exit code
+	Error  string // present when failed: agy's own message, or the exit code and a stderr tail whose AGY_ERROR lines are reduced to their canonical status (issue #205)
 	// FailureReason classifies a StateFailed job into one of the stable Reason
 	// constants, so a caller can branch on the cause (most usefully, tell a
 	// transient ReasonQuotaExhausted wall from a hard error) without scraping
 	// Error. It is set only when State is StateFailed; a cancelled, running or
 	// done job leaves it empty. Error still carries the human-readable detail,
-	// including a quota wall's reset time, which this field deliberately does not
-	// parse out.
-	FailureReason  string
+	// including a quota wall's reset time when agy's message gives one, which this
+	// field deliberately does not parse out.
+	FailureReason string
+	// Retryable is agy's own verdict on whether the failure is worth retrying,
+	// read from the structured AGY_ERROR line on its stderr (issue #183). Nil when
+	// no usable line was parsed, which means "no verdict", not "permanent". Set
+	// only alongside StateFailed.
+	Retryable *bool
+	// ErrorID is agy's identifier for the failure from the same line; empty when
+	// absent or not a plain id.
+	ErrorID string
+	// SignInRequired reports that agy's own output shows it is not signed in, or
+	// that its sign-in expired (issue #214). It never changes State,
+	// FailureReason or Error; the tool layer turns it into recovery advice. Set
+	// only alongside StateFailed and ReasonAgyError.
+	SignInRequired bool
 	ConversationID string
 	// Model is the legacy model id agy-mcp resolved for this run and persisted to
 	// meta: the request's model, or AGY_MCP_DEFAULT_MODEL when none was given,
@@ -273,7 +297,8 @@ func recoverInterrupted(dir string, meta jobstore.Meta, st Status) Status {
 // agy's own result payload, when present, outranks the exit code for describing
 // the outcome: agy reports failures it survives (an unresolvable model, and
 // before agy 1.1.28 its own print-timeout) in band with a specific message, where
-// the exit code says less. From 1.1.28 an expired print-timeout exits 0 instead,
+// the exit code says less; markLegacyPrintTimeout relabels that print-timeout
+// report as a timeout. From 1.1.28 an expired print-timeout exits 0 instead,
 // which case 0 below detects from stderr. The code still owns every case where
 // no payload could be written, which is exactly the terminations agy-mcp itself
 // performs.
@@ -312,15 +337,32 @@ func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, 
 		st.FailureReason = ReasonSpawnFailed
 	default:
 		st.State = StateFailed
+		var classifyText string
 		if hasResult && res.Error != "" {
 			st.Error = res.Error
+			classifyText = res.Error
 		} else {
-			st.Error = errorSummary(dir, code)
+			st.Error, classifyText = errorSummary(dir, code)
 		}
 		// A non-zero exit's message can still be a quota wall (agy usually reports
 		// one in its payload, but may exit non-zero with it only on stderr), so
 		// classify the message rather than flatly calling every crash agy_error.
-		st.FailureReason = classifyAgyError(st.Error)
+		// The stderr text is classified before its AGY_ERROR reduction: the
+		// reduction removes the short_error wording the matcher reads (issue #205).
+		st.FailureReason = classifyAgyError(classifyText)
+		// agy's structured stderr line supplies the retryable verdict and can
+		// promote the reason to quota_exhausted (issue #183). A SUCCESS payload
+		// means agy vouched for the turn in band, so a stray line is not attached
+		// to it. The same condition covers the sign-in check, which only flags an
+		// agy_error that is still one after that promotion (issue #214). A
+		// pre-1.1.28 print-timeout expiry arrives as an ERROR payload (issue
+		// #192), so its relabelling sits between the two: it only touches an
+		// agy_error that survived the promotion, and the sign-in check then skips it.
+		if !hasResult || res.Status != streamjson.StatusSuccess {
+			st = applyAgyError(dir, st)
+			st = markLegacyPrintTimeout(meta, st, res)
+			st = markSignInRequired(dir, st, res.Error)
+		}
 	}
 	// Every non-zero exit is a run cut short: a cancel, a timeout, a crash, an
 	// OOM kill, agy exiting 1, and a 127 that is a real agy exit rather than a
@@ -388,7 +430,7 @@ func applyCleanExitNotices(dir string, meta jobstore.Meta, done Status, res stre
 	// The second notice: from agy 1.1.28, an expired --print-timeout makes
 	// agy return whatever it has and exit 0 (with a SUCCESS payload in the
 	// run MEASURED against agy 1.2.9; before 1.1.28 agy reported the expiry
-	// as an in-band ERROR, which keeps its agy_error reason above). agy-mcp
+	// as an in-band ERROR, which markLegacyPrintTimeout relabels above). agy-mcp
 	// passes the job timeout as --print-timeout and the supervisor arms the
 	// same deadline right after starting agy, so the two timers race. The
 	// hard kill won when this was MEASURED against agy 1.2.9 (a 15s job
@@ -436,12 +478,54 @@ func markBackgroundAborted(st Status) Status {
 // text it did produce is kept and flagged partial. When there is none and the
 // run named a conversation, the generic "continue this conversation_id" recovery
 // hint in toStatusOutput applies, as it does to a run agy-mcp killed itself.
+// The pre-1.1.28 report of the same expiry is an ERROR payload instead and is
+// handled by markLegacyPrintTimeout.
 func markPrintTimeout(st Status) Status {
 	st.State = StateFailed
 	st.FailureReason = ReasonTimeout
 	st.Partial = st.Result != ""
-	st.Error = "agy's --print-timeout expired with the turn still in progress, " +
-		"so agy returned only the partial output it had"
+	st.Error = printTimeoutExpired + ", so agy returned only the partial output it had"
+	return st
+}
+
+// printTimeoutExpired is the opening of the Error text every print-timeout
+// reclassification reports, so the wording stays in one place.
+const printTimeoutExpired = "agy's --print-timeout expired with the turn still in progress"
+
+// legacyPrintTimeoutError is the payload error agy reported for an expired
+// --print-timeout before 1.1.28: exit 1, status ERROR, empty response, empty
+// stderr (MEASURED against agy 1.1.15 and 1.1.27, issue #192). The agy 1.1.28
+// changelog says the CLI stopped failing with a timeout error and returns
+// partial output instead, which markPrintTimeout covers.
+const legacyPrintTimeoutError = "timeout waiting for response"
+
+// legacyPrintTimeoutSlack is how far short of the job's timeout the measured
+// run length may read and still count as a full run. The run length ends at a
+// file mtime, and a filesystem that stores mtimes at one-second resolution (NOT
+// MEASURED on any here) would truncate a real expiry to up to 1s short. A miss
+// on a coarser filesystem leaves agy_error, the fail-safe direction.
+const legacyPrintTimeoutSlack = time.Second
+
+// markLegacyPrintTimeout relabels the pre-1.1.28 print-timeout expiry (see
+// legacyPrintTimeoutError) as a timeout. Text alone is not enough: nothing
+// measured rules out an inner RPC timeout with the same wording, so the job must
+// also have run its own timeout (less legacyPrintTimeoutSlack), which a failure
+// that ends early has not. A job with no recorded timeout is left alone. It
+// reads only an agy_error, so callers run it after applyAgyError has had its
+// chance to promote the reason to quota_exhausted. The run length is st.Elapsed,
+// which the caller has already frozen at jobstore.CompletedAt. The reason and
+// the message change; State, Result and Partial are untouched so carryText still
+// decides the text.
+func markLegacyPrintTimeout(meta jobstore.Meta, st Status, res streamjson.Result) Status {
+	if st.FailureReason != ReasonAgyError || res.Status != streamjson.StatusError ||
+		res.Error != legacyPrintTimeoutError || meta.Timeout <= 0 {
+		return st
+	}
+	if st.Elapsed < meta.Timeout-legacyPrintTimeoutSlack {
+		return st
+	}
+	st.FailureReason = ReasonTimeout
+	st.Error = printTimeoutExpired + " (agy before 1.1.28 reports this as \"" + legacyPrintTimeoutError + "\")"
 	return st
 }
 
@@ -498,6 +582,14 @@ func applyResult(dir string, meta jobstore.Meta, st Status, res streamjson.Resul
 			// reporting a failure with a blank cause.
 			st.Error = "agy reported an error without a message"
 		}
+		// agy's structured stderr line can promote this to quota_exhausted and
+		// supplies the retryable verdict (issue #183). Every caller reaches here
+		// with a payload, which the supervisor writes only after agy was reaped, so
+		// stderr is final. The pre-1.1.28 print-timeout relabelling follows it for
+		// the reason given in statusFromExitCode.
+		st = applyAgyError(dir, st)
+		st = markLegacyPrintTimeout(meta, st, res)
+		st = markSignInRequired(dir, st, res.Error)
 	case res.Status == streamjson.StatusSuccess:
 		if schemaSuccessWithoutOutput(meta, res) {
 			st.State = StateFailed
@@ -898,22 +990,86 @@ func cleanTail(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	tail = strings.TrimRightFunc(tail, unicode.IsSpace)
+	return trimStderrTail(tail), nil
+}
+
+// trimStderrTail trims trailing whitespace from a stderr window and advances it
+// to a UTF-8 rune start.
+func trimStderrTail(s string) string {
+	s = strings.TrimRightFunc(s, unicode.IsSpace)
 	// tailFile may have started mid-rune; advance to a valid UTF-8 boundary so a
 	// multi-byte rune is not split.
-	for tail != "" && !utf8.RuneStart(tail[0]) {
-		tail = tail[1:]
+	for s != "" && !utf8.RuneStart(s[0]) {
+		s = s[1:]
 	}
-	return tail, nil
+	return s
+}
+
+// copyWindow splits the last errTailBytes of raw (the window) off the bytes
+// readStderrCopy read, and reports whether the window's first line is the cut end
+// of an AGY_ERROR line that must be dropped. fromStart says raw begins at offset 0
+// of the stderr file. A window that starts on a line boundary has no cut line (a
+// whole first line is left to redactAgyErrorLines). For a cut one, the start of
+// that line is looked for in the bytes before the window. When none is found and
+// raw does not start the file, nothing shows the line is an AGY_ERROR line, so it
+// is kept: an AGY_ERROR line longer than agyErrorLookback is the known gap, which
+// the measured line (well under 1 KiB) does not approach. The line start is
+// looked for after a newline only, so a cut AGY_ERROR segment that follows a
+// bare carriage return is a second gap.
+func copyWindow(raw string, fromStart bool) (window string, headInAgyError bool) {
+	winStart := max(0, len(raw)-errTailBytes)
+	window = raw[winStart:]
+	if winStart == 0 || raw[winStart-1] == '\n' {
+		return window, false
+	}
+	ls := strings.LastIndexByte(raw[:winStart], '\n') + 1
+	if ls == 0 && !fromStart {
+		return window, false
+	}
+	// A window that opens inside the prefix itself is covered too: the line's
+	// start, not the window's, is compared.
+	return window, strings.HasPrefix(raw[ls:], agyErrorPrefix)
+}
+
+// readStderrCopy reads the stderr tail that an error message copies. raw is the
+// tail exactly as cleanTail returns it. shown is raw without a cut AGY_ERROR
+// first line and with its other AGY_ERROR lines reduced by redactAgyErrorLines
+// (issue #205), and is never empty when raw is not:
+// a reduction that empties a non-empty tail yields agyErrorWithheld, so a caller
+// cannot report "no stderr output" for stderr that had content.
+//
+// It reads agyErrorLookback bytes more than the window to find where the window's
+// first line starts. A file of exactly that many bytes plus the window is treated
+// as not reaching its start, so its first line, if cut, is kept (see copyWindow).
+func readStderrCopy(dir string) (shown, raw string, err error) {
+	const n = errTailBytes + agyErrorLookback
+	b, err := tailFile(jobstore.ErrPath(dir), n)
+	if err != nil {
+		return "", "", err
+	}
+	window, head := copyWindow(b, int64(len(b)) < n)
+	raw = trimStderrTail(window)
+	shown = raw
+	if head {
+		// Drop the cut AGY_ERROR fragment through its newline (all of it when
+		// there is none).
+		_, shown, _ = strings.Cut(raw, "\n")
+	}
+	shown = redactAgyErrorLines(shown)
+	if shown == "" && raw != "" {
+		shown = agyErrorWithheld
+	}
+	return shown, raw, nil
 }
 
 // stderrNotices is what a terminal job's captured stderr says about how agy
-// ended the run. Both come from ONE read of the bounded stderr tail
-// (the tail errorSummary reports). An unreadable stderr yields the zero value,
+// ended the run. Every field comes from ONE read of the bounded stderr tail
+// (the window errorSummary reports, before its AGY_ERROR reduction). An unreadable stderr yields the zero value,
 // which leaves the derived state untouched rather than guessing a failure.
 type stderrNotices struct {
 	backgroundAborted bool // agy killed outstanding background shell tasks at exit (issue #173)
 	printTimeout      bool // agy's own --print-timeout expired with the turn in progress
+	signInRequired    bool // agy reported it needs a sign-in (issue #214)
 }
 
 func readStderrNotices(dir string) stderrNotices {
@@ -924,7 +1080,25 @@ func readStderrNotices(dir string) stderrNotices {
 	return stderrNotices{
 		backgroundAborted: matchesBackgroundAbort(tail),
 		printTimeout:      matchesPrintTimeout(tail),
+		signInRequired:    matchesSignInRequired(tail),
 	}
+}
+
+// markSignInRequired flags an agy_error run whose own output says agy needs a
+// sign-in (issue #214), from the payload's error text or the captured stderr.
+// It sets only SignInRequired: State, FailureReason, Error and Result stay as
+// classified, so a caller branching on failure_reason sees no change. It runs
+// after applyAgyError so that a quota promotion wins, and the agy_error gate
+// keeps the flag off every other failure reason. The payload is checked first so
+// a hit there skips the stderr read.
+func markSignInRequired(dir string, st Status, payloadErr string) Status {
+	if st.FailureReason != ReasonAgyError {
+		return st
+	}
+	if matchesSignInRequired(payloadErr) || readStderrNotices(dir).signInRequired {
+		st.SignInRequired = true
+	}
+	return st
 }
 
 // lineHasAll reports whether line contains every one of phrases, ignoring case.
@@ -954,6 +1128,32 @@ func lineHasAll(line string, phrases ...string) bool {
 func matchesPrintTimeout(stderr string) bool {
 	for line := range strings.Lines(stderr) {
 		if lineHasAll(line, "print timeout", "turn in progress", "partial output") {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesSignInRequired reports agy's sign-in notice (issue #214). The first
+// phrase pair is MEASURED against agy 1.4.8: a run with no usable sign-in exits
+// 1, its stderr carries "Error: authentication required. Run 'agy' to log in."
+// and its ERROR payload carries only "authentication failed or timed out". The
+// second pair is quoted from agy's changelog for 1.3.3 ("the agent now says
+// `Authentication expired. Please log back in.`") and was NOT MEASURED, nor how a
+// headless run delivers it, so it is matched in payload and stderr alike and a
+// delivery as response text on a SUCCESS run stays unflagged.
+//
+// "authentication failed or timed out" alone is not matched because it also
+// reads as a timeout. Each pair must fall on one line, so an unrelated line such
+// as "MCP server github: authentication required" cannot pair with a "Run 'agy'
+// to log in" elsewhere in the tail. A false match changes only the recovery
+// note of an already failed agy_error run that has no text (the sign-in advice
+// replaces the note it would otherwise get); a miss leaves the earlier
+// reporting in place.
+func matchesSignInRequired(msg string) bool {
+	for line := range strings.Lines(msg) {
+		if lineHasAll(line, "authentication required", "run 'agy' to log in") ||
+			lineHasAll(line, "authentication expired", "log back in") {
 			return true
 		}
 	}
@@ -1023,23 +1223,51 @@ func matchesBackgroundAbort(stderr string) bool {
 }
 
 // classifyAgyError maps an error message agy produced (a terminal ERROR
-// payload, or a non-zero exit's stderr tail) to a failure reason. A provider
-// quota or rate-limit wall is the one transient, retryable case and is told
-// apart as ReasonQuotaExhausted; everything else agy reports is ReasonAgyError.
+// payload, or a non-zero exit's unreduced stderr tail) to a failure reason. A provider
+// quota, rate-limit or AI credits wall is the one case treated as transient
+// (unless agy's structured line marks it not retryable) and is told apart as
+// ReasonQuotaExhausted; everything else agy reports is
+// ReasonAgyError. applyAgyError may then promote the result to
+// ReasonQuotaExhausted from agy's structured status; it never demotes.
 //
 // It is only ever called on the branches that would otherwise be a flat
 // ReasonAgyError, so it never has to name the structural reasons (timeout,
 // spawn-fail, interrupted) that their own branches already know.
 func classifyAgyError(msg string) string {
-	if isQuotaError(msg) {
+	if isQuotaError(withoutUnknownAgentLines(msg)) {
 		return ReasonQuotaExhausted
 	}
 	return ReasonAgyError
 }
 
+// withoutUnknownAgentLines drops each line of msg that is agy's unknown-agent
+// error, so the quota check does not read it. agy lists the available agents in
+// that line, so an agent whose name carries a quota word (say quota-watcher)
+// would otherwise turn any agent typo into ReasonQuotaExhausted, telling the
+// caller to wait for a reset that never comes.
+//
+// MEASURED against agy 1.4.6 with four agents configured, one named
+// quota-watcher: the payload error is one line, `unknown agent "<name>"
+// (available: <agents>)`, and the stderr line is `error: ` followed by that
+// text; errorSummary prefixes `exit 1: `. agy has failed an unknown --agent
+// this way since 1.3.4 (changelog); an older agy runs its default agent
+// (changelog). Reworded text stops being excluded, which is today's
+// behaviour, never a new match.
+func withoutUnknownAgentLines(msg string) string {
+	var b strings.Builder
+	for line := range strings.Lines(msg) {
+		if !lineHasAll(line, `unknown agent "`, "(available:") {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
+
 // isQuotaError reports whether an error message describes a provider quota or
-// rate-limit wall: a transient condition that clears on its own, distinct from a
-// hard failure. agy relays the provider's own wording (observed as "Individual
+// rate-limit wall, or agy's AI credits wall (plan quota used up and too few AI
+// credits to cover the request): a condition that waiting for the quota to reset
+// can clear, distinct from a hard failure. agy relays the provider's own wording
+// (observed as "Individual
 // quota reached. Please upgrade your subscription to increase your limits.
 // Resets in 21m50s."), which agy-mcp does not control, so the match is a
 // case-insensitive scan for the phrases that wording and the common provider
@@ -1074,7 +1302,31 @@ func isQuotaError(msg string) bool {
 		strings.Contains(l, "resource exhausted") ||
 		strings.Contains(l, "resource_exhausted") ||
 		strings.Contains(l, "resourceexhausted") ||
-		strings.Contains(l, "too many requests")
+		strings.Contains(l, "too many requests") ||
+		matchesCreditsWall(msg)
+}
+
+// matchesCreditsWall reports agy's AI credits wall (issue #202). The wording,
+// "Your AI credits balance is too low to continue.", is quoted from agy's
+// changelog for 1.2.15, which says it is shown once the plan quota is used up and
+// the AI credits balance cannot cover a request; it was NOT MEASURED. How a
+// headless stream-json run delivers it is not measured either, so it is matched
+// wherever classifyAgyError already looks, and a delivery as a SUCCESS response
+// stays unclassified.
+//
+// Both phrases must fall on one line, as matchesPrintTimeout requires of its
+// phrases, so a stray "AI credits balance" and an unrelated "too low" on
+// different lines of a stderr tail cannot pair up. "ai" is required before
+// "credits balance" to keep the match to agy's own wording: a low prepaid or
+// application credits balance is not a plan quota wall, so it must not read as
+// retryable.
+func matchesCreditsWall(msg string) bool {
+	for line := range strings.Lines(msg) {
+		if lineHasAll(line, "ai credits balance", "too low") {
+			return true
+		}
+	}
+	return false
 }
 
 // errorSummary summarizes a non-zero exit for which no error message came from a
@@ -1082,35 +1334,44 @@ func isQuotaError(msg string) bool {
 // It distinguishes three stderr outcomes, kept distinct because a caller reading
 // only this string cannot otherwise tell them apart: stderr had content, stderr
 // was empty or absent, or stderr could not be read at all.
-func errorSummary(dir string, code int) string {
-	tail, err := cleanTail(dir)
+//
+// msg is what Status.Error carries: the stderr tail with each AGY_ERROR line
+// reduced to its canonical status or dropped (issue #205). classifyMsg is the same
+// summary built from the unreduced tail, for classifyAgyError, so the reduction
+// cannot change a failure_reason.
+func errorSummary(dir string, code int) (msg, classifyMsg string) {
+	shown, raw, err := readStderrCopy(dir)
 	if err != nil {
 		// The stderr file exists but cannot be read; say so rather than implying
 		// the run produced no error output.
-		return fmt.Sprintf("exit %d: <stderr unavailable: %v>", code, err)
+		msg = fmt.Sprintf("exit %d: <stderr unavailable: %v>", code, err)
+		return msg, msg
 	}
-	if tail == "" {
+	if raw == "" {
 		// A readable but empty stderr. Naming it beats the dangling "exit N:" that
 		// trimming a colon with nothing after it used to leave behind, which read
 		// as a truncated message rather than as an absence of one.
-		return fmt.Sprintf("exit %d (no stderr output)", code)
+		msg = fmt.Sprintf("exit %d (no stderr output)", code)
+		return msg, msg
 	}
-	return "exit " + strconv.Itoa(code) + ": " + tail
+	prefix := "exit " + strconv.Itoa(code) + ": "
+	return prefix + shown, prefix + raw
 }
 
 // spawnFailMessage explains a 127 exit. The supervisor writes 127 both when it
 // could not exec agy (the intended meaning) and when agy itself exits 127, so it
-// names both causes and appends any stderr instead of masking it.
+// names both causes and appends the stderr tail, AGY_ERROR lines reduced as
+// errorSummary does, instead of masking it.
 func spawnFailMessage(dir string) string {
 	msg := "agy exited 127: the supervisor could not exec the agy binary (check the configured agy path), or agy itself exited 127"
-	tail, err := cleanTail(dir)
+	shown, _, err := readStderrCopy(dir)
 	switch {
 	case err != nil:
 		// The stderr file exists but cannot be read; name it, as errorSummary does,
 		// rather than silently dropping it.
 		msg += fmt.Sprintf("; stderr unavailable: %v", err)
-	case tail != "":
-		msg += "; stderr: " + tail
+	case shown != "":
+		msg += "; stderr: " + shown
 	}
 	return msg
 }

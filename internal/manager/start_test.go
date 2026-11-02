@@ -22,7 +22,7 @@ func TestBuildAgyArgs(t *testing.T) {
 		Prompt:         "review this",
 		Model:          "gemini-3.1-pro-high",
 		Effort:         "high",
-		Mode:           "plan",
+		Mode:           "accept-edits",
 		Agent:          "reviewer",
 		Sandbox:        true,
 		Dirs:           []string{"/a", "/b"},
@@ -38,7 +38,7 @@ func TestBuildAgyArgs(t *testing.T) {
 		"--disable-slash-commands",
 		"--model", "gemini-3.1-pro-high",
 		"--effort", "high",
-		"--mode", "plan",
+		"--mode", "accept-edits",
 		"--agent", "reviewer",
 		"--sandbox",
 		"--add-dir", "/work", "--add-dir", "/a", "--add-dir", "/b",
@@ -232,4 +232,34 @@ func addDirValues(args []string) []string {
 		}
 	}
 	return got
+}
+
+// TestWorkspaceDirs pins the workspace set shared by buildAgyArgs and the
+// list_agents listing (issue #203): cwd first unless project rules are skipped,
+// cwd is empty, or a caller dir already names it, then the caller dirs in order.
+func TestWorkspaceDirs(t *testing.T) {
+	// cwd must be in normalized form, as dirsInclude requires; t.TempDir is not on
+	// macOS, where /var is a symlink.
+	c, err := normalizeCwd(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		req  StartRequest
+		want []string
+	}{
+		{"cwd alone", StartRequest{Cwd: c}, []string{c}},
+		{"project rules skipped", StartRequest{Cwd: c, SkipProjectRules: true}, nil},
+		{"dir already names cwd", StartRequest{Cwd: c, Dirs: []string{c}}, []string{c}},
+		{"cwd then dirs", StartRequest{Cwd: c, Dirs: []string{other}}, []string{c, other}},
+		{"empty request", StartRequest{}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workspaceDirs(tc.req); !slices.Equal(got, tc.want) {
+				t.Errorf("workspaceDirs(%+v) = %v, want %v", tc.req, got, tc.want)
+			}
+		})
+	}
 }

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -73,35 +74,61 @@ func modelID(v string) string {
 	return v
 }
 
-// runJSONListing execs `agy --output-format json <sub>` and returns its stdout,
-// applying the version gate, a bounded timeout, and the WaitDelay tolerance that
-// list_models and list_agents share. Only the subcommand, its timeout pair, and
-// (at the caller) the decoder differ between the two, so they run through here
+// listingArgs builds the argv for a JSON listing: `--output-format json`, one
+// `--add-dir` pair per workspace directory, then the subcommand. --add-dir, like
+// --output-format, is a global flag agy rejects after the subcommand ("flags
+// provided but not defined: -add-dir"; MEASURED against agy 1.3.1 and again
+// against agy 1.4.6, on `models`), so every flag
+// sits before sub.
+func listingArgs(sub string, workspace []string) []string {
+	args := []string{outputFormatFlag, jsonOutputFormat}
+	for _, d := range workspace {
+		args = append(args, addDirFlag, d)
+	}
+	return append(args, sub)
+}
+
+// runJSONListing execs `agy --output-format json [--add-dir <dir>]... <sub>` and
+// returns its stdout, applying the version gate, a bounded timeout, and the
+// WaitDelay tolerance that list_models and list_agents share. Only the
+// subcommand, its workspace and working directory, its timeout pair, and (at the
+// caller) the decoder differ between the two, so they run through here
 // rather than each carrying its own copy of this delicate ctx-and-error handling.
 // The quota probe shares the same body through runJSONProbe, which also lets it
 // run in its own session (see newSession there).
 //
 // This is NOT the sharing issue #160 item 7 weighed and rejected: that was about
 // folding the VERSION probe together with a listing, and the two genuinely differ
-// (readAgyVersion uses CombinedOutput and tolerates a non-zero exit because
-// --version's exit status is not a contract, while a listing uses Output and
-// treats any non-zero exit as a failure). The two JSON listings share every one
+// (readAgyVersion merges stdout and stderr into one bounded writer and tolerates a
+// non-zero exit because --version's exit status is not a contract, while a
+// listing keeps stdout apart from stderr and treats any non-zero exit as a
+// failure). The two JSON listings share every one
 // of those decisions, so nothing delicate is being generalized across a real
 // difference here; the version probe stays separate, as that note intends.
-func (m *Manager) runJSONListing(ctx context.Context, sub string, timeout, killGrace time.Duration) ([]byte, error) {
-	return m.runJSONProbe(ctx, sub, []string{outputFormatFlag, jsonOutputFormat, sub}, false, timeout, killGrace)
+func (m *Manager) runJSONListing(ctx context.Context, sub, dir string, workspace []string, timeout, killGrace time.Duration) ([]byte, error) {
+	return m.runJSONProbe(ctx, sub, listingArgs(sub, workspace), dir, false, timeout, killGrace)
 }
 
 // runJSONProbe execs agy with args and returns its stdout. On a non-zero exit it
 // returns the error together with whatever stdout agy printed, so a caller can
 // still inspect a reply that came with a failure exit; the listings ignore it.
+// The error carries agy's stderr with each AGY_ERROR line reduced to its canonical
+// status (redactAgyErrorLines), so the cloud project and region do not reach the
+// tool caller (issue #209). The wrapped *exec.ExitError is a copy whose Stderr is
+// the reduced text, so unwrapping the error does not recover the original. Stderr
+// is captured whole up to probeOutputLimit rather than through os/exec's head and
+// tail copy, whose cut can leave a fragment of an AGY_ERROR line without its
+// prefix; a line cut at that limit keeps its prefix and fails to decode, so the
+// reduction drops it.
 // label names the probe
 // in errors ("agy <label>: ..."). newSession runs agy in its own session
 // (proc.ConfigureSession): agy 1.2.x opens /dev/tty in -p mode and stops on
 // SIGTTOU in a background process group that shares a controlling terminal (see
 // proc.ConfigureSession), so the -p quota probe needs it. The listing subcommands
-// pass false; they have not been seen to touch the tty (NOT MEASURED).
-func (m *Manager) runJSONProbe(ctx context.Context, label string, args []string, newSession bool, timeout, killGrace time.Duration) ([]byte, error) {
+// pass false; they have not been seen to touch the tty (NOT MEASURED). A
+// non-empty dir is the process's working directory, so a missing one fails the
+// call; an empty dir inherits the server's working directory.
+func (m *Manager) runJSONProbe(ctx context.Context, label string, args []string, dir string, newSession bool, timeout, killGrace time.Duration) ([]byte, error) {
 	// Version-gated like the job path even though a listing itself does not need
 	// stream-json: an agy too old to drive is a configuration problem, and one
 	// clear message about it beats a listing from a binary that cannot run a job.
@@ -121,11 +148,19 @@ func (m *Manager) runJSONProbe(ctx context.Context, label string, args []string,
 	// flagset does not define it). The listing banner stays on stderr, so stdout is
 	// the envelope alone.
 	cmd := probeCmd(ctx, agy, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	if newSession {
 		proc.ConfigureSession(cmd)
 	}
 	cmd.WaitDelay = killGrace
-	out, err := cmd.Output()
+	var stdout bytes.Buffer
+	stderr := &probeOutput{}
+	cmd.Stdout = &stdout
+	cmd.Stderr = stderr
+	err = cmd.Run()
+	out := stdout.Bytes()
 	if err != nil {
 		// Check the deadline BEFORE classifying the exec error, exactly as
 		// readAgyVersion does. A ctx-killed process surfaces as *exec.ExitError,
@@ -151,13 +186,20 @@ func (m *Manager) runJSONProbe(ctx context.Context, label string, args []string,
 		// the version probe (issue #161). Unlike --version, a non-zero exit is still
 		// a failure here, so every other error (ExitError included) is returned.
 		if !errors.Is(err, exec.ErrWaitDelay) {
-			// Output() captures stderr into (*exec.ExitError).Stderr; include it so a
-			// real cause (an auth prompt, a usage error) is visible instead of a bare
-			// "exit status 1".
+			// Include agy's stderr so a real cause (an auth prompt, a usage error) is
+			// visible instead of a bare "exit status 1". Each AGY_ERROR line is
+			// reduced first: its short_error carries the cloud project and region,
+			// and this error reaches the callers of list_models, list_agents and
+			// agy_usage (issue #209; the job path does the same, issue #205).
 			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-				if stderr := strings.TrimSpace(string(ee.Stderr)); stderr != "" {
-					return out, fmt.Errorf("agy %s: %w: %s", label, err, stderr)
+				reduced := strings.TrimSpace(redactAgyErrorLines(stderr.String()))
+				reduced = keepTail(reduced, probeErrorLimit)
+				// A copy, so errors.As on the returned error cannot reach the raw text.
+				clean := &exec.ExitError{ProcessState: ee.ProcessState, Stderr: []byte(reduced)}
+				if reduced != "" {
+					return out, fmt.Errorf("agy %s: %w: %s", label, clean, reduced)
 				}
+				return out, fmt.Errorf("agy %s: %w", label, clean)
 			}
 			return out, fmt.Errorf("agy %s: %w", label, err)
 		}
@@ -165,12 +207,48 @@ func (m *Manager) runJSONProbe(ctx context.Context, label string, args []string,
 	return out, nil
 }
 
+// probeOutputLimit bounds the output kept from a probe: stderr in runJSONProbe and
+// the merged output of `agy --version` in readAgyVersion. Either is a short banner
+// or error, so the limit is only a guard against a runaway writer.
+const probeOutputLimit = 1 << 20
+
+// probeErrorLimit bounds the reduced agy text placed in an error to its last
+// bytes: the probe stderr in runJSONProbe, as os/exec's own capture did before
+// stderr was read whole, and the version output in versionOutputForMessage
+// (issue #211).
+const probeErrorLimit = 64 << 10
+
+// keepTail returns the last limit bytes of s, without a rune the cut split. A
+// negative limit keeps nothing.
+func keepTail(s string, limit int) string {
+	limit = max(limit, 0)
+	if len(s) <= limit {
+		return s
+	}
+	return strings.ToValidUTF8(s[len(s)-limit:], "")
+}
+
+// probeOutput collects a probe's output up to probeOutputLimit and discards the
+// rest. It keeps the head, never a tail, so every line it holds is whole except
+// possibly the last. Used as both Stdout and Stderr of one command it is a bounded
+// CombinedOutput, and os/exec then calls Write from one goroutine at a time.
+type probeOutput struct{ buf bytes.Buffer }
+
+func (w *probeOutput) Write(p []byte) (int, error) {
+	if room := probeOutputLimit - w.buf.Len(); room > 0 {
+		w.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (w *probeOutput) String() string { return w.buf.String() }
+
 // ListModels lists agy's available models. It decodes the JSON envelope from
 // `agy --output-format json models` (agy 1.1.12+) rather than tab-splitting the
 // text rows, so the ids and labels come from a typed field instead of a guessed
 // column.
 func (m *Manager) ListModels(ctx context.Context) ([]Model, error) {
-	out, err := m.runJSONListing(ctx, "models", listModelsTimeout, listModelsKillGrace)
+	out, err := m.runJSONListing(ctx, "models", "", nil, listModelsTimeout, listModelsKillGrace)
 	if err != nil {
 		return nil, err
 	}
