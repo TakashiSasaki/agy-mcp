@@ -174,6 +174,9 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 		if proj.DefaultBranch == "" && defBranch != "" {
 			proj.DefaultBranch = defBranch
 		}
+		if wts == nil {
+			wts = []ProjectWorktree{}
+		}
 		proj.Worktrees = wts
 
 		// If a query is provided, filter by Name, ID, or RepositoryURL
@@ -194,6 +197,9 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 
+	if out == nil {
+		out = []ProjectInfo{}
+	}
 	return out, nil
 }
 
