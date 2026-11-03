@@ -46,7 +46,7 @@ type requestKeyFields struct {
 // field does not change the key either. StartJob persists the key only for a job
 // that carries an idempotency_key.
 //
-// StartRequest.Priority is deliberately not hashed: it does not change what agy
+// StartRequest.Priority and TaskLabel are deliberately not hashed: neither changes what agy
 // runs, and a retry that flips it must replay the existing job, not be refused as
 // a different request.
 //

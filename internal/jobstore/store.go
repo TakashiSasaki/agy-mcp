@@ -26,6 +26,7 @@ import (
 // progress.json. Anything that needs a fresh run's conversation id must read
 // progress.json, which is why Status and conversationLive both scan it.
 type Meta struct {
+	TaskLabel      string        `json:"task_label,omitempty"`
 	ID             string        `json:"id"`
 	AgyPath        string        `json:"agy_path"`
 	Args           []string      `json:"args"`
@@ -108,15 +109,9 @@ type Progress struct {
 	// InitModel is the model string agy emitted on its pre-execution stream-json
 	// init event (init.model). Empty when agy omitted it or exited before init.
 	InitModel string `json:"init_model,omitempty"`
-	// StepIndex is the index of the step the run is on. No PRODUCTION code reads it
-	// back off disk: the manager reports StepType, not the index. It is kept
-	// because the supervisor compares it against each incoming event to decide
-	// whether anything observable actually moved (see consumeStream), which is what
-	// stops a repeated update for one step from atomically rewriting a
-	// byte-identical file. Persisting it lets a test assert the value, which keeps
-	// the ASSIGNMENT honest; the comparison itself is asserted by nothing, and
-	// deleting it leaves the whole suite green, so treat that dedup as an
-	// optimization a later change can silently revert.
+	// StepIndex is the last CLI step index, exposed by manager.Status alongside
+	// StepType and UpdatedAt. The supervisor also compares it against incoming
+	// events to avoid rewriting a byte-identical progress file (consumeStream).
 	StepIndex int       `json:"step_index"`
 	StepType  string    `json:"step_type,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`

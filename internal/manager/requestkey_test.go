@@ -19,10 +19,11 @@ func TestRequestKeyCoversEveryRequestField(t *testing.T) {
 	if key == "" {
 		t.Fatal("requestKey returned empty")
 	}
-	// IdempotencyKey is the lookup token itself, not part of the run. Priority is
+	// IdempotencyKey is the lookup token itself, not part of the run. TaskLabel is
+	// discovery metadata. Priority is
 	// deliberately not identity: it does not change what agy runs, and hashing it
 	// would make a retry that flips priority look like a different request.
-	exempt := map[string]bool{"IdempotencyKey": true, "Priority": true}
+	exempt := map[string]bool{"IdempotencyKey": true, "Priority": true, "TaskLabel": true}
 	for f := range reflect.TypeFor[StartRequest]().Fields() {
 		r := base
 		v := reflect.ValueOf(&r).Elem().FieldByIndex(f.Index)

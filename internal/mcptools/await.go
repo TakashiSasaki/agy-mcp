@@ -112,9 +112,9 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 
 // markCollected records that this tool is returning the job's terminal
 // outcome, so hook-wait can skip a wake that would
-// repeat it (issue #194). Every tool that returns a job's terminal outcome
-// calls it after the outcome is in hand; a caller that saw only a running job
-// must not, since the marker suppresses the wake that job still owes.
+// repeat it (issue #194). Handlers call it with the full terminal outcome or
+// the final result page in hand. Running jobs, summary-only snapshots and
+// intermediate pages must not suppress the wake that job still owes.
 // The write is best effort: a failed write leaves the marker absent, which costs
 // one redundant wake and never a lost one.
 func markCollected(mgr *manager.Manager, jobID string) {

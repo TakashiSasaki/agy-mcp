@@ -61,8 +61,8 @@ type runSyncOutput struct {
 
 // registerRunSync adds the agy_run_sync tool: start a job, wait inline for it
 // (bounded), streaming progress notifications when the client asked for them.
-func registerRunSync(s *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(s, &mcp.Tool{
+func registerRunSync(s *toolServer, mgr *manager.Manager) {
+	addStartTool(s, &mcp.Tool{
 		Name:        toolAgyRunSync,
 		Title:       "Delegate to agy (wait inline)",
 		Annotations: annDelegate,
@@ -80,11 +80,11 @@ func registerRunSync(s *mcp.Server, mgr *manager.Manager) {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in runSyncInput) (*mcp.CallToolResult, runSyncOutput, error) {
 		wait, err := parseWait(in.Wait)
 		if err != nil {
-			return nil, runSyncOutput{}, err
+			return nil, runSyncOutput{}, invalidRunError(err)
 		}
 		startReq, err := in.toStartRequest()
 		if err != nil {
-			return nil, runSyncOutput{}, err
+			return nil, runSyncOutput{}, invalidRunError(err)
 		}
 		job, err := mgr.StartJob(startReq)
 		if err != nil {
@@ -92,7 +92,7 @@ func registerRunSync(s *mcp.Server, mgr *manager.Manager) {
 		}
 		out, err := awaitJob(ctx, req, mgr, job.ID, time.Now().Add(wait))
 		if err != nil {
-			return nil, runSyncOutput{}, err
+			return nil, runSyncOutput{}, &manager.StartError{Code: "wait_interrupted", NextAction: "inspect_job", JobID: job.ID, JobStarted: new(true), Err: err}
 		}
 		return nil, out, nil
 	})

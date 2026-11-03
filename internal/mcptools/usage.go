@@ -112,8 +112,8 @@ func quotaFor(mgr *manager.Manager) *quotaSummaryOutput {
 }
 
 // registerUsage adds the agy_usage tool.
-func registerUsage(s *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(s, &mcp.Tool{
+func registerUsage(s *toolServer, mgr *manager.Manager) {
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyUsage,
 		Title:       "Check agy quota",
 		Annotations: annReadExternal,

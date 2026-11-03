@@ -87,8 +87,12 @@ const (
 
 // Status is the observable state of a job.
 type Status struct {
-	State   string // running | done | failed | cancelled
-	Elapsed time.Duration
+	JobID             string
+	TaskLabel         string
+	ProgressUpdatedAt time.Time
+	StepIndex         int
+	State             string // running | done | failed | cancelled
+	Elapsed           time.Duration
 	// Result is the assistant's response. Every TERMINAL state whose text can be
 	// RECOVERED carries one, not done alone: a cancelled, timed-out or crashed
 	// run carries whatever it managed to say, so that work is offered back rather
@@ -208,6 +212,8 @@ func (m *Manager) Status(id string) (Status, error) {
 		return Status{}, err
 	}
 	st := Status{
+		JobID:                id,
+		TaskLabel:            meta.TaskLabel,
 		Elapsed:              time.Since(meta.StartedAt),
 		ConversationID:       meta.ConversationID,
 		Model:                meta.Model,
@@ -241,6 +247,8 @@ func (m *Manager) Status(id string) (Status, error) {
 			st.SelectedModelSource = ModelSourceCLIInit
 		}
 		st.StepType = prog.StepType
+		st.ProgressUpdatedAt = prog.UpdatedAt
+		st.StepIndex = prog.StepIndex
 	}
 
 	if code, ok := m.store.ExitCode(id); ok {

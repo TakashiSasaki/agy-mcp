@@ -27,15 +27,18 @@ func listRegisteredTools(t *testing.T) []*mcp.Tool {
 // between destructive and read-only, and between an open and closed world, is
 // the claim this server makes to its clients, so a silent flip must fail here.
 var wantAnnotations = map[string]mcp.ToolAnnotations{
-	toolAgyRun:       {DestructiveHint: new(true), OpenWorldHint: new(true)},
-	toolAgyRunSync:   {DestructiveHint: new(true), OpenWorldHint: new(true)},
-	toolAgyCancel:    {DestructiveHint: new(true), IdempotentHint: true, OpenWorldHint: new(false)},
-	toolAgyStatus:    {ReadOnlyHint: true, OpenWorldHint: new(false)},
-	toolAgyWait:      {ReadOnlyHint: true, OpenWorldHint: new(false)},
-	toolListSessions: {ReadOnlyHint: true, OpenWorldHint: new(false)},
-	toolListModels:   {ReadOnlyHint: true, OpenWorldHint: new(true)},
-	toolListAgents:       {ReadOnlyHint: true, OpenWorldHint: new(true)},
-	toolAgyUsage:         {ReadOnlyHint: true, OpenWorldHint: new(true)},
+	toolAgyListJobs:         {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyGetResult:        {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyInfo:             {ReadOnlyHint: true, OpenWorldHint: new(true)},
+	toolAgyRun:              {DestructiveHint: new(true), OpenWorldHint: new(true)},
+	toolAgyRunSync:          {DestructiveHint: new(true), OpenWorldHint: new(true)},
+	toolAgyCancel:           {DestructiveHint: new(true), IdempotentHint: true, OpenWorldHint: new(false)},
+	toolAgyStatus:           {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyWait:             {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolListSessions:        {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolListModels:          {ReadOnlyHint: true, OpenWorldHint: new(true)},
+	toolListAgents:          {ReadOnlyHint: true, OpenWorldHint: new(true)},
+	toolAgyUsage:            {ReadOnlyHint: true, OpenWorldHint: new(true)},
 	toolAgyListArtifacts:    {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyReadArtifact:     {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyListProjects:     {ReadOnlyHint: true, OpenWorldHint: new(false)},
@@ -109,9 +112,12 @@ func fmtHint(b *bool) string {
 // wantSiblings names, per tool, the other tools its description must mention, so
 // an agent reading one definition learns when to reach for a different one.
 var wantSiblings = map[string][]string{
-	toolAgyRun:     {toolAgyRunSync, toolAgyWait, toolAgyStatus},
-	toolAgyRunSync: {toolAgyRun, toolAgyWait, toolAgyStatus},
-	toolAgyWait:    {toolAgyRun, toolAgyStatus},
+	toolAgyListJobs:  {toolAgyStatus, toolAgyWait, toolAgyGetResult},
+	toolAgyGetResult: {toolAgyStatus, toolAgyWait, toolAgyListJobs},
+	toolAgyInfo:      {toolAgyUsage, toolAgyRun, toolAgyListJobs},
+	toolAgyRun:       {toolAgyRunSync, toolAgyWait, toolAgyStatus},
+	toolAgyRunSync:   {toolAgyRun, toolAgyWait, toolAgyStatus},
+	toolAgyWait:      {toolAgyRun, toolAgyStatus},
 	// agy_status routes to agy_wait (the blocking alternative) and no further:
 	// requiring it to name agy_cancel too bought nothing an agent needs at a
 	// status check, and the first attempt to satisfy that invented a claim about
@@ -121,11 +127,11 @@ var wantSiblings = map[string][]string{
 	// still carry a complete answer (agy prints its result and can hang on the
 	// way out), so an agent that re-sends the prompt without collecting it first
 	// pays for the same work twice.
-	toolAgyCancel:    {toolAgyRun, toolAgyStatus},
-	toolListModels:   {toolAgyRun, toolAgyRunSync},
-	toolListAgents:   {toolAgyRun, toolAgyRunSync},
-	toolListSessions:     {toolAgyRun, toolAgyRunSync},
-	toolAgyUsage:         {toolAgyRun, toolAgyRunSync},
+	toolAgyCancel:           {toolAgyRun, toolAgyStatus},
+	toolListModels:          {toolAgyRun, toolAgyRunSync},
+	toolListAgents:          {toolAgyRun, toolAgyRunSync},
+	toolListSessions:        {toolAgyRun, toolAgyRunSync},
+	toolAgyUsage:            {toolAgyRun, toolAgyRunSync},
 	toolAgyListArtifacts:    {toolAgyReadArtifact, toolAgyStatus},
 	toolAgyReadArtifact:     {toolAgyListArtifacts, toolAgyStatus},
 	toolAgyListProjects:     {toolAgyResolveWorkspace, toolAgyRun},
@@ -193,6 +199,13 @@ func assertPropertiesDescribed(t *testing.T, which string, raw any) {
 	schema, ok := raw.(map[string]any)
 	if !ok {
 		t.Fatalf("%s schema has unexpected type %T", which, raw)
+	}
+	for _, keyword := range []string{"anyOf", "oneOf", "allOf"} {
+		if branches, ok := schema[keyword].([]any); ok {
+			for _, branch := range branches {
+				assertPropertiesDescribed(t, which+" "+keyword, branch)
+			}
+		}
 	}
 	// A schema with no properties at all is legitimate (list_models takes no
 	// arguments), but a properties key of the wrong shape is not.

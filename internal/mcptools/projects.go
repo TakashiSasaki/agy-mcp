@@ -35,8 +35,8 @@ type resolveWorkspaceOutput struct {
 	Error      string   `json:"error,omitempty" jsonschema:"error explanation if resolution failed"`
 }
 
-func registerProjects(s *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(s, &mcp.Tool{
+func registerProjects(s *toolServer, mgr *manager.Manager) {
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyListProjects,
 		Title:       "List registered projects",
 		Annotations: annReadLocal,
@@ -52,7 +52,7 @@ func registerProjects(s *mcp.Server, mgr *manager.Manager) {
 		return nil, listProjectsOutput{Projects: projs}, nil
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyResolveWorkspace,
 		Title:       "Resolve project workspace",
 		Annotations: annReadLocal,

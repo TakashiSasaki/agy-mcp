@@ -54,8 +54,8 @@ type readArtifactOutput struct {
 	Content    string `json:"content" jsonschema:"text content of the requested line range or tail"`
 }
 
-func registerArtifacts(s *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(s, &mcp.Tool{
+func registerArtifacts(s *toolServer, mgr *manager.Manager) {
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyListArtifacts,
 		Title:       "List job artifacts and logs",
 		Annotations: annReadLocal,
@@ -87,7 +87,7 @@ func registerArtifacts(s *mcp.Server, mgr *manager.Manager) {
 		}, nil
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyReadArtifact,
 		Title:       "Read job artifact or log file",
 		Annotations: annReadLocal,

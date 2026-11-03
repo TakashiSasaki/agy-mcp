@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tphakala/agy-mcp/v2/internal/agyver"
 	"github.com/tphakala/agy-mcp/v2/internal/config"
@@ -27,15 +29,15 @@ import (
 
 // Manager coordinates jobs backed by an on-disk store.
 type Manager struct {
-	cfg       config.Config
-	store     jobStore   // *jobstore.Store in production; an interface so tests can inject failures
-	gate      *gate      // serializes conflicting jobs and caps total concurrency within this process
-	xlock     *crossLock // serializes same-key jobs across sibling processes sharing the state dir
-	cacheFile   string // agy conversation cache (last_conversations.json); injectable for tests
-	projectsDir string // config directory for projects (~/.gemini/config/projects); injectable for tests
-	dataDir     string // root directory for repositories (/data); injectable for tests
+	cfg         config.Config
+	store       jobStore   // *jobstore.Store in production; an interface so tests can inject failures
+	gate        *gate      // serializes conflicting jobs and caps total concurrency within this process
+	xlock       *crossLock // serializes same-key jobs across sibling processes sharing the state dir
+	cacheFile   string     // agy conversation cache (last_conversations.json); injectable for tests
+	projectsDir string     // config directory for projects (~/.gemini/config/projects); injectable for tests
+	dataDir     string     // root directory for repositories (/data); injectable for tests
 	idemMu      sync.Mutex
-	idemKeys  map[string]bool // short-lived in-process idempotency claims; cross-process half lives in xlock
+	idemKeys    map[string]bool // short-lived in-process idempotency claims; cross-process half lives in xlock
 
 	// verifiedAgy is the agy path whose version has been checked and accepted in
 	// this process; verifyMu guards it. Caching the path (rather than a bare
@@ -119,6 +121,7 @@ func (m *Manager) SetProjectDirsForTest(projectsDir, dataDir string) {
 
 // StartRequest describes a run to start.
 type StartRequest struct {
+	TaskLabel        string // optional human-readable label; metadata only, not part of request identity
 	Prompt           string
 	Model            string   // optional; falls back to cfg.DefaultModel, then reduced by modelID
 	Effort           string   // optional; --effort <low|medium|high>, reasoning effort for the session
@@ -482,7 +485,7 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 			continue
 		}
 		if meta.Cwd != req.Cwd || !sameRequest(meta, req, args) {
-			return Job{}, false, fmt.Errorf("idempotency_key %q is already bound to job %s with a different normalized request", req.IdempotencyKey, id)
+			return Job{}, false, refusedStart("idempotency_conflict", "change_request", false, fmt.Errorf("idempotency_key %q is already bound to job %s with a different normalized request", req.IdempotencyKey, id))
 		}
 		// A persisted record that never recorded a supervisor PID is a
 		// failed-creation remnant, not a job to replay. StartJob records PID>0 (via
@@ -513,6 +516,10 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 // separate local while req stays stale risks a later read of req.Model/req.Timeout
 // silently bypassing the default fallback.
 func (m *Manager) normalizeRequest(req StartRequest) (StartRequest, error) {
+	req.TaskLabel = strings.TrimSpace(req.TaskLabel)
+	if !utf8.ValidString(req.TaskLabel) || utf8.RuneCountInString(req.TaskLabel) > 128 || strings.IndexFunc(req.TaskLabel, unicode.IsControl) >= 0 {
+		return StartRequest{}, fmt.Errorf("task_label must contain at most 128 characters and no control characters")
+	}
 	cwd := req.Cwd
 	if cwd == "" {
 		wd, err := os.Getwd()
@@ -579,7 +586,7 @@ func (m *Manager) claimIdempotency(req StartRequest, args []string) (existing Jo
 		// finished the reliable-start sequence, or is still tearing a failed
 		// creation down. Do not return that in-flight record; tell the caller to
 		// retry the same key after the short claim clears.
-		return Job{}, false, nil, fmt.Errorf("another agy job with idempotency_key %q is starting; retry with the same key", req.IdempotencyKey)
+		return Job{}, false, nil, &StartError{Code: "idempotency_in_progress", NextAction: "retry_same_request", Retryable: true, Err: fmt.Errorf("another agy job with idempotency_key %q is starting; retry with the same key", req.IdempotencyKey)}
 	}
 	release = func() { m.releaseIdempotency(req.IdempotencyKey) }
 	// Once the claim is ours, any matching meta belongs to a prior StartJob that
@@ -607,18 +614,18 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	// resolves. Reject the combination outright (before any platform or filesystem
 	// work) so the caller gets a deterministic error instead of a confusing winner.
 	if req.ContinueLatest && req.ConversationID != "" {
-		return Job{}, fmt.Errorf("conversation_id and continue_latest are mutually exclusive: pass one or the other")
+		return Job{}, refusedStart("invalid_argument", "change_request", false, fmt.Errorf("conversation_id and continue_latest are mutually exclusive: pass one or the other"))
 	}
 	// Job supervision is implemented on Linux (process groups, /proc) and Windows
 	// (Job Objects, OpenProcess). On other platforms refuse before doing any work, so
 	// the failure is a clear error rather than a half-spawned job. stdio/HTTP serve,
 	// list_models, list_agents, list_sessions, and agy_usage still work everywhere.
 	if !proc.Supported {
-		return Job{}, proc.ErrUnsupported
+		return Job{}, refusedStart("unsupported_platform", "change_environment", false, proc.ErrUnsupported)
 	}
 	req, err := m.normalizeRequest(req)
 	if err != nil {
-		return Job{}, err
+		return Job{}, refusedStart("invalid_argument", "change_request", false, err)
 	}
 
 	args := buildAgyArgs(req)
@@ -659,7 +666,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	// concurrency slot or creating a job directory.
 	agy, err := m.agyBinaryChecked(context.Background())
 	if err != nil {
-		return Job{}, err
+		return Job{}, refusedStart("agy_unavailable", "check_configuration", false, err)
 	}
 
 	// Refuse a continuation of a conversation some running job already drives.
@@ -672,7 +679,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 			return Job{}, err
 		}
 		if live {
-			return Job{}, fmt.Errorf("another agy job is already running on conversation %s; wait for it to finish or start a fresh run instead", req.ConversationID)
+			return Job{}, refusedStart("conversation_busy", "wait_for_conversation", true, fmt.Errorf("another agy job is already running on conversation %s; wait for it to finish or start a fresh run instead", req.ConversationID))
 		}
 	}
 
@@ -688,9 +695,9 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	case acquireOK:
 		// Slot and conversation lock reserved; proceed below.
 	case acquireKeyBusy:
-		return Job{}, fmt.Errorf("another agy job is already running on conversation %s; wait for it to finish or start a fresh run instead", req.ConversationID)
+		return Job{}, refusedStart("conversation_busy", "wait_for_conversation", true, fmt.Errorf("another agy job is already running on conversation %s; wait for it to finish or start a fresh run instead", req.ConversationID))
 	case acquireAtCap:
-		return Job{}, fmt.Errorf("agy-mcp is at its concurrency cap of %d running job(s); retry once one finishes", m.gate.cap())
+		return Job{}, refusedStart("capacity_exceeded", "wait_for_capacity", true, fmt.Errorf("agy-mcp is at its concurrency cap of %d running job(s); retry once one finishes", m.gate.cap()))
 	default:
 		// Fail closed: a future acquireOutcome must never fall through and start a
 		// job without a reserved slot or key.
@@ -704,6 +711,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	}
 	gitBranch, gitHead, gitDirty := DetectGitMetadata(req.Cwd)
 	meta := jobstore.Meta{
+		TaskLabel:      req.TaskLabel,
 		ID:             id,
 		AgyPath:        agy,
 		Args:           args,
@@ -780,7 +788,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 			m.releaseKey(key)
 			releaseIdem()
 		}()
-		return Job{}, fmt.Errorf("track supervisor: %w", err)
+		return Job{}, indeterminateStart(id, fmt.Errorf("track supervisor: %w", err))
 	}
 	// Record the supervisor PID (for liveness and cancel) and its start time (so a
 	// later process that recycles the same PID within this boot is not mistaken for
@@ -798,7 +806,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		// releases the idempotency claim asynchronously, so hand it ownership.
 		releaseIdemOnReturn = false
 		m.abortSpawn(cmd, grp, id, key, releaseIdem)
-		return Job{}, fmt.Errorf("record supervisor start time for pid %d", cmd.Process.Pid)
+		return Job{}, indeterminateStart(id, fmt.Errorf("record supervisor start time for pid %d", cmd.Process.Pid))
 	}
 	if err := m.store.UpdateMeta(meta); err != nil {
 		// Without a persisted PID the supervisor would be untrackable
@@ -806,7 +814,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		// release the gate once it has fully exited (see abortSpawn).
 		releaseIdemOnReturn = false
 		m.abortSpawn(cmd, grp, id, key, releaseIdem)
-		return Job{}, fmt.Errorf("record supervisor pid: %w", err)
+		return Job{}, indeterminateStart(id, fmt.Errorf("record supervisor pid: %w", err))
 	}
 	// Wait for the supervisor in the background. cmd.Wait returns exactly when
 	// the supervisor (and thus the job) exits, so this both reaps it (no zombie)

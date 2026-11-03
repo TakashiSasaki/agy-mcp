@@ -27,7 +27,7 @@ func TestStartJobPersistsMetaAndSpawns(t *testing.T) {
 		withCacheFile:  true,
 	})
 
-	job, err := m.StartJob(StartRequest{Prompt: "review main.go", Model: "gemini-3.1-pro-high"})
+	job, err := m.StartJob(StartRequest{Prompt: "review main.go", Model: "gemini-3.1-pro-high", TaskLabel: "  API review  "})
 	if err != nil {
 		t.Fatalf("StartJob: %v", err)
 	}
@@ -45,6 +45,9 @@ func TestStartJobPersistsMetaAndSpawns(t *testing.T) {
 	}
 	if meta.Prompt != "review main.go" {
 		t.Errorf("prompt = %q", meta.Prompt)
+	}
+	if meta.TaskLabel != "API review" {
+		t.Errorf("task_label = %q, want normalized metadata", meta.TaskLabel)
 	}
 	if !hasArg(meta.Args, "--model", "gemini-3.1-pro-high") {
 		t.Errorf("args missing model: %v", meta.Args)

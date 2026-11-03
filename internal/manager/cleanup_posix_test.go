@@ -46,6 +46,9 @@ func TestStartJobCleansUpDirOnUpdateMetaFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "record supervisor pid") {
 		t.Fatalf("StartJob error = %v, want a record-supervisor-pid failure", err)
 	}
+	if decision, ok := errors.AsType[*StartError](err); !ok || decision.Code != "start_indeterminate" || decision.JobID == "" || decision.JobStarted != nil || decision.Retryable {
+		t.Fatalf("a spawned supervisor must not be reported as never started: %+v", decision)
+	}
 
 	// The job dir must be removed (no orphan left for GarbageCollect). cleanup is
 	// asynchronous (after cmd.Wait), so poll with a bounded deadline.

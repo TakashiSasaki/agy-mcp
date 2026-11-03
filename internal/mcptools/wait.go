@@ -18,8 +18,8 @@ type waitInput struct {
 // finishes (bounded), streaming progress notifications when the client asked
 // for them. It shares agy_run_sync's wait phase, so one agy_wait call
 // replaces an agy_status poll loop.
-func registerWait(s *mcp.Server, mgr *manager.Manager) {
-	mcp.AddTool(s, &mcp.Tool{
+func registerWait(s *toolServer, mgr *manager.Manager) {
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyWait,
 		Title:       "Wait for an agy job",
 		Annotations: annReadLocal,

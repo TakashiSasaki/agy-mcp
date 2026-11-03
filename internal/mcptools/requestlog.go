@@ -111,7 +111,8 @@ func loggedToolName(name string) string {
 	switch name {
 	case toolAgyRun, toolAgyRunSync, toolAgyStatus, toolAgyWait, toolAgyCancel,
 		toolAgyUsage, toolListModels, toolListAgents, toolListSessions,
-		toolAgyListArtifacts, toolAgyReadArtifact, toolAgyListProjects, toolAgyResolveWorkspace:
+		toolAgyListArtifacts, toolAgyReadArtifact, toolAgyListProjects, toolAgyResolveWorkspace,
+		toolAgyListJobs, toolAgyGetResult, toolAgyInfo:
 		return name
 	default:
 		return "unknown"
@@ -162,22 +163,35 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 		}
 		count, complete := len(result.Tools), result.NextCursor == ""
 		entry.ToolCount, entry.CatalogComplete = &count, &complete
-		tools := slices.Clone(result.Tools)
-		slices.SortFunc(tools, func(a, b *mcp.Tool) int {
-			if a == nil {
-				if b == nil {
-					return 0
-				}
-				return -1
-			}
-			if b == nil {
-				return 1
-			}
-			return strings.Compare(a.Name, b.Name)
-		})
-		if data, err := json.Marshal(tools); err == nil {
-			digest := sha256.Sum256(data)
-			entry.CatalogSHA256 = hex.EncodeToString(digest[:])
-		}
+		entry.CatalogSHA256 = catalogDigest(result.Tools)
 	}
+}
+
+// Canonicalize through JSON values so schema struct field ordering and decoded
+// client maps produce the same digest. Array order inside schemas is retained.
+func catalogDigest(catalog []*mcp.Tool) string {
+	tools := slices.Clone(catalog)
+	slices.SortFunc(tools, func(a, b *mcp.Tool) int {
+		if a == nil {
+			if b == nil {
+				return 0
+			}
+			return -1
+		}
+		if b == nil {
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	data, err := json.Marshal(tools)
+	if err != nil {
+		return ""
+	}
+	var decoded any
+	if json.Unmarshal(data, &decoded) != nil {
+		return ""
+	}
+	data, _ = json.Marshal(decoded)
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }

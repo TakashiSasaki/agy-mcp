@@ -20,6 +20,7 @@ import (
 // exclusive, what a field defaults to, and what happens on expiry. Keeping that
 // here rather than in the tool description avoids restating the schema in prose.
 type runInput struct {
+	TaskLabel      string   `json:"task_label,omitempty" jsonschema:"optional label for recovering this job with agy_list_jobs; at most 128 characters, no control characters; not forwarded to agy or part of idempotency matching"`
 	Prompt         string   `json:"prompt" jsonschema:"the complete task for the delegated agent: what to do, the context needed to do it, and the output wanted back; the agent cannot see this conversation, so the prompt must stand alone. It is sent to agy literally, so a leading slash-command or skill name (a prompt starting with /) is treated as text, not expanded"`
 	Model          string   `json:"model,omitempty" jsonschema:"agy model id, e.g. gemini-3.1-pro-high; omit to use the server's default model, or agy's own default when the server sets none. Call list_models for the accepted values and pass one from its models field, not a display label from model_details, because agy rejects a display label whenever effort is also set. Not every id accepts every effort either, and some accept none, so omit effort unless you need a specific one"`
 	Effort         string   `json:"effort,omitempty" jsonschema:"reasoning effort for this run (agy --effort): low, medium, high, xhigh or max. Omit to use agy's default"`
@@ -178,7 +179,8 @@ var (
 // validating the effort, mode and timeout.
 func (in runInput) toStartRequest() (manager.StartRequest, error) {
 	req := manager.StartRequest{
-		Prompt: in.Prompt, Model: in.Model, Dirs: in.Dirs,
+		TaskLabel: in.TaskLabel,
+		Prompt:    in.Prompt, Model: in.Model, Dirs: in.Dirs,
 		ConversationID: in.ConversationID, ContinueLatest: in.ContinueLatest, Cwd: in.Cwd,
 		JSONSchema:     in.JSONSchema,
 		Effort:         in.Effort,
@@ -245,14 +247,26 @@ type runOutput struct {
 }
 
 type statusInput struct {
-	JobID string `json:"job_id" jsonschema:"job id returned by agy_run or agy_run_sync"`
+	JobID         string `json:"job_id" jsonschema:"job id returned by agy_run or agy_run_sync"`
+	IncludeResult *bool  `json:"include_result,omitempty" jsonschema:"include the result body (default true); false omits it from the response and does not mark a terminal job collected; use agy_get_result for bounded retrieval"`
+}
+
+type statusResponse struct {
+	JobID string `json:"job_id" jsonschema:"job whose status this response describes"`
+	statusOutput
 }
 
 type statusOutput struct {
-	State   string `json:"state" jsonschema:"running, done, failed or cancelled"`
-	Elapsed string `json:"elapsed" jsonschema:"wall-clock time the job has run, frozen at completion once terminal"`
-	Result  string `json:"result,omitempty" jsonschema:"the delegated agent's output. Set on any terminal state whose text could be recovered, so a failed or cancelled job can carry one too; read it in those states rather than discarding it, but check partial first. A running job carries none even once it has produced text, so collect the result once the state is terminal"`
-	Error   string `json:"error,omitempty" jsonschema:"why the job failed; present only when state is failed"`
+	TaskLabel         string `json:"task_label,omitempty" jsonschema:"caller-supplied label for recovering and identifying the job"`
+	ResultAvailable   bool   `json:"result_available" jsonschema:"whether this job currently has recoverable result text"`
+	ResultIncluded    bool   `json:"result_included" jsonschema:"whether result text is included in this response"`
+	NextAction        string `json:"next_action" jsonschema:"advisory next operation; inspect partial results and user authorization before resuming or retrying work"`
+	ProgressUpdatedAt string `json:"progress_updated_at,omitempty" jsonschema:"UTC RFC 3339 timestamp of the last CLI progress update; absence means unknown, and silence is not proof the process is stuck"`
+	StepIndex         int    `json:"step_index,omitempty" jsonschema:"last CLI step index when available; terminal jobs retain their last recorded step"`
+	State             string `json:"state" jsonschema:"running, done, failed or cancelled"`
+	Elapsed           string `json:"elapsed" jsonschema:"wall-clock time the job has run, frozen at completion once terminal"`
+	Result            string `json:"result,omitempty" jsonschema:"the delegated agent's output. Set on any terminal state whose text could be recovered, so a failed or cancelled job can carry one too; read it in those states rather than discarding it, but check partial first. A running job carries none even once it has produced text, so collect the result once the state is terminal"`
+	Error             string `json:"error,omitempty" jsonschema:"why the job failed; present only when state is failed"`
 	// FailureReason classifies a failure so a caller can branch on the cause
 	// without scraping Error; see manager's Reason constants.
 	FailureReason string `json:"failure_reason,omitempty" jsonschema:"a stable, machine-readable category for why the job failed, so a caller can branch on the cause without parsing error. Present only when state is failed. One of: quota_exhausted (agy hit a provider quota, rate-limit or AI credits wall; this is transient: wait for the quota to reset before retrying (error carries the reset time when agy's message gives one, and agy_usage reports quota reset times), and recovery spells this out when no partial result was returned; when retryable is false, recovery says to wait for a reset only when error names one, and otherwise to fix the cause), timeout (the run outlived its timeout: agy-mcp killed it, or agy's own --print-timeout expired mid-turn and agy returned only what it had, possibly nothing), spawn_failed (the agy binary could not be started, or agy itself exited 127; the two share one exit sentinel and are not told apart here), agy_error (agy itself reported an error, exited non-zero, or returned an indeterminate result), interrupted (the job process vanished without writing a result), background_aborted (agy ended the run itself, by a clean exit or in a job recovered from its result after its supervisor died, but its stderr shows it went idle with outstanding background shell tasks and killed them at exit, so the response is only progress narration rather than completed work; re-run with any verification in the foreground rather than as a background task), unknown (a failure fitting none of the above, for example its output could not be read). The set is closed: treat any value you do not recognize as unknown. Absent on running, done and cancelled jobs"`
@@ -337,6 +351,12 @@ func toStatusOutput(st manager.Status) statusOutput {
 		selectedSource = manager.ModelSourceCLIInit
 	}
 	out := statusOutput{
+		TaskLabel:            st.TaskLabel,
+		ResultAvailable:      st.Result != "",
+		ResultIncluded:       st.Result != "",
+		NextAction:           statusNextAction(st),
+		ProgressUpdatedAt:    formatQuotaTime(st.ProgressUpdatedAt),
+		StepIndex:            st.StepIndex,
 		State:                st.State,
 		Elapsed:              st.Elapsed.Round(time.Second).String(),
 		Result:               st.Result,
@@ -643,7 +663,10 @@ Choosing a tool:
 Notes:
 - Continue a prior thread with conversation_id or continue_latest instead of restating context.
 - Fan out freely: fresh runs in the same directory run concurrently, up to the server's concurrency cap. Only two runs continuing the SAME conversation_id conflict, and the second is refused rather than queued.
-- agy runs a full agent that can edit files. For a review that must not touch the repo, say so explicitly in the prompt.
+- Record the idempotency key before sending a request. Add task_label for later discovery with agy_list_jobs; search by the original key if the response lost its job_id. Start errors include error_code, job_started and next_action. null job_started means execution is uncertain; inspect before retrying.
+- agy_status with include_result false omits the result body without collecting it. Read terminal text in bounded pages with agy_get_result; its complete flag describes pagination only. Check state, partial and retryable before adopting an answer or continuing work.
+- agy_info reports runtime defaults, the registered tool catalog and enforcement capabilities. check_auth explicitly probes model-list access without an agent turn. Compare its catalog with the caller-visible tools; a mismatch requires refreshing connection metadata.
+- agy runs a full agent that can edit files. For a review that must not touch the repo, say so explicitly in the prompt; this is an instruction, not enforced read-only access. This runtime reports read_only_enforced false.
 - By default the delegated agent loads the repository's agy rule files (AGENTS.md) from cwd. project_rules: false does not isolate a run from the repository: current agy loads the rules and hooks of cwd and of every dir passed in dirs. To keep them out, set cwd to an empty directory outside any repository, leave the repository out of dirs and name its files by absolute path; on agy 1.4.8 reads worked that way, writes outside the workspace were not measured, continue_latest and list_sessions then key on that cwd, and the repository's project agents are not available.
 - list_agents lists the repository's project agents only when you pass it the cwd you will run in.
 - Always reconcile a backgrounded run: poll it to completion and fold the result back in.
@@ -657,12 +680,13 @@ func NewServer(mgr *manager.Manager) *mcp.Server {
 }
 
 func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "agy-mcp", Version: serverVersion()}, &mcp.ServerOptions{
+	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: "agy-mcp", Version: serverVersion()}, &mcp.ServerOptions{
 		Instructions: serverInstructions,
-	})
+	})}
+	s.AddReceivingMiddleware(startValidationErrors)
 	s.AddReceivingMiddleware(requestLoggingMiddleware(logger))
 
-	mcp.AddTool(s, &mcp.Tool{
+	addStartTool(s, &mcp.Tool{
 		Name:        toolAgyRun,
 		Title:       "Delegate to agy (async)",
 		Annotations: annDelegate,
@@ -670,7 +694,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in runInput) (*mcp.CallToolResult, runOutput, error) {
 		req, err := in.toStartRequest()
 		if err != nil {
-			return nil, runOutput{}, err
+			return nil, runOutput{}, invalidRunError(err)
 		}
 		job, err := mgr.StartJob(req)
 		if err != nil {
@@ -684,25 +708,32 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		return nil, runOutput{JobID: job.ID, ConversationID: mgr.AwaitConversationID(ctx, job), State: job.State, Quota: quotaFor(mgr)}, nil
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyStatus,
 		Title:       "Check an agy job",
 		Annotations: annReadLocal,
-		Description: "Check an agy job once, without blocking. Use it for a single snapshot, or to check several jobs in turn; when the next step depends on one job's result, prefer a single agy_wait over a poll loop. Checking a still-running job is cheap, but every check on a finished one re-reads its full output, so collect a result once rather than repeatedly.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in statusInput) (*mcp.CallToolResult, statusOutput, error) {
+		Description: "Check an agy job once, without blocking. Use it for a single snapshot, or to check several jobs in turn; when the next step depends on one job's result, prefer a single agy_wait over a poll loop. Checking a still-running job is cheap, but every check on a finished one re-reads its full output. include_result false omits the body from the response and leaves it uncollected; use agy_get_result for bounded retrieval. agy_list_jobs can recover a lost handle. Omitting include_result preserves the full-result response.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in statusInput) (*mcp.CallToolResult, statusResponse, error) {
 		st, err := mgr.Status(in.JobID)
 		if err != nil {
-			return nil, statusOutput{}, err
+			return nil, statusResponse{}, err
 		}
-		if st.State != manager.StateRunning {
+		include := in.IncludeResult == nil || *in.IncludeResult
+		if include && st.State != manager.StateRunning {
 			markCollected(mgr, in.JobID)
 		}
 		out := toStatusOutput(st)
+		if !include {
+			out.Result, out.ResultIncluded = "", false
+			if out.ResultAvailable {
+				out.NextAction = "get_result"
+			}
+		}
 		out.Quota = quotaFor(mgr)
-		return nil, out, nil
+		return nil, statusResponse{JobID: in.JobID, statusOutput: out}, nil
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolAgyCancel,
 		Title:       "Cancel an agy job",
 		Annotations: annCancel,
@@ -735,7 +766,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 	registerArtifacts(s, mgr)
 	registerProjects(s, mgr)
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolListModels,
 		Title:       "List agy models",
 		Annotations: annReadExternal,
@@ -758,7 +789,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		return nil, out, nil
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolListAgents,
 		Title:       "List agy agents",
 		Annotations: annReadExternal,
@@ -776,7 +807,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		return nil, agentsOutput{Agents: agents}, nil
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
+	addTool(s, &mcp.Tool{
 		Name:        toolListSessions,
 		Title:       "List agy conversations",
 		Annotations: annReadLocal,
@@ -800,5 +831,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		}, nil
 	})
 
-	return s
+	registerRecovery(s, mgr)
+	registerInfo(s, mgr)
+	return s.Server
 }
