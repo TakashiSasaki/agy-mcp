@@ -136,7 +136,7 @@ func serve() error {
 	}
 
 	log.Printf("%s serving over stdio", mcptools.ServerVersion())
-	if err := mcptools.ServeStdio(ctx, mgr); err != nil && !errors.Is(err, io.EOF) {
+	if err := mcptools.ServeStdio(ctx, mgr); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("stdio serve: %w", err)
 	}
 	return nil

@@ -144,6 +144,16 @@ go build -trimpath \
 
 To verify a change before using the binary, run `go vet ./...` and `go test ./...` (see [AGENTS.md](AGENTS.md) for the full list including lint).
 
+### Request diagnostics and cached tool definitions
+
+SIGTERM and SIGINT stop the stdio server successfully, without reporting context cancellation as a server failure.
+
+The server writes JSON request records to stderr for `initialize`, `server/discover`, `tools/list`, and `tools/call`. Each request has `started` and `completed` records correlated by the process `pid` and a process-local `call_id`, with the tool name and handler duration in `elapsed_ms`. `outcome` distinguishes `ok`, `tool_error`, `protocol_error`, `cancelled`, `deadline_exceeded`, and `panic`. An `outcome: "ok"` response may carry `job_state: "failed"` and `failure_reason: "timeout"`: the tool returned the job's failure successfully. These records describe handler completion, not delivery to the remote caller; reconcile them with the tunnel client's response-delivery counters. Arguments, headers, prompt text, result bodies, and error text are omitted. Only recognized tool names, server-generated job IDs, and the documented job state and failure categories are retained.
+
+`tools/list` completion records also include `tool_count`, `catalog_sha256` (a name-sorted fingerprint of the returned tool definitions, including schemas), and `catalog_complete`. A paginated response fingerprints only its returned page. These fields help distinguish a server with an older catalog from a connection that still exposes cached metadata.
+
+After changing the server's tools, schemas, or instructions, refresh the existing ChatGPT connection to pull the updated definitions, then test from a new conversation. Restarting the MCP server alone does not refresh the connection's cached tool definitions. See [OpenAI's metadata refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata). Preserve the existing app, tunnel ID, authentication, and permissions.
+
 ## Use with Claude Code (stdio)
 
 ```bash
