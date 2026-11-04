@@ -1,0 +1,16 @@
+[
+  {
+    "src": "https://oci.moukaeritai.work/mcp-icons/agy-mcp/icons/icon-512.png?v=2519cb99ec85",
+    "mimeType": "image/png",
+    "sizes": [
+      "512x512"
+    ]
+  },
+  {
+    "src": "https://oci.moukaeritai.work/mcp-icons/agy-mcp/favicon.svg?v=2519cb99ec85",
+    "mimeType": "image/svg+xml",
+    "sizes": [
+      "any"
+    ]
+  }
+]

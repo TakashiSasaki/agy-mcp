@@ -683,7 +683,7 @@ func NewServer(mgr *manager.Manager) *mcp.Server {
 }
 
 func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
-	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: "agy-mcp", Version: serverVersion()}, &mcp.ServerOptions{
+	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: "agy-mcp", Version: serverVersion(), Icons: []mcp.Icon{{Source: "https://oci.moukaeritai.work/mcp-icons/agy-mcp/icons/icon-512.png?v=2519cb99ec85", MIMEType: "image/png", Sizes: []string{"512x512"}}, {Source: "https://oci.moukaeritai.work/mcp-icons/agy-mcp/favicon.svg?v=2519cb99ec85", MIMEType: "image/svg+xml", Sizes: []string{"any"}}}}, &mcp.ServerOptions{
 		Instructions: serverInstructions,
 	})}
 	s.AddReceivingMiddleware(startValidationErrors)

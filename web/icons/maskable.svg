@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="agy-mcp-title agy-mcp-desc">
+<!-- Copyright (c) 2026 佐々木隆志 (Takashi Sasaki) <takashi316@gmail.com> (https://x.com/TakashiSasaki) -->
+<title id="agy-mcp-title">AGY MCP</title>
+<desc id="agy-mcp-desc">軌道から浮かび上がる、反重力のシンボル。</desc>
+<defs>
+  <linearGradient id="agy-mcp-bg" x1="0" y1="0" x2="1" y2="1">
+    <stop stop-color="#52337B"/><stop offset="1" stop-color="#2A2149"/>
+  </linearGradient>
+  <radialGradient id="agy-mcp-light" cx=".2" cy="0" r="1">
+    <stop stop-color="#C6ABFF" stop-opacity=".14"/><stop offset="1" stop-color="#C6ABFF" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+<rect width="256" height="256" rx="0" fill="url(#agy-mcp-bg)"/>
+<rect width="256" height="256" rx="0" fill="url(#agy-mcp-light)"/>
+<g transform="translate(128 128) scale(.92) translate(-128 -128)"><path d="M128 50L196 178H167L128 102L89 178H60Z" fill="#F6FAFF"/><path d="M108 168H148" fill="none" stroke="#C6ABFF" stroke-width="16" stroke-linecap="round"/><path d="M63 190C93 211 163 211 193 190" fill="none" stroke="#C6ABFF" stroke-width="12" stroke-linecap="round"/></g>
+</svg>

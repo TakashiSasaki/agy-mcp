@@ -1,0 +1,23 @@
+# Original SVG and raster icons owned by this repository.
+(agy_mcp_icons) {
+	@agy_mcp_icon_files path /favicon.ico /favicon.svg /icons/* /server-icons.json /icon.svg /hermes-icon.svg /icon-192.png /icon-512.png /icon-maskable-512.png /apple-touch-icon.png
+	handle @agy_mcp_icon_files {
+		root * {args[0]}
+		@agy_mcp_svg path /icon.svg /hermes-icon.svg
+		rewrite @agy_mcp_svg /favicon.svg
+		@agy_mcp_ico path /icons/prod/favicon.ico
+		rewrite @agy_mcp_ico /favicon.ico
+		@agy_mcp_small path /icon-192.png /icons/prod/web-app-manifest-192x192.png
+		rewrite @agy_mcp_small /icons/icon-192.png
+		@agy_mcp_large path /icon-512.png /icons/prod/web-app-manifest-512x512.png
+		rewrite @agy_mcp_large /icons/icon-512.png
+		@agy_mcp_mask path /icon-maskable-512.png
+		rewrite @agy_mcp_mask /icons/icon-maskable-512.png
+		@agy_mcp_touch path /apple-touch-icon.png /icons/prod/apple-touch-icon.png
+		rewrite @agy_mcp_touch /icons/apple-touch-icon.png
+		header Cache-Control "public, max-age=300"
+		header Access-Control-Allow-Origin "*"
+		header X-Content-Type-Options nosniff
+		file_server
+	}
+}
