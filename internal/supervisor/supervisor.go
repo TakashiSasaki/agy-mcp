@@ -303,9 +303,11 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
+		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: "supervisor", EndedAt: time.Now().UTC()})
 		_ = jobstore.WriteExitCodeDir(jobDir, jobstore.ExitSpawnFail)
 		return err
 	}
+	startedAt := time.Now().UTC()
 	// Drop the parent's write end now that the child holds its own, so the reader
 	// sees EOF once agy and its descendants are gone. Keeping it open here would
 	// hold the pipe open forever by ourselves.
@@ -378,6 +380,7 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 	go func() { drained <- consumeStream(jobDir, pr, outF) }()
 
 	waitErr := cmd.Wait()
+	endedAt := time.Now().UTC()
 	close(done)
 
 	// agy is reaped. Normally every descendant is gone too, the write end is
@@ -418,5 +421,9 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 	// closed before the kill, so they are observable by the time Wait returns.
 	// Guarding on waitErr != nil keeps a job that finished naturally at the instant
 	// the timer fired (a natural success has waitErr == nil) from being mislabeled.
+	_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{
+		Source: "supervisor", PID: cmd.Process.Pid, StartedAt: new(startedAt), EndedAt: endedAt, ExitCode: new(code),
+		TimedOut: waitErr != nil && closed(timedOut), Cancelled: waitErr != nil && closed(cancelled) && !closed(timedOut),
+	})
 	return jobstore.WriteExitCodeDir(jobDir, resolveExitCode(code, waitErr != nil, closed(timedOut), closed(cancelled)))
 }

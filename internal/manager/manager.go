@@ -121,7 +121,8 @@ func (m *Manager) SetProjectDirsForTest(projectsDir, dataDir string) {
 
 // StartRequest describes a run to start.
 type StartRequest struct {
-	TaskLabel        string // optional human-readable label; metadata only, not part of request identity
+	TaskLabel        string   // optional human-readable label; metadata only, not part of request identity
+	ArtifactDirs     []string // explicit artifact read roots; not execution workspaces
 	Prompt           string
 	Model            string   // optional; falls back to cfg.DefaultModel, then reduced by modelID
 	Effort           string   // optional; --effort <low|medium|high>, reasoning effort for the session
@@ -516,6 +517,11 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 // separate local while req stays stale risks a later read of req.Model/req.Timeout
 // silently bypassing the default fallback.
 func (m *Manager) normalizeRequest(req StartRequest) (StartRequest, error) {
+	var artifactErr error
+	req.ArtifactDirs, artifactErr = normalizeArtifactDirs(req.ArtifactDirs)
+	if artifactErr != nil {
+		return StartRequest{}, artifactErr
+	}
 	req.TaskLabel = strings.TrimSpace(req.TaskLabel)
 	if !utf8.ValidString(req.TaskLabel) || utf8.RuneCountInString(req.TaskLabel) > 128 || strings.IndexFunc(req.TaskLabel, unicode.IsControl) >= 0 {
 		return StartRequest{}, fmt.Errorf("task_label must contain at most 128 characters and no control characters")
@@ -712,6 +718,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	gitBranch, gitHead, gitDirty := DetectGitMetadata(req.Cwd)
 	meta := jobstore.Meta{
 		TaskLabel:      req.TaskLabel,
+		ArtifactDirs:   req.ArtifactDirs,
 		ID:             id,
 		AgyPath:        agy,
 		Args:           args,

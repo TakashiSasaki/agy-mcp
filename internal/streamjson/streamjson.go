@@ -169,7 +169,7 @@ type Reader struct {
 	// measured at 39.7 MiB per line against 39.7 MiB total. That is the trade
 	// taken deliberately, since a bounded live set matters more than the
 	// throughput of a stream that is already corrupt.
-	// Nothing outside readLine may hold it past the next call.
+	// NextRaw callers must persist or copy its borrowed bytes before the next call.
 	buf []byte
 }
 
@@ -207,6 +207,15 @@ func (r *Reader) Malformed() int { return r.malformed }
 // whole line with a nil error and keeps the error for the following read, so the
 // two only coincide when the tear lands on a line with no terminator.
 func (r *Reader) Next() (Event, error) {
+	ev, _, err := r.next(false)
+	return ev, err
+}
+
+// NextRaw also returns the original JSON object, including uninterpreted fields.
+// Its byte slice is borrowed until the next reader call.
+func (r *Reader) NextRaw() (Event, []byte, error) { return r.next(true) }
+
+func (r *Reader) next(raw bool) (Event, []byte, error) {
 	for {
 		line, truncated, err := r.readLine()
 		if truncated {
@@ -217,7 +226,7 @@ func (r *Reader) Next() (Event, error) {
 			// scanning a discarded 8 MiB.
 			r.malformed++
 			if err != nil {
-				return Event{}, err
+				return Event{}, nil, err
 			}
 			continue
 		}
@@ -225,7 +234,7 @@ func (r *Reader) Next() (Event, error) {
 		if len(trimmed) == 0 {
 			// A blank line is padding, not corruption; do not count it.
 			if err != nil {
-				return Event{}, err
+				return Event{}, nil, err
 			}
 			continue
 		}
@@ -233,14 +242,17 @@ func (r *Reader) Next() (Event, error) {
 		if decErr := json.Unmarshal(trimmed, &ev); decErr != nil {
 			r.malformed++
 			if err != nil {
-				return Event{}, err
+				return Event{}, nil, err
 			}
 			continue
 		}
 		// Drop a concurrent io.EOF here rather than returning it alongside the
 		// event: the caller would have to handle "value and EOF together", and
 		// bufio.Reader re-reports EOF on the next call anyway.
-		return ev, nil
+		if raw {
+			return ev, trimmed, nil
+		}
+		return ev, nil, nil
 	}
 }
 
@@ -260,8 +272,8 @@ func (r *Reader) Next() (Event, error) {
 //
 // The returned slice is valid only until the next call: it is bufio's buffer on
 // the fast path and the Reader's scratch otherwise, and both are overwritten by
-// the read after it. That is safe because Next is the only caller and decodes
-// before reading again, and because every field reachable from an Event is a
+// the read after it. The decoder consumes it before reading again; NextRaw
+// additionally exposes this borrowed view for synchronous capture. Every field reachable from an Event is a
 // string, a number, or a pointer to more of the same, all of which
 // json.Unmarshal copies out. A []byte or json.RawMessage field, or any type with
 // an UnmarshalJSON that keeps its argument, would alias this buffer instead, and

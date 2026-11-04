@@ -27,6 +27,9 @@ func listRegisteredTools(t *testing.T) []*mcp.Tool {
 // between destructive and read-only, and between an open and closed world, is
 // the claim this server makes to its clients, so a silent flip must fail here.
 var wantAnnotations = map[string]mcp.ToolAnnotations{
+	toolAgyEvents:           {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyLogs:             {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyVerification:     {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyListJobs:         {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyGetResult:        {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyInfo:             {ReadOnlyHint: true, OpenWorldHint: new(true)},
@@ -112,12 +115,15 @@ func fmtHint(b *bool) string {
 // wantSiblings names, per tool, the other tools its description must mention, so
 // an agent reading one definition learns when to reach for a different one.
 var wantSiblings = map[string][]string{
-	toolAgyListJobs:  {toolAgyStatus, toolAgyWait, toolAgyGetResult},
-	toolAgyGetResult: {toolAgyStatus, toolAgyWait, toolAgyListJobs},
-	toolAgyInfo:      {toolAgyUsage, toolAgyRun, toolAgyListJobs},
-	toolAgyRun:       {toolAgyRunSync, toolAgyWait, toolAgyStatus},
-	toolAgyRunSync:   {toolAgyRun, toolAgyWait, toolAgyStatus},
-	toolAgyWait:      {toolAgyRun, toolAgyStatus},
+	toolAgyEvents:       {toolAgyStatus, toolAgyLogs, toolAgyVerification, toolAgyListArtifacts},
+	toolAgyLogs:         {toolAgyEvents, toolAgyReadArtifact, toolAgyListArtifacts},
+	toolAgyVerification: {toolAgyListArtifacts, toolAgyReadArtifact, toolAgyEvents},
+	toolAgyListJobs:     {toolAgyStatus, toolAgyWait, toolAgyGetResult},
+	toolAgyGetResult:    {toolAgyStatus, toolAgyWait, toolAgyListJobs},
+	toolAgyInfo:         {toolAgyUsage, toolAgyRun, toolAgyListJobs},
+	toolAgyRun:          {toolAgyRunSync, toolAgyWait, toolAgyStatus},
+	toolAgyRunSync:      {toolAgyRun, toolAgyWait, toolAgyStatus},
+	toolAgyWait:         {toolAgyRun, toolAgyStatus},
 	// agy_status routes to agy_wait (the blocking alternative) and no further:
 	// requiring it to name agy_cancel too bought nothing an agent needs at a
 	// status check, and the first attempt to satisfy that invented a claim about

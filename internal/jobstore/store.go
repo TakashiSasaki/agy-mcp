@@ -27,6 +27,7 @@ import (
 // progress.json, which is why Status and conversationLive both scan it.
 type Meta struct {
 	TaskLabel      string        `json:"task_label,omitempty"`
+	ArtifactDirs   []string      `json:"artifact_dirs,omitempty"`
 	ID             string        `json:"id"`
 	AgyPath        string        `json:"agy_path"`
 	Args           []string      `json:"args"`
@@ -70,6 +71,9 @@ const (
 	CancelFile   = "cancel"        // manager -> supervisor cancel request sentinel
 	ProgressFile = "progress.json" // latest stream position (atomic rewrite)
 	ResultFile   = "result.json"   // terminal stream-json result payload (written once)
+	EventsFile   = "events.ndjson" // timestamped CLI events, appended while running
+	CaptureFile  = "capture.json"  // journal generation and capture completeness
+	ProcessFile  = "process.json"  // supervisor-observed agy process outcome
 	// CollectedFile is the marker an MCP tool writes as it returns a job's
 	// terminal outcome, so hook-wait can skip a wake that would carry nothing new
 	// (issue #194). It does not prove the client received the response. Existence
@@ -110,10 +114,11 @@ type Progress struct {
 	// init event (init.model). Empty when agy omitted it or exited before init.
 	InitModel string `json:"init_model,omitempty"`
 	// StepIndex is the last CLI step index, exposed by manager.Status alongside
-	// StepType and UpdatedAt. The supervisor also compares it against incoming
-	// events to avoid rewriting a byte-identical progress file (consumeStream).
+	// StepType and UpdatedAt. Repeated ACTIVE updates advance the timestamp as
+	// a heartbeat even when the step index stays the same.
 	StepIndex int       `json:"step_index"`
 	StepType  string    `json:"step_type,omitempty"`
+	StepState string    `json:"step_state,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 

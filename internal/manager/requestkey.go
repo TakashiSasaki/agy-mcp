@@ -27,6 +27,7 @@ type requestKeyFields struct {
 	ContinueLatest   bool          `json:"continue_latest,omitempty"`
 	JSONSchema       string        `json:"json_schema,omitempty"`
 	Timeout          time.Duration `json:"timeout,omitempty"`
+	ArtifactDirs     []string      `json:"artifact_dirs,omitempty"`
 }
 
 // requestKey identifies a normalized request for idempotency_key replays. It
@@ -72,6 +73,7 @@ func requestKey(req StartRequest) string {
 		ContinueLatest:   req.ContinueLatest,
 		JSONSchema:       req.JSONSchema,
 		Timeout:          req.Timeout,
+		ArtifactDirs:     req.ArtifactDirs,
 	})
 	if err != nil {
 		return ""

@@ -20,6 +20,7 @@ import (
 // exclusive, what a field defaults to, and what happens on expiry. Keeping that
 // here rather than in the tool description avoids restating the schema in prose.
 type runInput struct {
+	ArtifactDirs   []string `json:"artifact_dirs,omitempty" jsonschema:"explicit absolute artifact directories, at most 16; when provided, artifact reads are confined to these and the job state directory instead of the legacy workspace/add-dir scope. Used only for evidence retrieval, not passed to agy as execution workspaces; include their paths in the task prompt"`
 	TaskLabel      string   `json:"task_label,omitempty" jsonschema:"optional label for recovering this job with agy_list_jobs; at most 128 characters, no control characters; not forwarded to agy or part of idempotency matching"`
 	Prompt         string   `json:"prompt" jsonschema:"the complete task for the delegated agent: what to do, the context needed to do it, and the output wanted back; the agent cannot see this conversation, so the prompt must stand alone. It is sent to agy literally, so a leading slash-command or skill name (a prompt starting with /) is treated as text, not expanded"`
 	Model          string   `json:"model,omitempty" jsonschema:"agy model id, e.g. gemini-3.1-pro-high; omit to use the server's default model, or agy's own default when the server sets none. Call list_models for the accepted values and pass one from its models field, not a display label from model_details, because agy rejects a display label whenever effort is also set. Not every id accepts every effort either, and some accept none, so omit effort unless you need a specific one"`
@@ -179,8 +180,9 @@ var (
 // validating the effort, mode and timeout.
 func (in runInput) toStartRequest() (manager.StartRequest, error) {
 	req := manager.StartRequest{
-		TaskLabel: in.TaskLabel,
-		Prompt:    in.Prompt, Model: in.Model, Dirs: in.Dirs,
+		TaskLabel:    in.TaskLabel,
+		ArtifactDirs: in.ArtifactDirs,
+		Prompt:       in.Prompt, Model: in.Model, Dirs: in.Dirs,
 		ConversationID: in.ConversationID, ContinueLatest: in.ContinueLatest, Cwd: in.Cwd,
 		JSONSchema:     in.JSONSchema,
 		Effort:         in.Effort,
@@ -666,6 +668,7 @@ Notes:
 - Record the idempotency key before sending a request. Add task_label for later discovery with agy_list_jobs; search by the original key if the response lost its job_id. Start errors include error_code, job_started and next_action. null job_started means execution is uncertain; inspect before retrying.
 - agy_status with include_result false omits the result body without collecting it. Read terminal text in bounded pages with agy_get_result; its complete flag describes pagination only. Check state, partial and retryable before adopting an answer or continuing work.
 - agy_info reports runtime defaults, the registered tool catalog and enforcement capabilities. check_auth explicitly probes model-list access without an agent turn. Compare its catalog with the caller-visible tools; a mismatch requires refreshing connection metadata.
+- agy_events reads live timestamped CLI events and agy_logs reads bounded log tails or byte pages, including registered artifact files. No new model turn is needed to inspect stored evidence. Set artifact_dirs to associate external output directories without adding execution workspaces. agy_verification parses a selected JUnit report; job done and CLI SUCCESS do not establish that tests passed. Nested shell exit status is unknown unless the provider supplies it.
 - agy runs a full agent that can edit files. For a review that must not touch the repo, say so explicitly in the prompt; this is an instruction, not enforced read-only access. This runtime reports read_only_enforced false.
 - By default the delegated agent loads the repository's agy rule files (AGENTS.md) from cwd. project_rules: false does not isolate a run from the repository: current agy loads the rules and hooks of cwd and of every dir passed in dirs. To keep them out, set cwd to an empty directory outside any repository, leave the repository out of dirs and name its files by absolute path; on agy 1.4.8 reads worked that way, writes outside the workspace were not measured, continue_latest and list_sessions then key on that cwd, and the repository's project agents are not available.
 - list_agents lists the repository's project agents only when you pass it the cwd you will run in.
@@ -832,6 +835,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 	})
 
 	registerRecovery(s, mgr)
+	registerEvidence(s, mgr)
 	registerInfo(s, mgr)
 	return s.Server
 }

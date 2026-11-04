@@ -112,7 +112,7 @@ func loggedToolName(name string) string {
 	case toolAgyRun, toolAgyRunSync, toolAgyStatus, toolAgyWait, toolAgyCancel,
 		toolAgyUsage, toolListModels, toolListAgents, toolListSessions,
 		toolAgyListArtifacts, toolAgyReadArtifact, toolAgyListProjects, toolAgyResolveWorkspace,
-		toolAgyListJobs, toolAgyGetResult, toolAgyInfo:
+		toolAgyListJobs, toolAgyGetResult, toolAgyInfo, toolAgyEvents, toolAgyLogs, toolAgyVerification:
 		return name
 	default:
 		return "unknown"

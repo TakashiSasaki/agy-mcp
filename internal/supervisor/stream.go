@@ -28,8 +28,8 @@ type streamOutcome struct {
 // consumeStream decodes agy's event stream to completion, mirroring it into the
 // job directory as it goes.
 //
-// Two things are written live rather than at the end, because a run can be
-// cancelled or time out at any point and both must survive that:
+// Evidence is written live because cancellation or timeout can happen before
+// any final answer:
 //
 //   - progress.json, so the manager can report the conversation id (carried by
 //     the init event, which arrives before any model work) and the current step
@@ -41,21 +41,35 @@ type streamOutcome struct {
 //     response text, so a run killed while still reasoning or mid-tool, before
 //     it streams any answer, leaves out empty by design, not by defect
 //     (MEASURED against agy 1.1.15).
+//   - events.ndjson preserves timestamped provider events, including fields
+//     the response decoder does not interpret. capture.json records its
+//     generation, storage cap and any lost/malformed input.
 //
 // The terminal result is returned rather than written here, so the caller can
 // order it against the exit-code sentinel.
 func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
+	return consumeStreamObserved(jobDir, r, out, time.Now)
+}
+
+func consumeStreamObserved(jobDir string, r io.Reader, out io.Writer, now func() time.Time) streamOutcome {
 	var oc streamOutcome
 	sr := streamjson.NewReader(r)
+	journal, captureErr := jobstore.OpenJournal(jobDir)
+	if captureErr == nil {
+		defer journal.Close()
+	}
 	var prog jobstore.Progress
 	stepUsages := make(map[int]streamjson.Usage)
 	for {
-		ev, err := sr.Next()
+		ev, raw, err := sr.NextRaw()
 		if err != nil {
 			// io.EOF on a clean end, or a read error once the process group was
 			// torn down. Either way there is nothing further to decode, and the
 			// exit-code sentinel is what classifies the outcome.
 			break
+		}
+		if journal != nil {
+			journal.Append(raw)
 		}
 		changed := false
 		if cid := ev.ConversationIDOf(); cid != "" && cid != prog.ConversationID {
@@ -73,16 +87,12 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 				if su.Usage != nil {
 					stepUsages[su.StepIndex] = *su.Usage
 				}
-				// Only rewrite when something a reader can observe actually moved.
-				// The conversation branch above already guards this way; without the
-				// same guard here, a repeated update for one step (agy stamps its id
-				// on every event, and a step can report more than one state) rewrites
-				// a byte-identical file, and each rewrite is a full atomic replace.
-				if su.StepIndex != prog.StepIndex || su.StepType != prog.StepType {
-					prog.StepIndex = su.StepIndex
-					prog.StepType = su.StepType
-					changed = true
-				}
+				// Identical ACTIVE updates are still a received heartbeat. Preserve
+				// their observation time instead of making a live tool look silent.
+				prog.StepIndex = su.StepIndex
+				prog.StepType = su.StepType
+				prog.StepState = su.State
+				changed = true
 				// Append every delta rather than tracking which steps have already
 				// contributed. agy streams one agent_response step as many text_delta
 				// events (the ACTIVE states carry successive chunks, the DONE state the
@@ -119,7 +129,7 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 			}
 		}
 		if changed {
-			prog.UpdatedAt = time.Now().UTC()
+			prog.UpdatedAt = now().UTC()
 			// Best effort for the same reason: progress is a hint the manager treats
 			// as absent when unreadable, never a correctness gate.
 			_ = jobstore.WriteProgressDir(jobDir, prog)
@@ -146,6 +156,9 @@ func consumeStream(jobDir string, r io.Reader, out io.Writer) streamOutcome {
 		}
 	}
 	oc.malformed = sr.Malformed()
+	if journal != nil {
+		journal.NoteMalformed(oc.malformed)
+	}
 	return oc
 }
 

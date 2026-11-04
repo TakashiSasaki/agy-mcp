@@ -14,7 +14,7 @@ const (
 
 type listArtifactsInput struct {
 	JobID      string `json:"job_id" jsonschema:"handle of the job whose artifacts to list (from agy_run or agy_run_sync)"`
-	Subpath    string `json:"subpath,omitempty" jsonschema:"optional subdirectory to list within the job's allowed roots (e.g. artifacts, artifacts/ci-profile). Defaults to workspace root"`
+	Subpath    string `json:"subpath,omitempty" jsonschema:"optional subdirectory within job-associated roots; defaults to the first artifact_dirs entry, otherwise workspace or job directory"`
 	Pattern    string `json:"pattern,omitempty" jsonschema:"optional glob pattern to filter filenames (e.g. *.json, *.log, *.xml). Matches filename only"`
 	MaxEntries int    `json:"max_entries,omitempty" jsonschema:"maximum number of file entries to return (default 100, max 500)"`
 }
@@ -28,14 +28,18 @@ type artifactEntryOutput struct {
 }
 
 type listArtifactsOutput struct {
-	JobID   string                `json:"job_id" jsonschema:"job id whose artifacts were listed"`
-	Root    string                `json:"root" jsonschema:"base root directory that was listed"`
-	Entries []artifactEntryOutput `json:"entries" jsonschema:"files and artifacts found matching criteria"`
+	JobID        string                `json:"job_id" jsonschema:"job id whose artifacts were listed"`
+	Root         string                `json:"root" jsonschema:"base root directory that was listed"`
+	Entries      []artifactEntryOutput `json:"entries" jsonschema:"files and artifacts found matching criteria"`
+	Scope        string                `json:"scope" jsonschema:"declared when artifact_dirs were supplied, otherwise legacy_workspace; this is read authorization, not proof that the job created every file"`
+	Roots        []string              `json:"roots" jsonschema:"directories explicitly associated with this job's artifact reads"`
+	ExpiresAt    string                `json:"expires_at,omitempty" jsonschema:"GC eligibility timestamp for this completed job handle; external file retention is independent"`
+	LimitReached bool                  `json:"limit_reached" jsonschema:"the entry limit was reached; more matching files may exist"`
 }
 
 type readArtifactInput struct {
 	JobID     string `json:"job_id" jsonschema:"handle of the job whose artifact to read (from agy_run or agy_run_sync)"`
-	Path      string `json:"path" jsonschema:"path to the file within allowed job directories (workspace, --add-dir, or job dir)"`
+	Path      string `json:"path" jsonschema:"file within artifact_dirs and job state directory; without artifact_dirs the legacy workspace/add-dir scope applies"`
 	StartLine int    `json:"start_line,omitempty" jsonschema:"1-based line number to start reading from (default 1)"`
 	EndLine   int    `json:"end_line,omitempty" jsonschema:"1-based line number to end reading at, inclusive (0 = read to end or max_bytes)"`
 	TailLines int    `json:"tail_lines,omitempty" jsonschema:"if greater than 0, reads the trailing N lines of the file (useful for logs)"`
@@ -59,7 +63,7 @@ func registerArtifacts(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyListArtifacts,
 		Title:       "List job artifacts and logs",
 		Annotations: annReadLocal,
-		Description: "List artifact, receipt, and report files produced by an agy job within its allowed directories. Use this to inspect evidence files (test receipts, JSON reports, profiles, logs) directly without spawning another model turn. Confined strictly to the job's workspace (cwd), extra dirs (--add-dir), and the job's state directory. Automatically ignores common dependency and cache directories (.git, .venv, node_modules, cache, __pycache__). Returns relative paths, file size, SHA-256 digest, and modification times. Pair with agy_read_artifact to retrieve contents, or check job status with agy_status.",
+		Description: "Discover evidence files associated with an agy job without another model turn. When artifact_dirs were provided at creation, reads use those explicit directories and the job state directory; otherwise legacy workspace/add-dir roots apply. scope and roots make this distinction explicit. Association authorizes reading and does not prove the job created a file. Inner symlink escapes are rejected. Common dependency/cache directories are skipped. SHA-256 is omitted when a file exceeds 32 MiB or cannot be hashed. expires_at is job-handle GC eligibility, not a guarantee about external file retention. Pair with agy_read_artifact for stable-file line ranges, agy_logs for live tails and byte cursors, and agy_verification for JUnit reports. agy_status reports job lifecycle only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listArtifactsInput) (*mcp.CallToolResult, listArtifactsOutput, error) {
 		res, err := mgr.ListArtifacts(manager.ListArtifactsRequest{
 			JobID:      in.JobID,
@@ -84,6 +88,7 @@ func registerArtifacts(s *toolServer, mgr *manager.Manager) {
 			JobID:   res.JobID,
 			Root:    res.Root,
 			Entries: entries,
+			Scope:   res.Scope, Roots: res.Roots, ExpiresAt: res.ExpiresAt, LimitReached: res.LimitReached,
 		}, nil
 	})
 
@@ -91,7 +96,7 @@ func registerArtifacts(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyReadArtifact,
 		Title:       "Read job artifact or log file",
 		Annotations: annReadLocal,
-		Description: "Read contents of a specific artifact, receipt, or log file produced by an agy job, with optional line range and byte limits. Use this to retrieve verification evidence without running another model turn. Strictly confined to the job's allowed directories (cwd, add-dirs, job dir); path traversal and out-of-bounds symlinks are rejected. Returns file size, full-file SHA-256 for verification, total lines, requested line range, and content. Use agy_list_artifacts to discover available files, or check job status with agy_status.",
+		Description: "Read stable evidence files with line ranges and byte limits without a model turn. artifact_dirs restrict reads to explicit job-associated directories plus job state; older/default jobs retain the legacy workspace/add-dir scope. Path traversal and inner symlink escapes are rejected using directory handles. Hashing and content use the same opened file; a detected file change fails the read instead of presenting inconsistent evidence. The full file is scanned for SHA-256 and line counts. Use agy_logs with stream artifact for bounded live byte reads, agy_verification to parse a selected JUnit report, agy_list_artifacts for discovery, or agy_status for lifecycle state.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in readArtifactInput) (*mcp.CallToolResult, readArtifactOutput, error) {
 		res, err := mgr.ReadArtifact(manager.ReadArtifactRequest{
 			JobID:     in.JobID,

@@ -35,7 +35,9 @@ Every job runs `agy --output-format stream-json`, and the supervisor decodes tha
 - `agy_list_jobs`: recover retained jobs by working directory, label, state or the original idempotency key.
 - `agy_get_result`: retrieve terminal result text in bounded UTF-8 pages.
 - `agy_info`: inspect runtime defaults, the actual tool catalog, cached quota and an optional model-list authentication probe without starting an agent turn.
-- `agy_list_artifacts`: list artifact, receipt, and report files produced by an `agy` job within its allowed directories, with file sizes and SHA-256 digests.
+- `agy_list_artifacts`: discover job-associated evidence with scope, file sizes, SHA-256 and job-handle GC eligibility.
+- `agy_events` / `agy_logs`: read live progress events and bounded log/artifact pages without another model turn.
+- `agy_verification`: parse a selected JUnit XML report independently of agent/job completion.
 - `agy_read_artifact`: read contents of a specific artifact, receipt, or log file produced by an `agy` job, with line range or tail limits and boundary confinement checks.
 - `list_models`: enumerate available `agy` models, as the ids the `model` parameter accepts plus their display labels.
 - `list_agents`: enumerate available `agy` agents, as the names the `agent` parameter accepts. Unlike `list_models` there is no id/label split, because `agy` takes an agent name verbatim; an empty list just means no agents are configured. Pass `cwd` (the directory you give `agy_run`) to include that repository's project agents from `.agents/agents/`; agy lists them only for a workspace directory, so without `cwd` they are absent. On agy 1.3.4 and later a name that is not in the list fails the run before any model call, as `failed` with `failure_reason: agy_error` and an error that lists the available agents (MEASURED against agy 1.4.6); an older agy runs its default agent instead (agy changelog 1.3.4), so check the name with `list_agents` first.
@@ -176,8 +178,8 @@ Or add to your MCP client config:
 
 ## Tools
 
-- `agy_run(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?)` -> `{ job_id, conversation_id?, state, quota? }`
-- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
+- `agy_run(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, artifact_dirs?)` -> `{ job_id, conversation_id?, state, quota? }`
+- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, artifact_dirs?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
 - `agy_status(job_id, include_result?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota? }`
 - `agy_wait(job_id, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial?, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
 - `agy_cancel(job_id)` -> `{ state }`
@@ -185,7 +187,10 @@ Or add to your MCP client config:
 - `agy_list_jobs(cwd?, task_label?, state?, idempotency_key?, limit?, offset?)` -> `{ jobs, total_count, next_offset? }`
 - `agy_get_result(job_id, cursor?, max_bytes?)` -> `{ job_id, conversation_id?, state, partial, failure_reason?, error?, recovery?, retryable?, result_available, content, total_bytes, result_sha256?, next_cursor?, complete, next_action }`
 - `agy_info(check_auth?)` -> `{ api_version, server_version, runtime, max_inline_wait, quota?, tool_names, tool_count, catalog_sha256 }`
-- `agy_list_artifacts(job_id, subpath?, pattern?, max_entries?)` -> `{ job_id, root, entries }`
+- `agy_events(job_id, cursor?, limit?, max_bytes?)` -> timestamped event pages, capture health, CLI process outcome and agent outcome
+- `agy_logs(job_id, stream?, path?, cursor?, from_start?, tail_bytes?, max_bytes?)` -> bounded byte pages or tails of job streams/associated files
+- `agy_verification(job_id, path)` -> parsed JUnit outcome, counts, failure details and exact report SHA-256
+- `agy_list_artifacts(job_id, subpath?, pattern?, max_entries?)` -> `{ job_id, root, entries, scope, roots, expires_at?, limit_reached }`
 - `agy_read_artifact(job_id, path, start_line?, end_line?, tail_lines?, max_bytes?)` -> `{ job_id, path, size_bytes, sha256, total_lines, start_line, end_line, truncated, content }`
 - `agy_list_projects(query?)` -> `{ projects }`
 - `agy_resolve_workspace(project, branch?)` -> `{ resolved, path?, branch?, head?, ambiguous?, candidates?, error? }`
@@ -202,6 +207,38 @@ Status-shaped responses (`agy_status`, `agy_wait`, `agy_run_sync`) also include 
 3. Record the idempotency key before sending `agy_run`, together with a short `task_label`. Retain the returned `job_id`, then wait on that same job with `agy_wait`. An inline wait expiring means the job may still be running; do not send the task again merely because the wait ended.
 4. If the handle is lost, call `agy_list_jobs` with the original `idempotency_key` or label and cwd, then inspect the match. Listing covers the configured retained job store, not agy's conversation history. It omits prompts, raw arguments, errors, result bodies and idempotency tokens. Labels match case-insensitive substrings; other filters match exactly, with cwd canonicalized. Default page size is 20, maximum 100. Results sort by start time descending, then job ID descending. `total_count` is a scan observation; concurrent starts or expiry can shift offset pages. Listing does not collect results.
 5. Use `agy_status` with `include_result: false` for metadata, then `agy_get_result` for terminal text. Inspect `state`, `partial`, `failure_reason`, `retryable` and recovery advice before adopting the answer or continuing. Retrieval succeeding does not mean the task succeeded. Verify edits and acceptance criteria in the caller's workspace before committing.
+
+### Live progress and verification evidence
+
+For a long verification task, prepare a distinct evidence directory in the task prompt and declare it with `artifact_dirs`, for example `/tmp/pr253_evidence_20261103`. Have the delegated agent write test stdout/stderr there and request a JUnit report (`pytest --junitxml=...`). This field only authorizes evidence retrieval. It is not forwarded as an agy workspace, does not load extra workspace rules, and does not enforce where the agent can write.
+
+When `artifact_dirs` is non-empty, artifact reads use those directories plus the job state directory. The legacy cwd/add-dir roots are excluded. The first declared directory is the default for relative artifact paths and listings; absolute paths may identify another declared root. Without the field, existing calls retain the legacy workspace/add-dir scope, reported as `scope: "legacy_workspace"`. Association means permission to retrieve a file, not proof that the job generated it. An undeclared external directory from an older job is not silently added to its authority. Inner symlinks and rename races cannot redirect an opened artifact outside its selected root.
+
+Use the tools as follows:
+
+1. `agy_status(job_id, include_result: false)` gives a compact lifecycle/progress snapshot. Repeated CLI step updates advance the progress heartbeat, even when `step_type` and step index stay unchanged. A quiet timestamp still does not prove a hang.
+2. `agy_events(job_id)` reads CLI events observed so far, including the fields the response decoder does not understand. Retain `next_cursor`, including at EOF, to follow later appends. A record carries its observation time and original payload. The default page scans up to 50 records within a 64 KiB event JSON budget (maximum 200 records and 256 KiB). Payloads over 16 KiB, or those that do not fit the page, are marked `payload_omitted`; their original bytes remain available through the event log.
+3. `agy_logs(job_id, stream: "stderr")` returns a tail without another agent turn. `stdout` means the assistant text captured by agy-mcp, and `stderr` means agy's own stderr. They are not independently recorded stdout/stderr of each nested shell command. Use `stream: "artifact", path: "pytest.log"` for a test log in associated roots. `from_start: true` starts at byte zero; otherwise the initial tail window defaults to `max_bytes`. Pages default to 64 KiB, with a 256 KiB limit; the initial tail window can be up to 4 MiB. Cursor offsets and page hashes refer to original bytes. Invalid UTF-8 is replaced only in displayed content.
+4. `agy_list_artifacts` discovers associated reports. `limit_reached` means more matching entries may exist. `expires_at` is when a completed job handle becomes eligible for configured garbage collection, not a promise to retain or delete external `/tmp` files. `agy_read_artifact` reads line ranges of stable files with a full-file hash; it scans the file and is intended for completed evidence. Use `agy_logs` for bounded live byte reads.
+5. `agy_verification(job_id, path: "junit.xml")` reads up to 4 MiB of explicitly selected JUnit XML. It returns the exact report hash, observed testcase counts and up to 100 bounded failure details. Incomplete/malformed XML, counter disagreements, unrelated formats and reports with no executed testcases return `verification_outcome: "unknown"`, never `passed`. A valid report with failures returns `failed` as an ordinary successful MCP retrieval. Access or read failures are MCP tool errors.
+
+These outcomes remain independent:
+
+| Evidence | What it establishes |
+|---|---|
+| `state` / `job_state` | agy-mcp's job lifecycle, including timeout/cancellation |
+| `agent_outcome` | `success` or `error` from the CLI terminal result; otherwise `unknown` |
+| `process` | The supervisor's observed **agy CLI** exit code and termination flags; spawning failure has a null exit code |
+| Event `payload` | Provider-emitted fields. A tool step's `DONE` state does not establish shell exit code zero. Command details and nested exit codes are unknown unless the provider emits them |
+| `verification_outcome` | A parsed report's result, not a diagnosis that the product caused a failure |
+
+For example, a job may be `done`, have `agent_outcome: "success"` and CLI `process.exit_code: 0`, while a JUnit report says `failed` with an explicit `subprocess.TimeoutExpired` type. That describes a reported harness timeout; it does not prove a product fault or that a child process stopped. Narrative text is never converted into execution receipts or passing tests. Report contents also do not independently attest that commands ran or that the file was produced by this job.
+
+The supervisor appends timestamped CLI events while the job runs and records its process outcome before the completion sentinel. These files survive ordinary timeout/cancellation with the job's existing retention. The journal cap is 64 MiB per job. `capture.truncated`, `capture.dropped_events`, `capture.malformed_lines`, `skipped_records` and `incomplete_record` expose lost evidence. `capture.closed` describes capture closure, not task success. Incomplete live records are withheld at the same cursor; a terminal incomplete record is counted as lost and skipped. Cursors bind job, stream, file identity, generation and nearby preceding content, and reject replaced/truncated streams rather than silently rewind. None of these reads marks the final model answer collected. Older jobs can have `available: false` and no process receipt; their missing history is not reconstructed by another model turn.
+
+### Planned execution controls
+
+Verified read-only filesystem/network/credential policies, pre-deadline cooperative checkpoints, workspace/head preconditions and provider-backed token budgets are separate follow-up work. This release exposes evidence and its limits; it does not promise resumable shell processes or token-budget enforcement. The installed agy 1.4.12 `--help` was inspected without starting a model turn; its listed flags alone do not establish a supported per-command receipt or token-budget contract. A general `agy_exec` interface remains deferred until its execution policy is specified.
 
 ### Start errors
 

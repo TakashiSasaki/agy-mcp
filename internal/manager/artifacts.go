@@ -58,9 +58,13 @@ type ListArtifactsRequest struct {
 
 // ListArtifactsResult contains the listed entries.
 type ListArtifactsResult struct {
-	JobID   string          `json:"job_id"`
-	Root    string          `json:"root"`
-	Entries []ArtifactEntry `json:"entries"`
+	JobID        string          `json:"job_id"`
+	Root         string          `json:"root"`
+	Entries      []ArtifactEntry `json:"entries"`
+	Scope        string          `json:"scope"`
+	Roots        []string        `json:"roots"`
+	ExpiresAt    string          `json:"expires_at,omitempty"`
+	LimitReached bool            `json:"limit_reached"`
 }
 
 // ReadArtifactRequest specifies parameters for reading an artifact file.
@@ -103,6 +107,9 @@ func resolveAllowedRoots(meta jobstore.Meta, jobDir string) []string {
 		if p == "" {
 			return
 		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(meta.Cwd, p)
+		}
 		clean := filepath.Clean(p)
 		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
 			roots = append(roots, filepath.Clean(resolved))
@@ -110,17 +117,23 @@ func resolveAllowedRoots(meta jobstore.Meta, jobDir string) []string {
 		roots = append(roots, clean)
 	}
 
-	addRoot(meta.Cwd)
-	for i := 0; i < len(meta.Args); i++ {
-		arg := meta.Args[i]
-		var d string
-		if arg == "--add-dir" && i+1 < len(meta.Args) {
-			d = meta.Args[i+1]
-			i++
-		} else if strings.HasPrefix(arg, "--add-dir=") {
-			d = strings.TrimPrefix(arg, "--add-dir=")
+	if len(meta.ArtifactDirs) > 0 {
+		for _, dir := range meta.ArtifactDirs {
+			addRoot(dir)
 		}
-		addRoot(d)
+	} else {
+		addRoot(meta.Cwd)
+		for i := 0; i < len(meta.Args); i++ {
+			arg := meta.Args[i]
+			var d string
+			if arg == "--add-dir" && i+1 < len(meta.Args) {
+				d = meta.Args[i+1]
+				i++
+			} else if strings.HasPrefix(arg, "--add-dir=") {
+				d = strings.TrimPrefix(arg, "--add-dir=")
+			}
+			addRoot(d)
+		}
 	}
 	addRoot(jobDir)
 	return roots
@@ -139,15 +152,12 @@ func (m *Manager) resolveJobAndRoots(jobID string) (jobstore.Meta, string, []str
 	return meta, jobDir, roots, nil
 }
 
-func fileSHA256(filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
+func fileSHA256(f *os.File) (string, error) {
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -169,54 +179,30 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 
 	var baseDir string
 	if req.Subpath == "" {
-		if meta.Cwd != "" {
-			baseDir = meta.Cwd
-		} else {
-			baseDir = jobDir
-		}
+		baseDir = artifactBase(meta, jobDir)
 	} else if filepath.IsAbs(req.Subpath) {
 		baseDir = filepath.Clean(req.Subpath)
 	} else if strings.HasPrefix(req.Subpath, "job/") || strings.HasPrefix(req.Subpath, ".job/") {
 		trimmed := strings.TrimPrefix(strings.TrimPrefix(req.Subpath, "job/"), ".job/")
 		baseDir = filepath.Join(jobDir, trimmed)
-	} else if meta.Cwd != "" {
-		baseDir = filepath.Join(meta.Cwd, req.Subpath)
 	} else {
-		baseDir = filepath.Join(jobDir, req.Subpath)
+		baseDir = filepath.Join(artifactBase(meta, jobDir), req.Subpath)
 	}
 
 	cleanBase := filepath.Clean(baseDir)
-	resolvedBase := cleanBase
-	if r, err := filepath.EvalSymlinks(cleanBase); err == nil {
-		resolvedBase = filepath.Clean(r)
-	}
-
-	confined := false
-	for _, root := range roots {
-		if isSubpathOf(root, resolvedBase) || isSubpathOf(root, cleanBase) {
-			confined = true
-			break
-		}
-	}
-	if !confined {
-		return ListArtifactsResult{}, fmt.Errorf("access denied: path %q is outside allowed job directories", req.Subpath)
-	}
-
-	info, err := os.Stat(resolvedBase)
+	baseRoot, err := openArtifactDirectory(roots, cleanBase)
 	if err != nil {
-		return ListArtifactsResult{}, fmt.Errorf("stat %s: %w", req.Subpath, err)
+		return ListArtifactsResult{}, err
 	}
-	if !info.IsDir() {
-		return ListArtifactsResult{}, fmt.Errorf("path %s is not a directory", req.Subpath)
-	}
-
-	var entries []ArtifactEntry
-	walkErr := filepath.WalkDir(resolvedBase, func(p string, d fs.DirEntry, err error) error {
+	defer func() { _ = baseRoot.Close() }()
+	entries := make([]ArtifactEntry, 0)
+	limitReached := false
+	walkErr := fs.WalkDir(baseRoot.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if d.IsDir() {
-			if defaultIgnoredDirs[d.Name()] && p != resolvedBase {
+			if defaultIgnoredDirs[d.Name()] && p != "." {
 				return filepath.SkipDir
 			}
 			return nil
@@ -231,22 +217,29 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 			}
 		}
 
-		rel, err := filepath.Rel(resolvedBase, p)
+		rel, err := filepath.Rel(".", filepath.FromSlash(p))
 		if err != nil {
 			rel = filepath.Base(p)
 		}
 
 		fi, err := d.Info()
 		if err != nil {
-			return nil
+			return err
 		}
 		size := fi.Size()
 		modTime := fi.ModTime().UTC().Format(time.RFC3339)
 
 		var hash string
 		if size <= maxHashFileSize {
-			if h, err := fileSHA256(p); err == nil {
-				hash = h
+			f, openErr := baseRoot.OpenFile(filepath.FromSlash(p), artifactReadFlags, 0)
+			if openErr == nil {
+				opened, statErr := f.Stat()
+				if statErr == nil && opened.Mode().IsRegular() {
+					if h, hashErr := fileSHA256(f); hashErr == nil {
+						hash = h
+					}
+				}
+				_ = f.Close()
 			}
 		}
 
@@ -259,6 +252,7 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 		})
 
 		if len(entries) >= limit {
+			limitReached = true
 			return fs.SkipAll
 		}
 		return nil
@@ -272,6 +266,7 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 		JobID:   req.JobID,
 		Root:    cleanBase,
 		Entries: entries,
+		Scope:   artifactScope(meta), Roots: roots, ExpiresAt: m.artifactExpiry(req.JobID), LimitReached: limitReached,
 	}, nil
 }
 
@@ -289,69 +284,24 @@ func (m *Manager) ReadArtifact(req ReadArtifactRequest) (ReadArtifactResult, err
 		maxBytes = MaxReadArtifactBytes
 	}
 
+	target, err := artifactTarget(meta, jobDir, req.Path)
+	if err != nil {
+		return ReadArtifactResult{}, err
+	}
+	f, err := openArtifactFile(roots, target)
+	if err != nil {
+		return ReadArtifactResult{}, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return ReadArtifactResult{}, err
+	}
+	fullHash, err := fileSHA256(f)
+	if err != nil {
+		return ReadArtifactResult{}, fmt.Errorf("hash artifact: %w", err)
+	}
 	p := req.Path
-	if p == "" {
-		return ReadArtifactResult{}, errors.New("path must not be empty")
-	}
-
-	var target string
-	if filepath.IsAbs(p) {
-		target = filepath.Clean(p)
-	} else if strings.HasPrefix(p, "job/") || strings.HasPrefix(p, ".job/") {
-		trimmed := strings.TrimPrefix(strings.TrimPrefix(p, "job/"), ".job/")
-		target = filepath.Join(jobDir, trimmed)
-	} else {
-		// First check meta.Cwd
-		if meta.Cwd != "" {
-			target = filepath.Join(meta.Cwd, p)
-		} else {
-			target = filepath.Join(jobDir, p)
-		}
-		// If it does not exist under cwd, check whether it is a jobDir file (e.g. out, err, result.json)
-		if _, err := os.Stat(target); errors.Is(err, fs.ErrNotExist) {
-			jobCandidate := filepath.Join(jobDir, p)
-			if _, jerr := os.Stat(jobCandidate); jerr == nil {
-				target = jobCandidate
-			}
-		}
-	}
-
-	cleanTarget := filepath.Clean(target)
-	resolvedTarget := cleanTarget
-	if r, err := filepath.EvalSymlinks(cleanTarget); err == nil {
-		resolvedTarget = filepath.Clean(r)
-	}
-
-	confined := false
-	for _, root := range roots {
-		if isSubpathOf(root, resolvedTarget) || isSubpathOf(root, cleanTarget) {
-			confined = true
-			break
-		}
-	}
-	if !confined {
-		return ReadArtifactResult{}, fmt.Errorf("access denied: path %q is outside allowed job directories", p)
-	}
-
-	info, err := os.Stat(resolvedTarget)
-	if err != nil {
-		return ReadArtifactResult{}, fmt.Errorf("stat %s: %w", p, err)
-	}
-	if info.IsDir() {
-		return ReadArtifactResult{}, fmt.Errorf("path %s is a directory, not a regular file", p)
-	}
-
-	fullHash, err := fileSHA256(resolvedTarget)
-	if err != nil {
-		return ReadArtifactResult{}, fmt.Errorf("hash file: %w", err)
-	}
-
-	f, err := os.Open(resolvedTarget)
-	if err != nil {
-		return ReadArtifactResult{}, fmt.Errorf("open file: %w", err)
-	}
-	defer f.Close()
-
 	var lines []string
 	scanner := bufio.NewScanner(f)
 	// Buffer up to 1MB per line
@@ -403,6 +353,13 @@ func (m *Manager) ReadArtifact(req ReadArtifactRequest) (ReadArtifactResult, err
 		content = truncateUTF8(content, maxBytes)
 	}
 
+	after, statErr := f.Stat()
+	if statErr != nil {
+		return ReadArtifactResult{}, statErr
+	}
+	if after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+		return ReadArtifactResult{}, fmt.Errorf("artifact changed during read; retry or use agy_logs for a live file")
+	}
 	return ReadArtifactResult{
 		JobID:      req.JobID,
 		Path:       p,
