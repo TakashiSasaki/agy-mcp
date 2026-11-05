@@ -39,6 +39,11 @@ func addTool[In, Out any](s *toolServer, tool *mcp.Tool, handler mcp.ToolHandler
 // Start failures have their own schema branch: inventing an empty job_id or a
 // new job state for a request that never started would break the job contract.
 func addStartTool[In, Out any](s *toolServer, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
+	tool.InputSchema = runInputSchema[In]()
+	tool.Description += runArgumentGuide
+	if tool.Name == toolAgyRunSync {
+		tool.Description += inlineWaitGuide
+	}
 	tool.OutputSchema = &jsonschema.Schema{Type: "object", AnyOf: []*jsonschema.Schema{inferredSchema[Out](), inferredSchema[startErrorOutput]()}}
 	addTool(s, tool, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		result, out, err := handler(ctx, req, in)

@@ -14,6 +14,51 @@ import (
 
 const geminiTestModel = "gemini-3.8-flash-high"
 
+// Mutation guards: agy_usage must consume models, return mappings on the wire
+// from the same snapshot, and reject oversized mapping requests before a probe.
+func TestUsageModelMappingsOverMCP(t *testing.T) {
+	fake := quotaFake(0.5)
+	fake.Usage = append(fake.Usage, testutil.FakeQuotaGroup{Name: "Gemini 4 Argon", Buckets: []testutil.FakeQuotaBucket{
+		{ID: "weekly", Window: "weekly", RemainingFraction: 0.9, ResetTime: "2099-01-01T00:00:00Z"},
+	}})
+	mgr, _ := newTestManagerCfg(t, fake, func(c *config.Config) {})
+	cs := connect(t, mgr, nil)
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyUsage, Arguments: map[string]any{
+		"models": []string{"gemini-3.8-flash-medium", "gemini-4-argon", "unknown"},
+	}})
+	if err != nil || res.IsError {
+		t.Fatalf("mapping call: %+v, %v", res, err)
+	}
+	out := structuredMap(t, res)
+	groups, ok := out["model_groups"].([]any)
+	if !ok || len(groups) != 3 {
+		t.Fatalf("missing mappings: %+v", out)
+	}
+	for i, want := range []string{"Gemini Models", "Gemini 4 Argon", ""} {
+		item := structMap(t, groups[i])
+		if want == "" {
+			if item["group"] != nil || item["status"] != "unknown" {
+				t.Fatalf("unknown mapping guessed a group: %+v", item)
+			}
+		} else if item["group"] != want || item["status"] != "exact" {
+			t.Fatalf("model %d mapping: %+v", i, item)
+		}
+	}
+	res, err = cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyUsage})
+	if err != nil || res.IsError {
+		t.Fatalf("unmapped call: %+v, %v", res, err)
+	}
+	if items, ok := structuredMap(t, res)["model_groups"].([]any); !ok || len(items) != 0 {
+		t.Fatalf("omitted models must return an empty array: %+v", res)
+	}
+	res, err = cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: toolAgyUsage, Arguments: map[string]any{"models": make([]string, 129)},
+	})
+	if err != nil || !res.IsError {
+		t.Fatalf("oversized models were not rejected: %+v, %v", res, err)
+	}
+}
+
 func quotaFake(remaining float64) testutil.FakeAgy {
 	return testutil.FakeAgy{
 		Stdout: "REVIEW OK",

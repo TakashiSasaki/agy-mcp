@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -28,6 +29,13 @@ func TestAgentRuntimeInfoAuthProbeIsExplicit(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("default info unexpectedly probed models: %v", err)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Hostname != hostname || info.OS != runtime.GOOS || info.Architecture != runtime.GOARCH {
+		t.Fatalf("wrong server identity: %+v", info)
 	}
 	info, err = m.RuntimeInfo(t.Context(), true)
 	if err != nil || info.AuthStatus != "ok" || info.AuthCheckedAt != "2026-11-03T00:00:00Z" {

@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -9,7 +10,8 @@ import (
 )
 
 type quotaInput struct {
-	MaxAge string `json:"max_age,omitempty" jsonschema:"how old a cached reading may be (Go duration, e.g. 10m); default 60s; it must be positive, and a value under 10s is raised to 10s. Use a long value (10m) to read the background snapshot instantly; use 10s to accept only a reading under 10 seconds old; a new reading takes a few seconds because it runs agy"`
+	MaxAge string   `json:"max_age,omitempty" jsonschema:"how old a cached reading may be (Go duration, e.g. 10m); default 60s; it must be positive, and a value under 10s is raised to 10s. Use a long value (10m) to read the background snapshot instantly; use 10s to accept only a reading under 10 seconds old; a new reading takes a few seconds because it runs agy"`
+	Models []string `json:"models,omitempty" jsonschema:"optional model IDs to map against this same quota snapshot, at most 128; e.g. gemini-3.8-flash-medium and gemini-4-argon. No extra model-list call or model turn is made. Omit for no mappings; model_groups returns explicit exact, unknown, ambiguous or unpinned outcomes rather than guessing"`
 }
 
 type quotaBucketOutput struct {
@@ -38,8 +40,15 @@ type quotaGroupOutput struct {
 }
 
 type quotaOutput struct {
-	CheckedAt string             `json:"checked_at" jsonschema:"when agy was asked for this reading, RFC3339 UTC"`
-	Groups    []quotaGroupOutput `json:"groups" jsonschema:"one entry per quota group; empty when agy reported none"`
+	CheckedAt   string             `json:"checked_at" jsonschema:"when agy was asked for this reading, RFC3339 UTC"`
+	Groups      []quotaGroupOutput `json:"groups" jsonschema:"one entry per quota group; empty when agy reported none"`
+	ModelGroups []modelQuotaOutput `json:"model_groups" jsonschema:"requested models mapped against groups from this exact snapshot using the server's admission classifier; empty when no models were requested. Inference from model-family and CLI group metadata, not a provider guarantee"`
+}
+
+type modelQuotaOutput struct {
+	Model  string `json:"model" jsonschema:"model string supplied in models, in request order"`
+	Status string `json:"status" jsonschema:"exact when one quota group was inferred; unknown for an unrecognized model or missing group; ambiguous for multiple candidates; unpinned for an empty model. Does not establish that the model is available or executable"`
+	Group  string `json:"group,omitempty" jsonschema:"name of the matching entry in groups; present only for exact, otherwise no group is guessed"`
 }
 
 // quotaSummaryOutput is the compact quota reading attached to run results. It is
@@ -71,7 +80,7 @@ func toQuotaGroupSummary(gq *manager.GroupQuota) quotaGroupSummary {
 // manager.Manager.QuotaLevels) into the agy_usage wire shape. Arrays are never
 // null.
 func toQuotaOutput(snap manager.QuotaSnapshot, levels []manager.GroupQuota) quotaOutput {
-	out := quotaOutput{CheckedAt: formatQuotaTime(snap.CheckedAt), Groups: make([]quotaGroupOutput, 0, len(levels))}
+	out := quotaOutput{CheckedAt: formatQuotaTime(snap.CheckedAt), Groups: make([]quotaGroupOutput, 0, len(levels)), ModelGroups: []modelQuotaOutput{}}
 	for i := range levels {
 		gq := &levels[i]
 		g := quotaGroupOutput{
@@ -88,6 +97,19 @@ func toQuotaOutput(snap manager.QuotaSnapshot, levels []manager.GroupQuota) quot
 			})
 		}
 		out.Groups = append(out.Groups, g)
+	}
+	return out
+}
+
+func quotaModelGroups(snap manager.QuotaSnapshot, models []string) []modelQuotaOutput {
+	out := make([]modelQuotaOutput, 0, len(models))
+	for _, model := range models {
+		match := manager.MatchQuotaGroup(snap.Groups, model)
+		item := modelQuotaOutput{Model: model, Status: string(match.Status)}
+		if match.OK {
+			item.Group = snap.Groups[match.Index].Name
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -117,13 +139,17 @@ func registerUsage(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyUsage,
 		Title:       "Check agy quota",
 		Annotations: annReadExternal,
-		Description: "Report how much agy quota is left, per quota group (for example Gemini Models for Flash/Pro, Gemini 4 Argon when reported separately, and Claude and GPT models), with a level per group: ok, low, critical or exhausted. " +
+		Description: "Report how much agy quota is left, per quota group, with a level per group: ok, low, critical or exhausted. The returned groups are authoritative for this reading; do not assume every Gemini model shares one pool. Gemini Models and Gemini 4 Argon can be separate. " +
+			"Optional models is an array of up to 128 model IDs; model_groups maps them against this same snapshot using the admission classifier, with exact, unknown, ambiguous or unpinned status. These are inferences from CLI group metadata, not proof of model availability or provider-guaranteed membership. Omit models for no mappings. " +
 			"The level comes from the group's tightest active window (5h or weekly; disabled buckets are skipped), counts a window whose reset time has passed as full, and uses the server's thresholds: low below 25 percent remaining, critical below 5, exhausted at 0 (AGY_MCP_USAGE_LOW and AGY_MCP_USAGE_CRITICAL change the first two). " +
 			"It spends no model quota: it runs agy's /usage command, which starts no agent turn. " +
 			"Check it before optional work, and pass priority optional to agy_run or agy_run_sync so the server refuses the run while the model's group is low or when the model's quota group mapping cannot be established; the same reading rides on the quota field of run, status and wait results. " +
 			"max_age bounds how old a cached reading may be (default 60s, minimum 10s); a fresh reading takes a few seconds. " +
 			"Shells out to the agy CLI, so it fails if agy is missing from PATH or not authenticated.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in quotaInput) (*mcp.CallToolResult, quotaOutput, error) {
+		if len(in.Models) > 128 {
+			return nil, quotaOutput{}, fmt.Errorf("models must contain at most 128 entries")
+		}
 		var maxAge time.Duration // zero: the manager's default
 		if in.MaxAge != "" {
 			d, err := parsePositiveDuration("max_age", in.MaxAge, "10m")
@@ -136,6 +162,8 @@ func registerUsage(s *toolServer, mgr *manager.Manager) {
 		if err != nil {
 			return nil, quotaOutput{}, err
 		}
-		return nil, toQuotaOutput(snap, mgr.QuotaLevels(snap)), nil
+		out := toQuotaOutput(snap, mgr.QuotaLevels(snap))
+		out.ModelGroups = quotaModelGroups(snap, in.Models)
+		return nil, out, nil
 	})
 }

@@ -29,7 +29,7 @@ func registerWait(s *toolServer, mgr *manager.Manager) {
 			"when the next step depends on the job's result; use agy_status instead for a " +
 			"single non-blocking check. Streams progress notifications while waiting when the " +
 			"client asks for them. Outliving the wait cap is not a failure: the job keeps " +
-			"running under its own timeout, so call agy_wait again.",
+			"running under its own timeout, so call agy_wait again." + inlineWaitGuide,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in waitInput) (*mcp.CallToolResult, runSyncOutput, error) {
 		wait, err := parseWait(in.Wait)
 		if err != nil {

@@ -29,7 +29,7 @@ type infoOutput struct {
 func registerInfo(s *toolServer, mgr *manager.Manager) {
 	addTool(s, &mcp.Tool{
 		Name: toolAgyInfo, Title: "Inspect agy server capabilities", Annotations: annReadExternal,
-		Description: "Inspect this running server's defaults, catalog fingerprint, cached quota and execution limits without an agent turn. " +
+		Description: "Inspect this running server's host, platform, defaults, catalog fingerprint, cached quota and execution limits without an agent turn. All cwd, dirs and schema-file paths refer to this server host. " +
 			"It runs a CLI version check; check_auth explicitly adds a model-list probe, which does not prove that every model can execute a task. " +
 			"Compare tool_names with the tools exposed by your connection to detect stale metadata. Missing caller-visible tools require a connection metadata refresh; this tool cannot refresh the client. " +
 			"Use agy_usage for a fresh quota reading, agy_list_jobs to recover existing work, and agy_run to start authorized work. read_only_enforced is false; a review prompt or sandbox flag does not establish a verified read-only backend.",

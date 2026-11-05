@@ -27,16 +27,16 @@ type runInput struct {
 	Effort         string   `json:"effort,omitempty" jsonschema:"reasoning effort for this run (agy --effort): low, medium, high, xhigh or max. Omit to use agy's default"`
 	Mode           string   `json:"mode,omitempty" jsonschema:"agy agent execution mode for this run (agy --mode): accept-edits or auto; plan is refused with an error, because agy ignores --mode plan when slash command expansion is disabled and agy-mcp disables it on every run so prompts stay literal. Every run skips agy's permission prompts; under that, in a measured run on agy 1.4.8, accept-edits behaved the same as passing no mode. Omit to use agy's default mode"`
 	Agent          string   `json:"agent,omitempty" jsonschema:"name of a specific agy agent to run for this session (agy --agent); omit to use agy's default agent; list_agents with the same cwd lists the accepted names, including the repository's project agents. On agy 1.3.4 and later an unknown name fails the run with failure_reason agy_error and an error listing the available agents; older agy runs its default agent instead (agy changelog 1.3.4)"`
-	Sandbox        bool     `json:"sandbox,omitempty" jsonschema:"run the agent with agy's sandbox (terminal restrictions) enabled (agy --sandbox); off by default"`
+	Sandbox        bool     `json:"sandbox,omitempty" jsonschema:"forward agy --sandbox to request terminal restrictions; false by default. This server does not verify filesystem confinement, network isolation or read-only enforcement. Permission checks remain disabled, and a no-edit prompt is only an instruction"`
 	Dirs           []string `json:"dirs,omitempty" jsonschema:"extra directories to grant the agent beyond cwd (agy --add-dir), e.g. a spec or a sibling repo. The agent can read and write there exactly as under cwd, so this widens the blast radius; prefer absolute paths. Each entry is also an agy workspace, so its own rule files and hooks load regardless of project_rules"`
 	ProjectRules   *bool    `json:"project_rules,omitempty" jsonschema:"load the project's agy rule files (AGENTS.md, including one at the repository root when cwd is a subdirectory) by passing cwd to agy as a workspace (agy --add-dir). On by default. Setting false only omits that --add-dir: on agy versions that need the flag it keeps the repository's rules and hooks out, but agy 1.2.16 and 1.4.8 (measured) load cwd's rules and hooks regardless, so it does not isolate a run from a repository you do not trust. Listing cwd in dirs still makes it a workspace. To keep a repository's rules and hooks out, set cwd to an empty directory outside any repository, leave the repository out of dirs, and name its files by absolute path in the prompt; reading them that way was measured on agy 1.4.8, writing outside the workspace was not. continue_latest and list_sessions then key on that directory, and the repository's project agents are not available to agent or list_agents"`
-	ConversationID string   `json:"conversation_id,omitempty" jsonschema:"continue this specific conversation instead of starting fresh, so earlier context need not be restated; take it from a previous run's conversation_id or from list_sessions. Mutually exclusive with continue_latest"`
-	ContinueLatest bool     `json:"continue_latest,omitempty" jsonschema:"continue the most recent conversation for cwd instead of starting fresh. Mutually exclusive with conversation_id: setting this true together with a conversation_id is an error, though leaving it false alongside one is fine"`
+	ConversationID string   `json:"conversation_id,omitempty" jsonschema:"continue this specific conversation instead of starting fresh; take it from a previous run or list_sessions. Mutually exclusive with continue_latest. cwd still selects the execution directory; retain the original cwd unless intentionally changing it. Concurrent runs continuing this same ID are refused even with different cwd values"`
+	ContinueLatest bool     `json:"continue_latest,omitempty" jsonschema:"false by default; true resolves the most recent conversation for canonical cwd, or starts fresh if none is cached. Mutually exclusive with conversation_id: true together with a conversation_id is an error, though false alongside one is fine. A resolved conversation has the same concurrency lock as an explicit conversation_id"`
 	Cwd            string   `json:"cwd,omitempty" jsonschema:"absolute path of the directory the agent runs in and may edit files under; also scopes continue_latest. Fresh runs sharing a cwd run concurrently. A relative path is resolved against the server's working directory, which is not necessarily yours, so pass an absolute one. Symlinks are resolved. Defaults to the server's own working directory. Unless project_rules is false, cwd is also passed to agy as a workspace (--add-dir); see project_rules for when that changes which rule files apply"`
 	Timeout        string   `json:"timeout,omitempty" jsonschema:"max wall-clock duration for the whole run (Go duration, e.g. 20m); a value over 24h is rejected. On expiry the job normally ends in state failed with failure_reason timeout. Usually agy-mcp kills the agy process tree mid-run; if agy's own --print-timeout fires first, agy stops the turn itself and any text it had comes back as a partial result. The kill is hard: any answer already streamed is offered back as a partial result, but work still in the model's reasoning or a tool call has produced no recoverable text yet, so a run killed before it streams its answer recovers nothing. To carry on, start a fresh agy_run with this run's conversation_id so the thread continues without restating the task; the killed turn's own reasoning is not recoverable. Omit to use the server's default"`
-	JSONSchema     string   `json:"json_schema,omitempty" jsonschema:"optional JSON Schema to enforce on the run's structured result: pass either an inline schema string or a path to a schema file, and agy constrains the final result to it (in stream-json mode the schema applies to the terminal result event). Omit for an unconstrained free-text result. Useful when the result is consumed programmatically, e.g. extraction, classification, or structured summaries"`
+	JSONSchema     string   `json:"json_schema,omitempty" jsonschema:"optional JSON Schema encoded as a string, not an object, or an absolute schema-file path on the server host. The value is forwarded unchanged to agy running in cwd. agy applies it to the terminal structured result; agy-mcp selects that channel but does not independently validate schema conformance or content correctness. Omit for free text; see the property's examples for an inline object schema"`
 	Priority       string   `json:"priority,omitempty" jsonschema:"normal (default) or optional. optional marks work that may be skipped, such as a peer review, a second opinion or a rubber-duck pass: when the run's model belongs to a quota group at low, critical or exhausted per agy_usage, the run is refused before any job starts, as a tool error naming the group, level, remaining percent and reset time, and the right response is to report the skip rather than retry. When a trusted reading is present, optional also refuses/defers when the model's quota group mapping cannot be established (an omitted model with no server default, an unknown model, or an ambiguous/missing group in /usage); quota that cannot be read or a stale reading never refuses, and normal always runs. Not forwarded to agy, and not part of idempotency_key matching: a retry whose key already names a job returns that job whatever the priority"`
-	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional retry token for agy-mcp job creation. Reusing the same key with the same normalized run request returns the existing job instead of starting another; reusing it with a different request is rejected. Keys are remembered while the job remains in the job store (24h by default). Use this when a transport failure could leave it ambiguous whether a run already started"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional creation retry token, scoped to the retained job store across server processes, restarts and both run tools, not per cwd or caller. Same key and normalized execution inputs return the existing job; different inputs are rejected. wait, priority and task_label are excluded; replay keeps the original label. Defaults are normalized, so explicitly pin cwd/model/timeout for retries across configuration changes. Binding lasts until the job is removed. GC uses age since creation (default 24h) and keeps live jobs; it does not promise a full TTL after completion. No token means each call starts distinct work"`
 }
 
 // maxJobTimeout caps a client-supplied per-job timeout. It bounds both the agy
@@ -45,7 +45,7 @@ type runInput struct {
 const maxJobTimeout = 24 * time.Hour
 
 // agy --mode takes accept-edits, auto and plan (agy --help, 1.4.6 and 1.4.8). agy-mcp
-// forwards only accept-edits; toStartRequest refuses the others at the tool
+// forwards accept-edits and auto; toStartRequest refuses the others at the tool
 // boundary with a clear message rather than letting them reach agy, which
 // agy-mcp cannot surface as cleanly.
 //
@@ -62,14 +62,13 @@ const maxJobTimeout = 24 * time.Hour
 // Review setting lets them proceed, so whether a plan run stops before editing
 // depends on the agy version and a user-level setting that agy-mcp does not read.
 //
-// agy 1.3.5 added a third mode, auto, which is deliberately not accepted. Every
+// agy 1.3.5 added a third mode, auto, which is forwarded when explicitly requested. Every
 // run passes --dangerously-skip-permissions (buildAgyArgs), and auto is an
 // approval policy, so under that flag it either changes nothing for an agy-mcp
 // run or adds a reviewer agent's model calls; which one is NOT MEASURED. On an
 // agy older than 1.3.5 an unrecognized --mode value is only a warning (agy
 // 1.1.12 changelog; the warning and exit 0 MEASURED against agy 1.4.6 with an
-// unknown value), so accepting auto would run in the default mode and report a
-// normal run.
+// unknown value), so a successful auto run does not establish approval enforcement.
 //
 // accept-edits is forwarded as given. MEASURED against agy 1.4.8 (issue #221):
 // under --dangerously-skip-permissions a run with it and a run without --mode
@@ -296,9 +295,9 @@ type statusOutput struct {
 	SelectedModelSource  string  `json:"selected_model_source,omitempty" jsonschema:"provenance of selected_model when present: cli_init"`
 	EffectiveModel       *string `json:"effective_model" jsonschema:"authoritative model that actually executed the turn, or null when the CLI stream provides no post-generation execution model metadata"`
 	EffectiveModelSource string  `json:"effective_model_source,omitempty" jsonschema:"provenance of effective_model: unknown when effective_model is null"`
-	// Partial marks a result that is not a verified final answer; see
+	// Partial marks a result that lacks authoritative final provenance; see
 	// manager.Status.Partial.
-	Partial bool `json:"partial,omitempty" jsonschema:"true when result is not the verified final answer, so treat it as incomplete. It follows from provenance: streamed fallback text is partial; a non-schema SUCCESS response is complete; for a json_schema run only SUCCESS structured_output is complete, while response retained because structured_output is missing is diagnostic and partial. An authoritative result stays complete even if the process is then cancelled or killed, with two exceptions that make even an authoritative SUCCESS result partial: a clean exit (or a job recovered from agy's result after its supervisor died) whose stderr shows agy ended the run early (it killed outstanding background tasks, or its own --print-timeout expired mid-turn), and a timed-out run whose stderr shows agy's own --print-timeout had already expired"`
+	Partial bool `json:"partial" jsonschema:"always present; true means the result lacks an authoritative final-result channel or was flagged as early/incomplete. false describes provenance only, not factual correctness, schema validation or passing tests; inspect state and result_available too. Streamed fallback text is partial; a non-schema SUCCESS response is authoritative; for json_schema only SUCCESS structured_output is authoritative, while retained response without it is diagnostic and partial. An authoritative result can stay non-partial after cancellation or a kill unless stderr shows agy ended the turn early. Older servers omitted false, so absent partial on a legacy response is the old false value, not a correctness guarantee"`
 	// NumTurns and Usage are agy's own accounting, present once the run reported
 	// a terminal result.
 	NumTurns   int          `json:"num_turns,omitempty" jsonschema:"how many turns the conversation has taken, as reported by agy"`
@@ -647,7 +646,12 @@ var serverVersion = sync.OnceValue(func() string {
 // these tools. It deliberately encodes no single client's conventions or policy
 // (model choice, working-directory habits, review etiquette); those belong in
 // that client's own configuration, not in a server shared by everyone.
-const serverInstructions = `agy delegates a prompt to a background coding agent and manages the run as a restart-resilient job with output captured to disk. Use it to get an independent perspective or to offload self-contained work while you keep going:
+const serverInstructions = `agy runs an agent on the server host with permission checks disabled. cwd and dirs are server-side workspaces, not confinement; sandbox and a no-edit prompt do not establish read-only access. Inspect agy_info for host, defaults and the registered catalog. A result's partial false describes provenance, not correctness or passing tests.
+
+agy delegates a prompt to a background coding agent and manages the run as a restart-resilient job with output captured to disk. Use it to get an independent perspective or to offload self-contained work while you keep going:
+
+- Continue a prior thread with conversation_id or continue_latest instead of restating context.
+- Fan out freely: fresh runs in the same directory run concurrently, up to the server's concurrency cap. Only two runs continuing the SAME conversation_id conflict, and the second is refused rather than queued.
 
 - Peer review: have another model review code, a design, or a plan for bugs, security, and correctness.
 - Rubber-duck: talk through a decision and get pushback that catches blind spots your own reasoning would skip.
@@ -663,8 +667,6 @@ Choosing a tool:
 - list_models enumerates models and list_agents enumerates agents; call them only if you want to override the default model or pick a specific agent. list_sessions lists known conversations.
 
 Notes:
-- Continue a prior thread with conversation_id or continue_latest instead of restating context.
-- Fan out freely: fresh runs in the same directory run concurrently, up to the server's concurrency cap. Only two runs continuing the SAME conversation_id conflict, and the second is refused rather than queued.
 - Record the idempotency key before sending a request. Add task_label for later discovery with agy_list_jobs; search by the original key if the response lost its job_id. Start errors include error_code, job_started and next_action. null job_started means execution is uncertain; inspect before retrying.
 - agy_status with include_result false omits the result body without collecting it. Read terminal text in bounded pages with agy_get_result; its complete flag describes pagination only. Check state, partial and retryable before adopting an answer or continuing work.
 - agy_info reports runtime defaults, the registered tool catalog and enforcement capabilities. check_auth explicitly probes model-list access without an agent turn. Compare its catalog with the caller-visible tools; a mismatch requires refreshing connection metadata.
@@ -740,7 +742,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		Name:        toolAgyCancel,
 		Title:       "Cancel an agy job",
 		Annotations: annCancel,
-		Description: "Stop a running agy job: asks its supervisor to terminate the agy process tree. Use it to abandon a job whose result is no longer needed, or one that is stuck; there is no resume, so continuing the work means a new agy_run. Before re-sending the prompt, read the cancelled job with agy_status: a cancelled run still carries whatever text it produced, and a run agy had already finished carries a complete, non-partial answer, so re-running it would pay for the same work twice. Termination is asynchronous, so the returned state is usually still running and settles to cancelled a moment later; that is a delivered cancel, not a failed one. Calling it on an already-finished job is a harmless no-op. Files the delegated agent already wrote are not rolled back.",
+		Description: "Stop a running agy job: asks its supervisor to terminate the agy process tree. Use it to abandon a job whose result is no longer needed, or one that is stuck; there is no resume, so continuing the work means a new agy_run. Before re-sending the prompt, inspect the job with agy_status or agy_wait, including already-finished jobs: check state, partial and result_available. A cancelled run retains whatever text it produced and may already have an authoritative final result; partial false describes provenance, not correctness or passing tests. Termination is asynchronous, so the returned state is usually still running and settles to cancelled a moment later; that is a delivered cancel, not a failed one. Calling it on an already-finished job is a harmless no-op. Files the delegated agent already wrote are not rolled back.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cancelInput) (*mcp.CallToolResult, cancelOutput, error) {
 		if err := mgr.Cancel(in.JobID); err != nil {
 			return nil, cancelOutput{}, err

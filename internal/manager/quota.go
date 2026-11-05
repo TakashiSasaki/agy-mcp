@@ -505,6 +505,12 @@ func resolveCandidateIndices(family modelFamily, candidates []int) QuotaGroupMat
 	}
 }
 
+// MatchQuotaGroup exposes the same snapshot classifier used for admission.
+// The match is inferred from CLI group metadata, not provider-attested membership.
+func MatchQuotaGroup(groups []QuotaGroup, model string) QuotaGroupMatch {
+	return matchQuotaGroup(groups, model)
+}
+
 // matchQuotaGroup maps model to a single QuotaGroup in groups using explicit
 // model-family classification and group bucket IDs/Name/Description metadata.
 // It never assumes there is only one Gemini group: separate Gemini Flash/Pro

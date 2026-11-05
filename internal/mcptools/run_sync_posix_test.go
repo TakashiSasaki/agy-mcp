@@ -23,6 +23,33 @@ import (
 // started by newTestManager.
 const testConversationID = "abcdabcd-1234-5678-9abc-def012345678"
 
+// Mutation guards: schema defaults must preserve the server's original
+// execution defaults and the request key across async/sync idempotent replay.
+func TestRunSchemaDefaultsPreserveReplay(t *testing.T) {
+	mgr, _ := newTestManagerCfg(t, testutil.FakeAgy{Stdout: "ANSWER"}, func(c *config.Config) {
+		c.DefaultModel = "gemini-3.8-flash-medium"
+	})
+	cs := connect(t, mgr, nil)
+	cwd := t.TempDir()
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyRunSync, Arguments: map[string]any{
+		"prompt": "task", "cwd": cwd, "idempotency_key": "static-defaults", "wait": "5s",
+	}})
+	if err != nil || res.IsError {
+		t.Fatalf("first run: %+v, %v", res, err)
+	}
+	first := structuredMap(t, res)
+	if first["partial"] != false || first["state"] != manager.StateDone || first["requested_model"] != "gemini-3.8-flash-medium" {
+		t.Fatalf("default run lost provenance/model: %+v", first)
+	}
+	res, err = cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyRun, Arguments: map[string]any{
+		"prompt": "task", "cwd": cwd, "idempotency_key": "static-defaults",
+		"project_rules": true, "sandbox": false, "continue_latest": false, "priority": "normal",
+	}})
+	if err != nil || res.IsError || structuredMap(t, res)["job_id"] != first["job_id"] {
+		t.Fatalf("explicit defaults changed replay or created work: %+v, %v", res, err)
+	}
+}
+
 // newTestManager builds a manager around a fake agy and a fake supervisor that
 // writes the same job-dir files the real one derives from agy's stream. The
 // conversation cache is a test-owned empty file: it is no longer where a run's

@@ -293,8 +293,8 @@ func TestToStartRequestPassesModel(t *testing.T) {
 	}
 }
 
-// TestToStartRequestValidatesMode: accept-edits (or empty, meaning omit the flag)
-// is the only mode accepted. plan gets a dedicated refusal that names the cause
+// TestToStartRequestValidatesMode: accept-edits and auto (or empty, omitting the
+// flag) are accepted. plan gets a dedicated refusal that names the cause
 // (issue #219); any other value is rejected with a message quoting it. Validation
 // is exact, so a wrong case is rejected, not folded into plan.
 func TestToStartRequestValidatesMode(t *testing.T) {
@@ -305,6 +305,7 @@ func TestToStartRequestValidatesMode(t *testing.T) {
 	}{
 		{name: "empty is ok", mode: ""},
 		{name: "accept-edits ok", mode: "accept-edits"},
+		{name: "auto ok", mode: "auto"},
 		{name: "plan refused", mode: "plan", wantIn: []string{`"plan"`, "not supported", "slash command expansion"}},
 		{name: "unknown rejected", mode: "planning", wantIn: []string{"planning", "accept-edits"}},
 		{name: "wrong case rejected", mode: "Plan", wantIn: []string{"Plan", "accept-edits"}},

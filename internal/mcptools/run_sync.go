@@ -50,7 +50,7 @@ func maxSyncWait() time.Duration {
 // runSyncInput is runInput plus the inline wait cap.
 type runSyncInput struct {
 	runInput
-	Wait string `json:"wait,omitempty" jsonschema:"max time to block inline (Go duration); a larger value is silently clamped to the inline-wait ceiling. That ceiling defaults to 90s, kept below common MCP clients' ~120s per-call timeout so the still-running result (carrying the job_id) is delivered inline, and is overridable with AGY_MCP_SYNC_WAIT_CAP, which can raise or lower it. Caps only the inline wait, not the job itself: on overrun the job keeps running and the returned job_id can be waited on with agy_wait or polled with agy_status, so never re-send the prompt"`
+	Wait string `json:"wait,omitempty" jsonschema:"positive Go duration such as 30s or 1m; omitted or empty defaults to the effective inline-wait ceiling (built-in 90s; AGY_MCP_SYNC_WAIT_CAP can change it; see agy_info.max_inline_wait). A larger value silently clamps to that ceiling. Limits only this call, not the job: expiry leaves it running and the returned job_id can be waited on with agy_wait or inspected with agy_status; never re-send the prompt just because wait expired"`
 }
 
 type runSyncOutput struct {

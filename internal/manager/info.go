@@ -3,14 +3,18 @@ package manager
 import (
 	"context"
 	"os"
+	"runtime"
 	"time"
 )
 
 type RuntimeInfo struct {
+	Hostname         string `json:"hostname,omitempty" jsonschema:"server host name; paths in tool arguments refer to this host, not the caller's machine; absent if unavailable"`
+	OS               string `json:"os" jsonschema:"server operating system, for interpreting server-side paths and execution capabilities"`
+	Architecture     string `json:"architecture" jsonschema:"server process architecture"`
 	DefaultCwd       string `json:"default_cwd" jsonschema:"server working directory used when cwd is omitted"`
 	DefaultModel     string `json:"default_model,omitempty" jsonschema:"configured model ID; absence means agy's own default is used"`
 	DefaultTimeout   string `json:"default_timeout" jsonschema:"configured job duration limit, distinct from the inline wait limit"`
-	JobTTL           string `json:"job_ttl" jsonschema:"configured finished-job retention; zero disables automatic expiry"`
+	JobTTL           string `json:"job_ttl" jsonschema:"minimum age since creation for automatic collection of non-running jobs; zero disables automatic expiry"`
 	MaxConcurrency   int    `json:"max_concurrency" jsonschema:"maximum admitted jobs in this server process"`
 	RunningJobs      int    `json:"running_jobs" jsonschema:"jobs currently accounted for by this server process; not a host-wide count"`
 	ConcurrencyScope string `json:"concurrency_scope" jsonschema:"process; sibling servers have separate global admission counters"`
@@ -37,10 +41,12 @@ func (m *Manager) RuntimeInfo(ctx context.Context, checkAuth bool) (RuntimeInfo,
 	maximum, running := m.gate.max, m.gate.inFlight
 	m.gate.mu.Unlock()
 	out := RuntimeInfo{
+		OS: runtime.GOOS, Architecture: runtime.GOARCH,
 		DefaultCwd: cwd, DefaultModel: modelID(m.cfg.DefaultModel), DefaultTimeout: m.cfg.DefaultTimeout.String(),
 		JobTTL: m.cfg.JobTTL.String(), MaxConcurrency: maximum, RunningJobs: running,
 		ConcurrencyScope: "process", AgyStatus: "unavailable", AuthStatus: "not_checked",
 	}
+	out.Hostname, _ = os.Hostname()
 	_, version, ok := m.checkAgyVersion(ctx)
 	if ok {
 		out.AgyVersion, out.AgyStatus = version.String(), "ok"
