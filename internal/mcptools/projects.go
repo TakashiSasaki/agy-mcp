@@ -22,15 +22,15 @@ type listProjectsOutput struct {
 
 type resolveWorkspaceInput struct {
 	Project string `json:"project" jsonschema:"project name, project id, repository URL, or directory path to resolve"`
-	Branch  string `json:"branch,omitempty" jsonschema:"optional branch name or worktree folder name to resolve within the project"`
+	Branch  string `json:"branch,omitempty" jsonschema:"optional full Git branch name or worktree folder alias. Exact case-sensitive branch names take precedence; otherwise case-insensitive branch/folder matches must be unique. With an absolute project directory, this verifies that directory's branch or folder alias and never silently ignores a mismatch"`
 }
 
 type resolveWorkspaceOutput struct {
 	Resolved   bool     `json:"resolved" jsonschema:"true if a concrete workspace directory was unambiguously resolved"`
-	Path       string   `json:"path,omitempty" jsonschema:"resolved concrete filesystem directory path"`
+	Path       string   `json:"path,omitempty" jsonschema:"execution directory; present only when resolved is true and ambiguous is false; never use candidate descriptions as cwd"`
 	Branch     string   `json:"branch,omitempty" jsonschema:"active git branch for the resolved directory"`
 	Head       string   `json:"head,omitempty" jsonschema:"short commit SHA for the resolved directory"`
-	Ambiguous  bool     `json:"ambiguous,omitempty" jsonschema:"true if multiple candidate directories or branches exist"`
+	Ambiguous  bool     `json:"ambiguous" jsonschema:"always present; true means selection is required, resolved is false and path/branch/head are absent. false with resolved false means no matching selection or a missing/unavailable directory"`
 	Candidates []string `json:"candidates,omitempty" jsonschema:"candidate workspace paths or branch descriptions when ambiguous"`
 	Error      string   `json:"error,omitempty" jsonschema:"error explanation if resolution failed"`
 }
@@ -56,7 +56,7 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyResolveWorkspace,
 		Title:       "Resolve project workspace",
 		Annotations: annReadLocal,
-		Description: "Resolve a project name, project ID, repo URL, or directory path and optional branch to an unambiguous concrete working directory path for agy_run or agy_run_sync. If multiple candidate worktrees exist and no branch is given, reports ambiguous with candidates. Call agy_list_projects first if you need to browse registered projects.",
+		Description: "Resolve project (required name, ID, repository URL or server-side absolute directory) and optional branch to a unique cwd for agy_run or agy_run_sync. Only resolved true with ambiguous false carries a usable path. Multiple matches return resolved false, ambiguous true and candidates, with no path/branch/head; a default branch is never selected implicitly. Specify a full branch name or an absolute candidate path, then resolve again. Exact case-sensitive branch names outrank case-insensitive branch/folder aliases; aliases must be unique. For an absolute directory, branch is a constraint on that directory, not a request to switch branches. Missing branches or directories return resolved false and an error, without a fallback path. Call agy_list_projects to browse choices. This tool never starts work or changes a checkout.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in resolveWorkspaceInput) (*mcp.CallToolResult, resolveWorkspaceOutput, error) {
 		res, err := mgr.ResolveWorkspace(in.Project, in.Branch)
 		if err != nil {

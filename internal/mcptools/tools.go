@@ -646,7 +646,7 @@ var serverVersion = sync.OnceValue(func() string {
 // these tools. It deliberately encodes no single client's conventions or policy
 // (model choice, working-directory habits, review etiquette); those belong in
 // that client's own configuration, not in a server shared by everyone.
-const serverInstructions = `agy runs an agent on the server host with permission checks disabled. cwd and dirs are server-side workspaces, not confinement; sandbox and a no-edit prompt do not establish read-only access. Inspect agy_info for host, defaults and the registered catalog. A result's partial false describes provenance, not correctness or passing tests.
+const serverInstructions = `agy runs an agent on the server host with permission checks disabled. cwd and dirs are server-side workspaces, not confinement; sandbox and a no-edit prompt do not establish read-only access. agy_info(tool: agy_run, include_instructions: true) returns raw tool_json and full instructions; its default reports host and defaults. partial false describes provenance, not correctness or passing tests.
 
 agy delegates a prompt to a background coding agent and manages the run as a restart-resilient job with output captured to disk. Use it to get an independent perspective or to offload self-contained work while you keep going:
 

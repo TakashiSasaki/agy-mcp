@@ -158,6 +158,25 @@ The server writes JSON request records to stderr for `initialize`, `server/disco
 
 `tools/list` completion records also include `tool_count`, `catalog_sha256` (a name-sorted fingerprint of the returned tool definitions, including schemas, with JSON object keys sorted recursively), and `catalog_complete`. A paginated response fingerprints only its returned page. `agy_info` reports the complete server catalog using the same fingerprint. Compare its `tool_names` with the tools visible to the calling agent to distinguish an older server from a connection that still exposes cached metadata.
 
+To inspect the native contract without a public server URL, call `agy_info` with
+`{"tool":"agy_run","include_instructions":true}`. Its optional `contract.tool_json`
+is the complete JSON-encoded descriptor from the same catalog as `tools/list`,
+including field descriptions, examples, defaults and enums. Parse that string
+and compare it with the corresponding native tool object; JSON key order is
+not significant. `contract.tool_sha256` hashes the exact returned string bytes.
+`contract.instructions` contains the full native initialize instructions, even
+when the client's server overview shows only an initial excerpt. Top-level
+`instructions_bytes` and `instructions_sha256` always identify the full UTF-8
+instructions. Omit `tool` and leave `include_instructions` false for a compact
+diagnostic response. An unknown tool name is an error and never selects a file
+or executes a tool.
+
+This read-only inspection uses the existing MCP connection and its access
+controls. It does not require an unauthenticated diagnostic URL, expose runtime
+credentials, or change how a client renders declarations. The runtime
+`server_version` identifies the responding process; a matching tool count alone
+does not prove that the client's cached descriptions or schemas are current.
+
 After changing the server's tools, schemas, or instructions, refresh the existing ChatGPT connection to pull the updated definitions, then test from a new conversation. Restarting the MCP server alone does not refresh the connection's cached tool definitions. See [OpenAI's metadata refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata). Preserve the existing app, tunnel ID, authentication, and permissions.
 
 Some clients render input types without their property descriptions. Both run tools therefore include a compact argument guide and execution boundary in their own descriptions, in addition to property descriptions, examples and finite-value enums in the native schema. Empty-string enum values preserve the existing omission/default behavior. Only static defaults are inserted by schema validation; cwd, model, agent, effort, mode and timeout are resolved by the server or CLI as described in their fields. Compare the actual `initialize` instructions and `tools/list` JSON at the direct and relay layers before attributing missing or truncated prose to the server. A connection's short overview is not evidence that the native instructions were truncated.
@@ -188,14 +207,14 @@ Or add to your MCP client config:
 - `agy_usage(max_age?, models?)` -> `{ checked_at, groups, model_groups }`, each group `{ name, description?, level, remaining_percent, window, reset_time?, buckets }`
 - `agy_list_jobs(cwd?, task_label?, state?, idempotency_key?, limit?, offset?)` -> `{ jobs, total_count, next_offset? }`
 - `agy_get_result(job_id, cursor?, max_bytes?)` -> `{ job_id, conversation_id?, state, partial, failure_reason?, error?, recovery?, retryable?, result_available, content, total_bytes, result_sha256?, next_cursor?, complete, next_action }`
-- `agy_info(check_auth?)` -> `{ api_version, server_version, runtime, max_inline_wait, quota?, tool_names, tool_count, catalog_sha256 }`
+- `agy_info(check_auth?, tool?, include_instructions?)` -> `{ api_version, server_version, runtime, max_inline_wait, quota?, tool_names, tool_count, catalog_sha256, instructions_bytes, instructions_sha256, contract? }`
 - `agy_events(job_id, cursor?, limit?, max_bytes?)` -> timestamped event pages, capture health, CLI process outcome and agent outcome
 - `agy_logs(job_id, stream?, path?, cursor?, from_start?, tail_bytes?, max_bytes?)` -> bounded byte pages or tails of job streams/associated files
 - `agy_verification(job_id, path)` -> parsed JUnit outcome, counts, failure details and exact report SHA-256
 - `agy_list_artifacts(job_id, subpath?, pattern?, max_entries?)` -> `{ job_id, root, entries, scope, roots, expires_at?, limit_reached }`
 - `agy_read_artifact(job_id, path, start_line?, end_line?, tail_lines?, max_bytes?)` -> `{ job_id, path, size_bytes, sha256, total_lines, start_line, end_line, truncated, content }`
 - `agy_list_projects(query?)` -> `{ projects }`
-- `agy_resolve_workspace(project, branch?)` -> `{ resolved, path?, branch?, head?, ambiguous?, candidates?, error? }`
+- `agy_resolve_workspace(project, branch?)` -> `{ resolved, path?, branch?, head?, ambiguous, candidates?, error? }`
 - `list_models()` -> `{ models, model_details }`
 - `list_agents(cwd?)` -> `{ agents }`
 - `list_sessions(dir?, exclude_transient?, limit?, offset?)` -> `{ sessions, total_count }`
@@ -277,6 +296,24 @@ Omitting `include_result` preserves the full-result `agy_status` response and it
 `execution_cwd`, `git_branch`, `git_head` (short commit SHA), and `git_dirty` in job status outputs capture the concrete directory and Git metadata at job invocation time, allowing callers to verify which branch and commit were active during execution.
 
 `agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
+
+Workspace resolution returns a usable `path` only when `resolved: true` and
+`ambiguous: false`. Multiple project/worktree matches return `resolved: false`,
+`ambiguous: true`, candidate descriptions and advice, with no `path`, `branch`
+or `head`. The resolver never implicitly picks main or the default branch.
+Specify a full branch name or an absolute candidate directory and resolve again;
+candidate display strings themselves are not paths to pass as cwd. Missing
+branches/directories return both flags false and an error, with no fallback path.
+The `ambiguous` boolean is always present.
+
+Exact case-sensitive Git branch names take precedence over convenience aliases.
+When no exact branch matches, case-insensitive branch names and worktree folder
+basenames are accepted only if they identify one directory. A duplicated folder
+basename such as review requires a full branch name or absolute path. An absolute
+project directory pins that path: an accompanying branch must match its branch
+or folder alias; it never causes an implicit checkout or branch switch. Existing
+callers that relied on the former default-branch fallback must now select the
+branch explicitly. Duplicate project IDs likewise require a more specific path.
 
 `models` holds ids alone, so its entries can be passed straight to `model`; `model_details` pairs each id with the display label `agy` prints for it, in the same order, for showing a readable name. Through v2.1.0 `models` carried each `agy models` row whole, which was a tab-joined `id<TAB>label` string that `agy` does not accept as a model at all, so a client had to split it and pick a column ([#135](https://github.com/tphakala/agy-mcp/issues/135)).
 

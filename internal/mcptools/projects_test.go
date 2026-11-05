@@ -89,4 +89,47 @@ func TestProjectsToolsOverMCP(t *testing.T) {
 	if scResolve["path"] != sampleProjectDir {
 		t.Errorf("expected path=%s, got %v", sampleProjectDir, scResolve["path"])
 	}
+	if scResolve["ambiguous"] != false {
+		t.Errorf("unique resolution must return explicit ambiguous=false: %+v", scResolve)
+	}
+	resMissing, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyResolveWorkspace, Arguments: map[string]any{
+		"project": "sample-app", "branch": "missing",
+	}})
+	if err != nil || resMissing.IsError {
+		t.Fatalf("missing branch query: %+v, %v", resMissing, err)
+	}
+	out := structuredMap(t, resMissing)
+	if out["resolved"] != false || out["ambiguous"] != false || out["path"] != nil || out["branch"] != nil || out["head"] != nil || out["error"] == nil {
+		t.Fatalf("missing branch gave an unsafe fallback: %+v", out)
+	}
+}
+
+// Mutation guards: exact project IDs must consider all matches and the MCP
+// projection must retain ambiguity while withholding execution metadata.
+func TestProjectsAmbiguityOverMCP(t *testing.T) {
+	projects := t.TempDir()
+	for _, name := range []string{"one", "two"} {
+		root := t.TempDir()
+		configJSON, err := json.Marshal(map[string]any{
+			"id": "duplicate", "name": name,
+			"projectResources": map[string]any{"resources": []any{map[string]any{"folderUri": root}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projects, name+".json"), configJSON, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr := manager.New(config.Config{StateDir: t.TempDir()})
+	mgr.SetProjectDirsForTest(projects, t.TempDir())
+	res, err := connect(t, mgr, nil).CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyResolveWorkspace, Arguments: map[string]any{"project": "duplicate"}})
+	if err != nil || res.IsError {
+		t.Fatalf("ambiguous query: %+v, %v", res, err)
+	}
+	out := structuredMap(t, res)
+	candidates, ok := out["candidates"].([]any)
+	if !ok || len(candidates) != 2 || out["resolved"] != false || out["ambiguous"] != true || out["path"] != nil || out["branch"] != nil || out["head"] != nil {
+		t.Fatalf("ambiguous response exposed an execution target: %+v", out)
+	}
 }

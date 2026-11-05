@@ -141,7 +141,7 @@ func TestStatusPartialAlwaysExplicit(t *testing.T) {
 // boundary must survive clients that retain only an initial instructions slice.
 func TestInstructionsStartWithExecutionBoundary(t *testing.T) {
 	first := serverInstructions[:512]
-	for _, want := range []string{"server host", "permission checks disabled", "not confinement", "do not establish read-only", "not correctness"} {
+	for _, want := range []string{"server host", "permission checks disabled", "not confinement", "do not establish read-only", "not correctness", "include_instructions", "tool_json"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("initial instructions lost %q", want)
 		}

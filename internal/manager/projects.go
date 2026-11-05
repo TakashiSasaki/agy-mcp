@@ -29,13 +29,14 @@ type ProjectInfo struct {
 	Worktrees     []ProjectWorktree `json:"worktrees" jsonschema:"list of active linked worktrees and working branches"`
 }
 
-// ResolveWorkspaceResult represents the resolved workspace directory path and ambiguity state.
+// ResolveWorkspaceResult carries a path only for a unique selection. Resolved
+// and Ambiguous are mutually exclusive; candidates never authorize execution.
 type ResolveWorkspaceResult struct {
 	Resolved   bool     `json:"resolved"`
 	Path       string   `json:"path,omitempty"`
 	Branch     string   `json:"branch,omitempty"`
 	Head       string   `json:"head,omitempty"`
-	Ambiguous  bool     `json:"ambiguous,omitempty"`
+	Ambiguous  bool     `json:"ambiguous"`
 	Candidates []string `json:"candidates,omitempty"`
 	Error      string   `json:"error,omitempty"`
 }
@@ -340,7 +341,9 @@ func parseWorktreeListPorcelain(output, bareDir string) []ProjectWorktree {
 	return worktrees
 }
 
-// ResolveWorkspace resolves an ambiguous project name and branch to a concrete filesystem working directory.
+// ResolveWorkspace selects a unique working directory without guessing a
+// default when multiple worktrees match. An explicit directory pins the path;
+// an accompanying branch must match that directory's branch or folder alias.
 func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWorkspaceResult, error) {
 	if projectQuery == "" {
 		return ResolveWorkspaceResult{Resolved: false, Error: "project query is required"}, nil
@@ -349,15 +352,7 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 	// 1. Direct path check
 	cleanPath := filepath.Clean(projectQuery)
 	if filepath.IsAbs(cleanPath) {
-		if fi, err := os.Stat(cleanPath); err == nil && fi.IsDir() {
-			branch, head, _ := DetectGitMetadata(cleanPath)
-			return ResolveWorkspaceResult{
-				Resolved: true,
-				Path:     cleanPath,
-				Branch:   branch,
-				Head:     head,
-			}, nil
-		}
+		return resolveWorkspaceDirectory(cleanPath, branchQuery), nil
 	}
 
 	// 2. List projects and match
@@ -371,15 +366,14 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 
 	// Strategy A: Exact ID match
 	for _, p := range projects {
-		if strings.ToLower(p.ID) == pq {
-			matched = []ProjectInfo{p}
-			break
+		if strings.EqualFold(p.ID, projectQuery) {
+			matched = append(matched, p)
 		}
 	}
 	// Strategy B: Exact Name match
 	if len(matched) == 0 {
 		for _, p := range projects {
-			if strings.ToLower(p.Name) == pq {
+			if strings.EqualFold(p.Name, projectQuery) {
 				matched = append(matched, p)
 			}
 		}
@@ -387,7 +381,7 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 	// Strategy C: Exact Base folder match
 	if len(matched) == 0 {
 		for _, p := range projects {
-			if strings.ToLower(filepath.Base(p.Root)) == pq {
+			if strings.EqualFold(filepath.Base(p.Root), projectQuery) {
 				matched = append(matched, p)
 			}
 		}
@@ -421,84 +415,63 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 		}, nil
 	}
 
-	proj := matched[0]
+	return resolveProjectWorktree(matched[0], branchQuery), nil
+}
 
-	// 3. Resolve worktree within the matched project
-	if len(proj.Worktrees) == 0 {
-		// Project root itself
-		branch, head, _ := DetectGitMetadata(proj.Root)
-		return ResolveWorkspaceResult{
-			Resolved: true,
-			Path:     proj.Root,
-			Branch:   branch,
-			Head:     head,
-		}, nil
+func resolveWorkspaceDirectory(path, branchQuery string) ResolveWorkspaceResult {
+	if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
+		return ResolveWorkspaceResult{Error: fmt.Sprintf("workspace directory %q does not exist or is unavailable", path)}
 	}
+	branch, head, _ := DetectGitMetadata(path)
+	if branchQuery != "" && !strings.EqualFold(branch, branchQuery) && !strings.EqualFold(filepath.Base(path), branchQuery) {
+		return ResolveWorkspaceResult{Error: fmt.Sprintf("branch %q does not match directory %q (branch %q)", branchQuery, path, branch)}
+	}
+	return ResolveWorkspaceResult{Resolved: true, Path: path, Branch: branch, Head: head}
+}
 
+func worktreeCandidates(worktrees []ProjectWorktree) []string {
+	paths := make([]string, 0, len(worktrees))
+	for _, wt := range worktrees {
+		paths = append(paths, fmt.Sprintf("%s [%s]", wt.Path, wt.Branch))
+	}
+	return paths
+}
+
+func resolveProjectWorktree(proj ProjectInfo, branchQuery string) ResolveWorkspaceResult {
+	if len(proj.Worktrees) == 0 && branchQuery == "" {
+		return resolveWorkspaceDirectory(proj.Root, "")
+	}
+	matches := proj.Worktrees
 	if branchQuery != "" {
-		bq := strings.ToLower(branchQuery)
+		matches = nil
+		// Full, case-sensitive Git branch names outrank convenience aliases.
 		for _, wt := range proj.Worktrees {
-			if strings.ToLower(wt.Branch) == bq || strings.ToLower(filepath.Base(wt.Path)) == bq {
-				return ResolveWorkspaceResult{
-					Resolved: true,
-					Path:     wt.Path,
-					Branch:   wt.Branch,
-					Head:     wt.Head,
-				}, nil
+			if wt.Branch == branchQuery {
+				matches = append(matches, wt)
 			}
 		}
-		var availBranches []string
-		for _, wt := range proj.Worktrees {
-			availBranches = append(availBranches, fmt.Sprintf("%s (%s)", wt.Branch, wt.Path))
-		}
-		return ResolveWorkspaceResult{
-			Resolved:   false,
-			Ambiguous:  true,
-			Candidates: availBranches,
-			Error:      fmt.Sprintf("branch %q not found in project %s", branchQuery, proj.Name),
-		}, nil
-	}
-
-	// Single worktree
-	if len(proj.Worktrees) == 1 {
-		wt := proj.Worktrees[0]
-		return ResolveWorkspaceResult{
-			Resolved: true,
-			Path:     wt.Path,
-			Branch:   wt.Branch,
-			Head:     wt.Head,
-		}, nil
-	}
-
-	// Multiple worktrees: pick default branch if available
-	var defWt *ProjectWorktree
-	for i := range proj.Worktrees {
-		if proj.Worktrees[i].Branch == proj.DefaultBranch || proj.Worktrees[i].Branch == "main" {
-			defWt = &proj.Worktrees[i]
-			break
+		if len(matches) == 0 {
+			for _, wt := range proj.Worktrees {
+				if strings.EqualFold(wt.Branch, branchQuery) || strings.EqualFold(filepath.Base(wt.Path), branchQuery) {
+					matches = append(matches, wt)
+				}
+			}
 		}
 	}
-
-	var candPaths []string
-	for _, wt := range proj.Worktrees {
-		candPaths = append(candPaths, fmt.Sprintf("%s [%s]", wt.Path, wt.Branch))
+	switch len(matches) {
+	case 0:
+		return ResolveWorkspaceResult{Candidates: worktreeCandidates(proj.Worktrees),
+			Error: fmt.Sprintf("branch %q not found in project %q; choose an available branch or path", branchQuery, proj.Name)}
+	case 1:
+		wt := matches[0]
+		// Recheck existence instead of returning a path that vanished since discovery.
+		out := resolveWorkspaceDirectory(wt.Path, "")
+		if out.Resolved {
+			out.Branch, out.Head = wt.Branch, wt.Head
+		}
+		return out
+	default:
+		return ResolveWorkspaceResult{Ambiguous: true, Candidates: worktreeCandidates(matches),
+			Error: fmt.Sprintf("multiple worktrees match project %q and branch %q; specify an exact branch or absolute path", proj.Name, branchQuery)}
 	}
-
-	if defWt != nil {
-		return ResolveWorkspaceResult{
-			Resolved:   true,
-			Path:       defWt.Path,
-			Branch:     defWt.Branch,
-			Head:       defWt.Head,
-			Ambiguous:  true,
-			Candidates: candPaths,
-		}, nil
-	}
-
-	return ResolveWorkspaceResult{
-		Resolved:   false,
-		Ambiguous:  true,
-		Candidates: candPaths,
-		Error:      fmt.Sprintf("multiple worktrees found in project %q, specify a branch", proj.Name),
-	}, nil
 }
