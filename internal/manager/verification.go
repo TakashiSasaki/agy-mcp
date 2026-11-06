@@ -116,15 +116,18 @@ func xmlAttribute(attrs []xml.Attr, name string) string {
 
 func validateJUnitCounters(suite junitSuite, counts junitCounts) bool {
 	values := map[string]int{"tests": counts.tests - suite.before.tests, "failures": counts.failed - suite.before.failed, "errors": counts.errors - suite.before.errors, junitSkippedTag: counts.skipped - suite.before.skipped}
-	for name, want := range values {
-		text := xmlAttribute(suite.attributes, name)
-		if text == "" {
+	seen := make(map[string]bool)
+	for _, attr := range suite.attributes {
+		name := attr.Name.Local
+		want, known := values[name]
+		if !known {
 			continue
 		}
-		got, err := strconv.Atoi(text)
-		if err != nil || got < 0 || got != want {
+		got, err := strconv.Atoi(attr.Value)
+		if seen[name] || err != nil || got < 0 || got != want {
 			return false
 		}
+		seen[name] = true
 	}
 	return true
 }
@@ -202,6 +205,9 @@ func (p *junitParser) start(token xml.StartElement) bool {
 	}
 	switch token.Name.Local {
 	case junitSuiteTag, junitSuitesTag:
+		if p.current != nil || (p.depth > 1 && (len(p.suites) == 0 || p.depth != p.suites[len(p.suites)-1].depth+1)) {
+			p.warn("invalid_suite_nesting")
+		}
 		p.suites = append(p.suites, junitSuite{before: p.counts, attributes: token.Attr, depth: p.depth, name: token.Name.Local})
 	case "testcase":
 		if p.current != nil || len(p.suites) == 0 || p.suites[len(p.suites)-1].name != junitSuiteTag || p.depth != p.suites[len(p.suites)-1].depth+1 {

@@ -459,19 +459,35 @@ func scanEventRecords(reader *bufio.Reader, c *evidenceCursor, size int64, budge
 }
 
 func readLogBytes(f *os.File, offset, size int64, limit int, trimStart bool) (content []byte, nextStart int64, readErr error) {
+	if trimStart {
+		// Look behind the tail boundary to distinguish a split valid rune from
+		// standalone continuation bytes. Only the former should be skipped.
+		before := max(0, offset-utf8.UTFMax+1)
+		around, err := io.ReadAll(io.NewSectionReader(f, before, min(int64(2*utf8.UTFMax-1), size-before)))
+		if err != nil {
+			return nil, offset, err
+		}
+		for i := 0; i < len(around) && int64(i) < offset-before; i++ {
+			_, width := utf8.DecodeRune(around[i:])
+			if width > 1 && before+int64(i+width) > offset {
+				offset = before + int64(i+width)
+				break
+			}
+		}
+	}
 	data, err := io.ReadAll(io.NewSectionReader(f, offset, min(int64(limit+utf8.UTFMax), size-offset)))
 	if err != nil {
 		return nil, offset, err
 	}
-	if trimStart {
-		for len(data) > 0 && !utf8.RuneStart(data[0]) {
-			data = data[1:]
-			offset++
+	end := 0
+	for end < len(data) && end < limit {
+		_, width := utf8.DecodeRune(data[end:])
+		if end+width > limit {
+			break
 		}
-	}
-	end := min(limit, len(data))
-	for end < len(data) && end > 0 && !utf8.RuneStart(data[end]) {
-		end--
+		// DecodeRune consumes one byte for invalid encoding, guaranteeing
+		// progress without splitting a valid rune across pages.
+		end += width
 	}
 	return data[:end], offset, nil
 }

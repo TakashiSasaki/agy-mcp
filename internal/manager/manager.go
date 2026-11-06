@@ -485,7 +485,17 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 		if meta.IdempotencyKey != req.IdempotencyKey {
 			continue
 		}
-		if meta.Cwd != req.Cwd || !sameRequest(meta, req, args) {
+		candidate, candidateArgs := req, args
+		if meta.RequestKey == "" && req.ContinueLatest && meta.Cwd == req.Cwd {
+			// Legacy records compare CLI arguments, so they need the resolved ID.
+			// Modern request keys intentionally exclude that mutable cache value.
+			candidate, err = m.resolveConversation(req)
+			if err != nil {
+				return Job{}, false, err
+			}
+			candidateArgs = buildAgyArgs(candidate)
+		}
+		if meta.Cwd != req.Cwd || !sameRequest(meta, candidate, candidateArgs) {
 			return Job{}, false, refusedStart("idempotency_conflict", "change_request", false, fmt.Errorf("idempotency_key %q is already bound to job %s with a different normalized request", req.IdempotencyKey, id))
 		}
 		// A persisted record that never recorded a supervisor PID is a
@@ -509,13 +519,9 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 	return Job{}, false, nil
 }
 
-// normalizeRequest resolves every value that feeds the gate key, agy args,
-// request key and persisted meta (cwd, model, timeout, and continue_latest) back
-// into req, so all of them derive from one normalized request. The request key
-// deliberately ignores the conversation continue_latest resolved (see
-// requestKey). Keeping a resolved value in a
-// separate local while req stays stale risks a later read of req.Model/req.Timeout
-// silently bypassing the default fallback.
+// normalizeRequest resolves stable request values and defaults before replay
+// lookup. Mutable continue_latest resolution happens after modern replay, so
+// an unreadable conversation cache cannot hide an already-created job.
 func (m *Manager) normalizeRequest(req StartRequest) (StartRequest, error) {
 	var artifactErr error
 	req.ArtifactDirs, artifactErr = normalizeArtifactDirs(req.ArtifactDirs)
@@ -555,14 +561,6 @@ func (m *Manager) normalizeRequest(req StartRequest) (StartRequest, error) {
 	req.Model = modelID(req.Model)
 	if req.Timeout <= 0 {
 		req.Timeout = m.cfg.DefaultTimeout
-	}
-	// Resolve continue_latest to a concrete conversation id before computing the
-	// gate key and args, so serialization, the agy --conversation flag, and the
-	// returned conversation id are all deterministic and consistent.
-	if req.ContinueLatest {
-		if cid, ok := resolveLatest(m.cacheFile, req.Cwd); ok {
-			req.ConversationID = cid
-		}
 	}
 	return req, nil
 }
@@ -659,6 +657,15 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 			releaseIdem()
 		}
 	}()
+
+	// A cache read failure must never turn a continuation into fresh work.
+	// Replay above already returned any matching modern request without needing
+	// this mutable cache. Resolve before the CLI probe, gate and job creation.
+	req, err = m.resolveConversation(req)
+	if err != nil {
+		return Job{}, err
+	}
+	args = buildAgyArgs(req)
 
 	// After the replay check on purpose: a retry of a job that already exists must
 	// return it whatever its priority and the quota are now. A refusal creates

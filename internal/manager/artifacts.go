@@ -266,7 +266,7 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 		JobID:   req.JobID,
 		Root:    cleanBase,
 		Entries: entries,
-		Scope:   artifactScope(meta), Roots: roots, ExpiresAt: m.artifactExpiry(req.JobID), LimitReached: limitReached,
+		Scope:   artifactScope(meta), Roots: roots, ExpiresAt: m.artifactExpiry(meta), LimitReached: limitReached,
 	}, nil
 }
 

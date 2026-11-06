@@ -33,7 +33,7 @@ type listArtifactsOutput struct {
 	Entries      []artifactEntryOutput `json:"entries" jsonschema:"files and artifacts found matching criteria"`
 	Scope        string                `json:"scope" jsonschema:"declared when artifact_dirs were supplied, otherwise legacy_workspace; this is read authorization, not proof that the job created every file"`
 	Roots        []string              `json:"roots" jsonschema:"directories explicitly associated with this job's artifact reads"`
-	ExpiresAt    string                `json:"expires_at,omitempty" jsonschema:"GC eligibility timestamp for this completed job handle; external file retention is independent"`
+	ExpiresAt    string                `json:"expires_at,omitempty" jsonschema:"creation time plus job TTL, matching GC eligibility for a non-running job handle; absent while running or when expiry is disabled; external file retention is independent"`
 	LimitReached bool                  `json:"limit_reached" jsonschema:"the entry limit was reached; more matching files may exist"`
 }
 

@@ -25,6 +25,9 @@ func loadCache(cacheFile string) (map[string]string, error) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("parse conversation cache %s: %w", cacheFile, err)
 	}
+	if raw == nil {
+		return nil, fmt.Errorf("parse conversation cache %s: expected an object, got null", cacheFile)
+	}
 	return raw, nil
 }
 
@@ -39,16 +42,29 @@ func loadCacheRetry(cacheFile string) (map[string]string, error) {
 	return loadCache(cacheFile)
 }
 
-// resolveLatest returns the most recent conversation UUID for cwd, if any. An
-// unreadable cache resolves to not-found: continue_latest then starts a fresh
-// conversation, the documented fallback for "no prior conversation".
-func resolveLatest(cacheFile, cwd string) (string, bool) {
+// resolveLatest distinguishes an absent conversation from an unreadable cache.
+// Only absence permits continue_latest to fall back to a fresh conversation.
+func resolveLatest(cacheFile, cwd string) (id string, found bool, err error) {
 	cache, err := loadCacheRetry(cacheFile)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	id, ok := cache[cwd]
-	return id, ok && id != ""
+	return id, ok && id != "", nil
+}
+
+// Resolve mutable continuation state only for new work or legacy replay
+// comparison. Modern idempotent replays need no readable conversation cache.
+func (m *Manager) resolveConversation(req StartRequest) (StartRequest, error) {
+	if req.ContinueLatest {
+		id, _, err := resolveLatest(m.cacheFile, req.Cwd)
+		if err != nil {
+			return StartRequest{}, refusedStart("conversation_cache_unavailable", "retry_same_request", true,
+				fmt.Errorf("resolve continue_latest: %w; retry when the cache is readable or supply conversation_id explicitly", err))
+		}
+		req.ConversationID = id
+	}
+	return req, nil
 }
 
 // Note on scope: agy's conversation cache is no longer used to discover the id
