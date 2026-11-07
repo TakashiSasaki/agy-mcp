@@ -37,6 +37,13 @@ func TestAgentRuntimeInfoAuthProbeIsExplicit(t *testing.T) {
 	if info.Hostname != hostname || info.OS != runtime.GOOS || info.Architecture != runtime.GOARCH {
 		t.Fatalf("wrong server identity: %+v", info)
 	}
+	wantExecutable := "unknown"
+	if runtime.GOOS == "linux" {
+		wantExecutable = "current"
+	}
+	if info.ExecutableState != wantExecutable || info.ExecutableAdvice != "" {
+		t.Fatalf("executable identity not reported: %+v", info)
+	}
 	info, err = m.RuntimeInfo(t.Context(), true)
 	if err != nil || info.AuthStatus != "ok" || info.AuthCheckedAt != "2026-11-03T00:00:00Z" {
 		t.Fatalf("explicit model-list probe: %+v, %v", info, err)

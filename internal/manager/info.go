@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
+const executableStateUnknown = "unknown"
+
 type RuntimeInfo struct {
+	ExecutableState  string `json:"executable_state" jsonschema:"Linux snapshot comparing this process executable inode with its current filesystem path: current, replaced, missing or unknown; other platforms report unknown. current does not establish the latest release or matching client tool metadata"`
+	ExecutableAdvice string `json:"executable_advice,omitempty" jsonschema:"recovery guidance when this process executable was replaced or its path disappeared; no restart is performed"`
 	Hostname         string `json:"hostname,omitempty" jsonschema:"server host name; paths in tool arguments refer to this host, not the caller's machine; absent if unavailable"`
 	OS               string `json:"os" jsonschema:"server operating system, for interpreting server-side paths and execution capabilities"`
 	Architecture     string `json:"architecture" jsonschema:"server process architecture"`
@@ -46,6 +50,7 @@ func (m *Manager) RuntimeInfo(ctx context.Context, checkAuth bool) (RuntimeInfo,
 		JobTTL: m.cfg.JobTTL.String(), MaxConcurrency: maximum, RunningJobs: running,
 		ConcurrencyScope: "process", AgyStatus: "unavailable", AuthStatus: "not_checked",
 	}
+	out.ExecutableState, out.ExecutableAdvice = executableState()
 	out.Hostname, _ = os.Hostname()
 	_, version, ok := m.checkAgyVersion(ctx)
 	if ok {
