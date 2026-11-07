@@ -7,7 +7,41 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestReadProcessCompletionSpawnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields string
+		valid  bool
+	}{
+		{name: "explicit null", fields: `,"exit_code":null`, valid: true},
+		{name: "missing code"},
+		{name: "missing process identity", fields: `,"exit_code":127`},
+		{name: "unexpected process id", fields: `,"exit_code":null,"pid":42`},
+		{name: "unexpected start time", fields: `,"exit_code":null,"started_at":"2026-11-07T01:00:00Z"`},
+		{name: "unexpected timeout", fields: `,"exit_code":null,"timed_out":true`},
+		{name: "unexpected cancel", fields: `,"exit_code":null,"cancelled":true`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ProcessFile)
+			data := `{"source":"supervisor","ended_at":"2026-11-07T01:02:03Z"` + tc.fields + `}`
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stamp := time.Date(2026, 11, 7, 1, 2, 4, 0, time.UTC)
+			if err := os.Chtimes(path, stamp, stamp); err != nil {
+				t.Fatal(err)
+			}
+			code, got, ok := ReadProcessCompletion(dir)
+			if ok != tc.valid || (ok && (code != ExitSpawnFail || !got.Equal(stamp))) {
+				t.Fatalf("completion = (%d, %v, %t), want valid=%t with spawn failure and receipt mtime", code, got, ok, tc.valid)
+			}
+		})
+	}
+}
 
 // Mutation guards: journal byte cap, generation publication and malformed-line
 // marker. A full spool does not erase earlier evidence or accept partial data.

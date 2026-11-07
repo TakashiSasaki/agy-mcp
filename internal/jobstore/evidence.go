@@ -63,19 +63,33 @@ func ReadProcessCompletion(dir string) (int, time.Time, bool) {
 	// A supervisor receipt is a small regular file. Ignore other shapes so a
 	// damaged store cannot stall status on a named pipe or a large file.
 	const maxReceiptBytes = 4096
-	info, err := os.Lstat(filepath.Join(dir, ProcessFile))
+	path := filepath.Join(dir, ProcessFile)
+	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReceiptBytes {
 		return 0, time.Time{}, false
 	}
-	o, err := ReadProcessDir(dir)
-	if err != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() || o.ExitCode == nil {
+	// Keep the raw field so an explicit null (spawn failure) is distinguishable
+	// from an incomplete receipt with no exit_code field.
+	var o struct {
+		ProcessOutcome
+		ExitCode json.RawMessage `json:"exit_code"`
+	}
+	data, err := readReplaced(path)
+	if err != nil || json.Unmarshal(data, &o) != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() {
 		return 0, time.Time{}, false
 	}
-	if o.PID <= 0 || o.StartedAt == nil || o.StartedAt.IsZero() || *o.ExitCode < 0 ||
-		(o.TimedOut && o.Cancelled) || (*o.ExitCode == 0 && (o.TimedOut || o.Cancelled)) {
+	if string(o.ExitCode) == "null" {
+		if o.PID != 0 || o.StartedAt != nil || o.TimedOut || o.Cancelled {
+			return 0, time.Time{}, false
+		}
+		return ExitSpawnFail, info.ModTime(), true
+	}
+	var code int
+	if json.Unmarshal(o.ExitCode, &code) != nil || o.PID <= 0 || o.StartedAt == nil || o.StartedAt.IsZero() || code < 0 ||
+		(o.TimedOut && o.Cancelled) || (code == 0 && (o.TimedOut || o.Cancelled)) {
 		return 0, time.Time{}, false
 	}
-	return ExitSentinel(*o.ExitCode, o.TimedOut, o.Cancelled), info.ModTime(), true
+	return ExitSentinel(code, o.TimedOut, o.Cancelled), info.ModTime(), true
 }
 
 func WriteProcessDir(dir string, outcome ProcessOutcome) error {

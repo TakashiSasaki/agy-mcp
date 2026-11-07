@@ -68,6 +68,10 @@ func TestSupervisorSpawnFailureWrites127(t *testing.T) {
 	if got := strings.TrimSpace(string(code)); got != strconv.Itoa(jobstore.ExitSpawnFail) {
 		t.Fatalf("exit_code = %q, want %d (spawn failure)", got, jobstore.ExitSpawnFail)
 	}
+	stderr, err := os.ReadFile(jobstore.ErrPath(dir))
+	if err != nil || !strings.Contains(string(stderr), "start agy:") || !strings.Contains(string(stderr), "nonexistent-agy") {
+		t.Fatalf("job stderr did not preserve the spawn error: %q, %v", stderr, err)
+	}
 }
 
 // TestSupervisorRecordsSkippedLinesInErrFile drives a malformed agy stream

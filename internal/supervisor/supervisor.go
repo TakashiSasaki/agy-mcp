@@ -286,6 +286,7 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
+		_, _ = fmt.Fprintf(errF, "start agy: %v\n", err)
 		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: jobstore.ProcessOutcomeSource, EndedAt: time.Now().UTC()})
 		_ = jobstore.WriteExitCodeDir(jobDir, jobstore.ExitSpawnFail)
 		return err
