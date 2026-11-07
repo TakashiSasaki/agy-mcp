@@ -1,0 +1,12 @@
+1..10
+ok 1 - empty input returns total_bytes 0 and empty nonzero list
+ok 2 - ASCII input counts total and frequencies correctly
+ok 3 - binary safety: correctly handles NUL and high bytes
+ok 4 - all 256 byte values recognized with unique_bytes 256
+ok 5 - large 1MB streaming input handles multi-chunk reads and uint64 counts
+ok 6 - indented JSON output parses deterministically
+ok 7 - checked IO error: stdin directory read fails with exit status 1
+ok 8 - checked IO error: stdout write failure to /dev/full exits with 2
+ok 9 - help option prints usage and exits with code 0
+ok 10 - unrecognized option rejected with usage error and code 3
+# TAP test summary: 10/10 passed

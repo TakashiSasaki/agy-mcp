@@ -32,7 +32,7 @@ type VerificationFailure struct {
 type VerificationResult struct {
 	JobID               string                `json:"job_id" jsonschema:"job whose associated artifact was inspected"`
 	JobState            string                `json:"job_state" jsonschema:"independent job lifecycle state; does not set the verification outcome"`
-	Source              string                `json:"source" jsonschema:"junit_xml_artifact or go_test_json_artifact; this is a parsed report, not independently witnessed command execution"`
+	Source              string                `json:"source" jsonschema:"junit_xml_artifact, go_test_json_artifact or tap_artifact; this is a parsed report, not independently witnessed command execution"`
 	Scope               string                `json:"scope" jsonschema:"declared or legacy_workspace artifact read scope"`
 	Path                string                `json:"path" jsonschema:"requested report path within job-associated roots"`
 	SHA256              string                `json:"sha256" jsonschema:"SHA-256 of the exact report bytes parsed"`
@@ -72,8 +72,8 @@ func (m *Manager) VerificationReport(jobID, path, format string) (VerificationRe
 	if format == "" {
 		format = "junit"
 	}
-	if format != "junit" && format != "go_test_json" {
-		return VerificationResult{}, fmt.Errorf("format must be junit or go_test_json")
+	if format != "junit" && format != "go_test_json" && format != "tap" {
+		return VerificationResult{}, fmt.Errorf("format must be junit, go_test_json or tap")
 	}
 	meta, dir, roots, err := m.resolveJobAndRoots(jobID)
 	if err != nil {
@@ -113,6 +113,8 @@ func (m *Manager) VerificationReport(jobID, path, format string) (VerificationRe
 	var out VerificationResult
 	if format == "go_test_json" {
 		out = parseGoTestJSON(data)
+	} else if format == "tap" {
+		out = parseFlatTAP(data)
 	} else {
 		out = parseJUnit(data)
 	}
