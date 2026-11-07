@@ -621,3 +621,41 @@ allocate a line array. CRLF becomes LF and an unterminated final line gets an LF
 and reports `end_line: total_lines` (zero for an empty file). `truncated` still
 indicates the byte limit shortened the selected content. File changes detected
 during these passes fail the read; use `agy_logs` for growing files.
+
+### Include the enclosing command's exit status
+
+A child test report can pass even when a later Make recipe fails. Save the
+enclosing command's actual status alongside that invocation's report:
+
+```sh
+make_status=0
+make test > evidence/make.log 2>&1 || make_status=$?
+printf '%s\n' "$make_status" > evidence/make.exit
+```
+
+Register `evidence` in the job's `artifact_dirs`, then explicitly select both
+files when inspecting the result:
+
+```json
+{"job_id":"<job-id>","path":"poststep-go.json","format":"go_test_json","exit_code_path":"make.exit","max_failures":0}
+```
+
+For the measured Make workflow, the child Go report passed 37 tests and Make
+returned `2` after a later recipe failed. Selecting that `make.exit` changes
+`verification_outcome` to `failed`, preserves `report_outcome: "passed"`, and
+returns `command_exit` with `source: "exit_code_artifact"`, the selected path,
+the exact status `2`, and the SHA-256 of its original bytes. Testcase counts
+still describe the child report.
+
+The exit artifact must contain one signed 32-bit decimal integer with optional
+surrounding whitespace, at most 64 bytes in total. Any nonzero code prevents a
+report pass. An incomplete or malformed report remains `unknown` even when the
+selected code is zero; missing, malformed, oversized or inaccessible selected
+exit evidence is a tool error. Omitting `exit_code_path` preserves the existing
+report-only behavior and omits `report_outcome` and `command_exit`.
+
+These are caller-selected artifacts, not independently witnessed command
+execution. Associate the report and status with the same invocation, use fresh
+paths, and retain the complete command log. A job's lifecycle state and agent
+narrative never supply the exit code. Artifact hashes identify exact bytes;
+they do not establish which command created the files.

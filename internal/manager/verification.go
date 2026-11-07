@@ -30,6 +30,8 @@ type VerificationFailure struct {
 }
 
 type VerificationResult struct {
+	ReportOutcome       string                `json:"report_outcome,omitempty" jsonschema:"original parsed-report verdict when optional command exit evidence was selected"`
+	CommandExit         *CommandExitEvidence  `json:"command_exit,omitempty" jsonschema:"explicitly selected command exit evidence; does not attest which invocation produced either artifact"`
 	JobID               string                `json:"job_id" jsonschema:"job whose associated artifact was inspected"`
 	JobState            string                `json:"job_state" jsonschema:"independent job lifecycle state; does not set the verification outcome"`
 	Source              string                `json:"source" jsonschema:"junit_xml_artifact, go_test_json_artifact or tap_artifact; this is a parsed report, not independently witnessed command execution"`
@@ -37,7 +39,7 @@ type VerificationResult struct {
 	Path                string                `json:"path" jsonschema:"requested report path within job-associated roots"`
 	SHA256              string                `json:"sha256" jsonschema:"SHA-256 of the exact report bytes parsed"`
 	SizeBytes           int                   `json:"size_bytes" jsonschema:"size of the report parsed, bounded to 4 MiB"`
-	VerificationOutcome string                `json:"verification_outcome" jsonschema:"passed, failed or unknown according to the complete report; never inferred from job_state"`
+	VerificationOutcome string                `json:"verification_outcome" jsonschema:"passed, failed or unknown according to the report and optional command exit evidence; never inferred from job_state"`
 	Complete            bool                  `json:"complete" jsonschema:"report structure and terminal records or declared counters agree; empty or incomplete evidence cannot pass"`
 	Tests               int                   `json:"tests" jsonschema:"testcases observed in the parsed report"`
 	Passed              int                   `json:"passed" jsonschema:"observed testcases without failure, error or skipped markers"`
