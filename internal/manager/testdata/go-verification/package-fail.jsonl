@@ -1,0 +1,8 @@
+{"Time":"2026-11-07T05:56:34.213882319Z","Action":"start","Package":"fixture"}
+{"Time":"2026-11-07T05:56:34.219039Z","Action":"run","Package":"fixture","Test":"TestOK"}
+{"Time":"2026-11-07T05:56:34.21910896Z","Action":"output","Package":"fixture","Test":"TestOK","Output":"=== RUN   TestOK\n","OutputType":"frame"}
+{"Time":"2026-11-07T05:56:34.2191314Z","Action":"output","Package":"fixture","Test":"TestOK","Output":"--- PASS: TestOK (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-07T05:56:34.21913664Z","Action":"pass","Package":"fixture","Test":"TestOK","Elapsed":0}
+{"Time":"2026-11-07T05:56:34.21914164Z","Action":"output","Package":"fixture","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-07T05:56:34.21951644Z","Action":"output","Package":"fixture","Output":"FAIL\tfixture\t0.005s\n","OutputType":"frame"}
+{"Time":"2026-11-07T05:56:34.21954112Z","Action":"fail","Package":"fixture","Elapsed":0.006}

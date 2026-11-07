@@ -1,0 +1,52 @@
+{"Time":"2026-11-07T05:56:16.200068168Z","Action":"start","Package":"taskapi"}
+{"Time":"2026-11-07T05:56:16.214989491Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_Success"}
+{"Time":"2026-11-07T05:56:16.215028171Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_Success","Output":"=== RUN   TestCreateTask_Success\n"}
+{"Time":"2026-11-07T05:56:16.219744292Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_Success","Output":"--- PASS: TestCreateTask_Success (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.219770172Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_Success","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.219777292Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests"}
+{"Time":"2026-11-07T05:56:16.219780132Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests","Output":"=== RUN   TestCreateTask_MalformedRequests\n"}
+{"Time":"2026-11-07T05:56:16.220069212Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/malformed_JSON_syntax"}
+{"Time":"2026-11-07T05:56:16.220086732Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/malformed_JSON_syntax","Output":"=== RUN   TestCreateTask_MalformedRequests/malformed_JSON_syntax\n"}
+{"Time":"2026-11-07T05:56:16.220333012Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/malformed_JSON_syntax","Output":"--- PASS: TestCreateTask_MalformedRequests/malformed_JSON_syntax (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.220341852Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/malformed_JSON_syntax","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.220369172Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_title"}
+{"Time":"2026-11-07T05:56:16.220373852Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_title","Output":"=== RUN   TestCreateTask_MalformedRequests/empty_title\n"}
+{"Time":"2026-11-07T05:56:16.220520652Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_title","Output":"--- PASS: TestCreateTask_MalformedRequests/empty_title (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.220528452Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_title","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.220552612Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/whitespace-only_title"}
+{"Time":"2026-11-07T05:56:16.220556972Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/whitespace-only_title","Output":"=== RUN   TestCreateTask_MalformedRequests/whitespace-only_title\n"}
+{"Time":"2026-11-07T05:56:16.220703652Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/whitespace-only_title","Output":"--- PASS: TestCreateTask_MalformedRequests/whitespace-only_title (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.220711212Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/whitespace-only_title","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.220729812Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/unknown_fields_disallowed"}
+{"Time":"2026-11-07T05:56:16.220735652Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/unknown_fields_disallowed","Output":"=== RUN   TestCreateTask_MalformedRequests/unknown_fields_disallowed\n"}
+{"Time":"2026-11-07T05:56:16.220898852Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/unknown_fields_disallowed","Output":"--- PASS: TestCreateTask_MalformedRequests/unknown_fields_disallowed (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.220906052Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/unknown_fields_disallowed","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.220923652Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/trailing_JSON"}
+{"Time":"2026-11-07T05:56:16.220928012Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/trailing_JSON","Output":"=== RUN   TestCreateTask_MalformedRequests/trailing_JSON\n"}
+{"Time":"2026-11-07T05:56:16.221082452Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/trailing_JSON","Output":"--- PASS: TestCreateTask_MalformedRequests/trailing_JSON (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.221101292Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/trailing_JSON","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.221122972Z","Action":"run","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_body"}
+{"Time":"2026-11-07T05:56:16.221126372Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_body","Output":"=== RUN   TestCreateTask_MalformedRequests/empty_body\n"}
+{"Time":"2026-11-07T05:56:16.221239092Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_body","Output":"--- PASS: TestCreateTask_MalformedRequests/empty_body (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.221256092Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests/empty_body","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.221496932Z","Action":"output","Package":"taskapi","Test":"TestCreateTask_MalformedRequests","Output":"--- PASS: TestCreateTask_MalformedRequests (0.00s)\n"}
+{"Time":"2026-11-07T05:56:16.221505332Z","Action":"pass","Package":"taskapi","Test":"TestCreateTask_MalformedRequests","Elapsed":0}
+{"Time":"2026-11-07T05:56:16.221523572Z","Action":"run","Package":"taskapi","Test":"TestListTasks_EmptyAndPopulated"}
+{"Time":"2026-11-07T05:56:16.221528132Z","Action":"output","Package":"taskapi","Test":"TestListTasks_EmptyAndPopulated","Output":"=== RUN   TestListTasks_EmptyAndPopulated\n"}
+{"Time":"2026-11-07T05:56:16.228774494Z","Action":"output","Package":"taskapi","Test":"TestListTasks_EmptyAndPopulated","Output":"--- PASS: TestListTasks_EmptyAndPopulated (0.01s)\n"}
+{"Time":"2026-11-07T05:56:16.228807494Z","Action":"pass","Package":"taskapi","Test":"TestListTasks_EmptyAndPopulated","Elapsed":0.01}
+{"Time":"2026-11-07T05:56:16.228814614Z","Action":"run","Package":"taskapi","Test":"TestCompleteTask"}
+{"Time":"2026-11-07T05:56:16.228818454Z","Action":"output","Package":"taskapi","Test":"TestCompleteTask","Output":"=== RUN   TestCompleteTask\n"}
+{"Time":"2026-11-07T05:56:16.238382936Z","Action":"output","Package":"taskapi","Test":"TestCompleteTask","Output":"--- PASS: TestCompleteTask (0.01s)\n"}
+{"Time":"2026-11-07T05:56:16.238421296Z","Action":"pass","Package":"taskapi","Test":"TestCompleteTask","Elapsed":0.01}
+{"Time":"2026-11-07T05:56:16.238428376Z","Action":"run","Package":"taskapi","Test":"TestPersistenceRestart"}
+{"Time":"2026-11-07T05:56:16.238431736Z","Action":"output","Package":"taskapi","Test":"TestPersistenceRestart","Output":"=== RUN   TestPersistenceRestart\n"}
+{"Time":"2026-11-07T05:56:16.251898379Z","Action":"output","Package":"taskapi","Test":"TestPersistenceRestart","Output":"--- PASS: TestPersistenceRestart (0.01s)\n"}
+{"Time":"2026-11-07T05:56:16.251937939Z","Action":"pass","Package":"taskapi","Test":"TestPersistenceRestart","Elapsed":0.01}
+{"Time":"2026-11-07T05:56:16.251945019Z","Action":"run","Package":"taskapi","Test":"TestConcurrentOperations"}
+{"Time":"2026-11-07T05:56:16.251948139Z","Action":"output","Package":"taskapi","Test":"TestConcurrentOperations","Output":"=== RUN   TestConcurrentOperations\n"}
+{"Time":"2026-11-07T05:56:18.05370923Z","Action":"output","Package":"taskapi","Test":"TestConcurrentOperations","Output":"--- PASS: TestConcurrentOperations (1.80s)\n"}
+{"Time":"2026-11-07T05:56:18.05375927Z","Action":"pass","Package":"taskapi","Test":"TestConcurrentOperations","Elapsed":1.8}
+{"Time":"2026-11-07T05:56:18.05376591Z","Action":"output","Package":"taskapi","Output":"PASS\n"}
+{"Time":"2026-11-07T05:56:19.058916717Z","Action":"output","Package":"taskapi","Output":"ok  \ttaskapi\t2.859s\n"}
+{"Time":"2026-11-07T05:56:19.058970917Z","Action":"pass","Package":"taskapi","Elapsed":2.859}

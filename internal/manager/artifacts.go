@@ -103,6 +103,13 @@ func isSubpathOf(base, target string) bool {
 
 func resolveAllowedRoots(meta jobstore.Meta, jobDir string) []string {
 	var roots []string
+	seen := make(map[string]bool)
+	appendRoot := func(path string) {
+		if !seen[path] {
+			seen[path] = true
+			roots = append(roots, path)
+		}
+	}
 	addRoot := func(p string) {
 		if p == "" {
 			return
@@ -112,9 +119,9 @@ func resolveAllowedRoots(meta jobstore.Meta, jobDir string) []string {
 		}
 		clean := filepath.Clean(p)
 		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-			roots = append(roots, filepath.Clean(resolved))
+			appendRoot(filepath.Clean(resolved))
 		}
-		roots = append(roots, clean)
+		appendRoot(clean)
 	}
 
 	if len(meta.ArtifactDirs) > 0 {

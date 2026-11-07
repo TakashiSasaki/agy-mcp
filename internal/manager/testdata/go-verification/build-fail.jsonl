@@ -1,0 +1,6 @@
+{"ImportPath":"fixture [fixture.test]","Action":"build-output","Output":"# fixture [fixture.test]\n"}
+{"ImportPath":"fixture [fixture.test]","Action":"build-output","Output":"./fixture_test.go:3:33: undefined: undefinedSymbol\n"}
+{"ImportPath":"fixture [fixture.test]","Action":"build-fail"}
+{"Time":"2026-11-07T05:56:34.288538254Z","Action":"start","Package":"fixture"}
+{"Time":"2026-11-07T05:56:34.288606854Z","Action":"output","Package":"fixture","Output":"FAIL\tfixture [build failed]\n","OutputType":"frame"}
+{"Time":"2026-11-07T05:56:34.288622614Z","Action":"fail","Package":"fixture","Elapsed":0,"FailedBuild":"fixture [fixture.test]"}

@@ -21,9 +21,9 @@ const (
 )
 
 type VerificationFailure struct {
-	Test         string `json:"test" jsonschema:"testcase name reported in the XML"`
-	Class        string `json:"class,omitempty" jsonschema:"testcase classname reported in the XML"`
-	Kind         string `json:"kind" jsonschema:"test_failure, test_error or subprocess_timeout; the latter requires an explicit TimeoutExpired exception type"`
+	Test         string `json:"test" jsonschema:"testcase name reported in the artifact; empty for a Go package/build failure"`
+	Class        string `json:"class,omitempty" jsonschema:"JUnit testcase classname or Go package/import path"`
+	Kind         string `json:"kind" jsonschema:"test_failure, test_error, package_failure, build_failure or subprocess_timeout; the latter requires an explicit TimeoutExpired exception type"`
 	ReportedType string `json:"reported_type,omitempty" jsonschema:"failure/error type from XML, not a model diagnosis of the product"`
 	Message      string `json:"message,omitempty" jsonschema:"reported message, bounded to 2048 UTF-8 bytes"`
 	Detail       string `json:"detail,omitempty" jsonschema:"reported failure text, bounded to 2048 UTF-8 bytes; full details remain in the artifact"`
@@ -32,13 +32,13 @@ type VerificationFailure struct {
 type VerificationResult struct {
 	JobID               string                `json:"job_id" jsonschema:"job whose associated artifact was inspected"`
 	JobState            string                `json:"job_state" jsonschema:"independent job lifecycle state; does not set the verification outcome"`
-	Source              string                `json:"source" jsonschema:"junit_xml_artifact; this is a parsed report, not independently witnessed command execution"`
+	Source              string                `json:"source" jsonschema:"junit_xml_artifact or go_test_json_artifact; this is a parsed report, not independently witnessed command execution"`
 	Scope               string                `json:"scope" jsonschema:"declared or legacy_workspace artifact read scope"`
 	Path                string                `json:"path" jsonschema:"requested report path within job-associated roots"`
 	SHA256              string                `json:"sha256" jsonschema:"SHA-256 of the exact report bytes parsed"`
 	SizeBytes           int                   `json:"size_bytes" jsonschema:"size of the report parsed, bounded to 4 MiB"`
 	VerificationOutcome string                `json:"verification_outcome" jsonschema:"passed, failed or unknown according to the complete report; never inferred from job_state"`
-	Complete            bool                  `json:"complete" jsonschema:"XML is complete and declared counters agree with observed testcases; empty or incomplete evidence cannot pass"`
+	Complete            bool                  `json:"complete" jsonschema:"report structure and terminal records or declared counters agree; empty or incomplete evidence cannot pass"`
 	Tests               int                   `json:"tests" jsonschema:"testcases observed in the parsed report"`
 	Passed              int                   `json:"passed" jsonschema:"observed testcases without failure, error or skipped markers"`
 	Failed              int                   `json:"failed" jsonschema:"observed testcases with failure markers"`
@@ -46,6 +46,7 @@ type VerificationResult struct {
 	Skipped             int                   `json:"skipped" jsonschema:"observed skipped testcases"`
 	Failures            []VerificationFailure `json:"failures" jsonschema:"up to 100 reported failure/error details"`
 	FailuresTruncated   bool                  `json:"failures_truncated" jsonschema:"more details exist in the report than were included here"`
+	PackageFailures     int                   `json:"package_failures,omitempty" jsonschema:"Go package or build failures, separate from testcase counts; zero for JUnit reports"`
 	Warnings            []string              `json:"warnings" jsonschema:"missing, malformed or inconsistent evidence; prevents a pass verdict"`
 }
 
@@ -61,7 +62,19 @@ type junitCase struct {
 	failed, errored, skipped bool
 }
 
+// Verification preserves the original JUnit-only manager entry point.
 func (m *Manager) Verification(jobID, path string) (VerificationResult, error) {
+	return m.VerificationReport(jobID, path, "junit")
+}
+
+// VerificationReport parses an explicit format without guessing from filenames.
+func (m *Manager) VerificationReport(jobID, path, format string) (VerificationResult, error) {
+	if format == "" {
+		format = "junit"
+	}
+	if format != "junit" && format != "go_test_json" {
+		return VerificationResult{}, fmt.Errorf("format must be junit or go_test_json")
+	}
 	meta, dir, roots, err := m.resolveJobAndRoots(jobID)
 	if err != nil {
 		return VerificationResult{}, err
@@ -97,7 +110,12 @@ func (m *Manager) Verification(jobID, path string) (VerificationResult, error) {
 	if err != nil {
 		return VerificationResult{}, err
 	}
-	out := parseJUnit(data)
+	var out VerificationResult
+	if format == "go_test_json" {
+		out = parseGoTestJSON(data)
+	} else {
+		out = parseJUnit(data)
+	}
 	out.JobID, out.JobState, out.Scope, out.Path = jobID, st.State, artifactScope(meta), path
 	digest := sha256.Sum256(data)
 	out.SHA256 = hex.EncodeToString(digest[:])
@@ -210,7 +228,10 @@ func (p *junitParser) start(token xml.StartElement) bool {
 		}
 		p.suites = append(p.suites, junitSuite{before: p.counts, attributes: token.Attr, depth: p.depth, name: token.Name.Local})
 	case "testcase":
-		if p.current != nil || len(p.suites) == 0 || p.suites[len(p.suites)-1].name != junitSuiteTag || p.depth != p.suites[len(p.suites)-1].depth+1 {
+		// MEASURED against Node.js v24.22.2: its built-in JUnit reporter writes
+		// top-level testcases directly under the root testsuites element.
+		rootCases := len(p.suites) == 1 && p.suites[0].name == junitSuitesTag && p.suites[0].depth == 1
+		if p.current != nil || len(p.suites) == 0 || (!rootCases && p.suites[len(p.suites)-1].name != junitSuiteTag) || p.depth != p.suites[len(p.suites)-1].depth+1 {
 			p.warn("invalid_testcase_nesting")
 		}
 		p.current = &junitCase{name: xmlAttribute(token.Attr, "name"), class: xmlAttribute(token.Attr, "classname")}

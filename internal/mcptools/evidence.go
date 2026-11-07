@@ -33,9 +33,10 @@ type logsInput struct {
 }
 
 type verificationInput struct {
+	Format      string `json:"format,omitempty" jsonschema:"report format: junit (default) or go_test_json for unmodified go test -json output; no filename guessing"`
 	MaxFailures *int   `json:"max_failures,omitempty" jsonschema:"maximum failure details to return (0 to 100, default 100); zero returns counts and outcome only; the complete report is always parsed"`
 	JobID       string `json:"job_id" jsonschema:"job whose explicitly selected verification report to inspect"`
-	Path        string `json:"path" jsonschema:"JUnit XML report within the job's associated artifact roots; maximum 4 MiB"`
+	Path        string `json:"path" jsonschema:"JUnit XML or Go test JSON report within the job's associated artifact roots; maximum 4 MiB"`
 }
 
 // SDK v1.8.0 applySchema re-marshals object outputs through float64 while
@@ -94,13 +95,13 @@ func registerEvidence(s *toolServer, mgr *manager.Manager) {
 		return nil, out, err
 	})
 	addEvidenceTool(s, &mcp.Tool{
-		Name: toolAgyVerification, Title: "Inspect JUnit verification evidence", Annotations: annReadLocal,
-		Description: "Parse an explicitly selected JUnit XML artifact into a verification outcome without an agent turn. Job state is independent: a done job can have a failed or unknown report. Malformed/truncated reports, invalid suite nesting, empty or duplicate counters, counter disagreements and reports with no executed testcases cannot pass. An explicit TimeoutExpired error type is classified as a subprocess timeout, not as proof of a product defect. SHA-256 identifies the exact report bytes. max_failures (0 to 100, default 100) bounds returned failure details; zero returns a summary while preserving complete-report validation. This reads report evidence and does not independently attest that commands ran or that the file was created by this job. Use agy_list_artifacts and agy_read_artifact to inspect provenance and full details, and agy_events for CLI/process outcomes.",
+		Name: toolAgyVerification, Title: "Inspect test verification evidence", Annotations: annReadLocal,
+		Description: "Parse an explicitly selected JUnit XML (format junit, the default) or go test -json (format go_test_json) artifact into a verification outcome without an agent turn. Job state is independent: a done job can have a failed or unknown report. Malformed/truncated reports, invalid suite nesting, empty or duplicate counters, counter disagreements and reports with no executed testcases cannot pass. Go JSON requires terminal records for every observed package and testcase; package/build failures cannot pass, and malformed, truncated or unsupported records return unknown. Native Node.js JUnit testcases under testsuites are accepted. An explicit TimeoutExpired error type is classified as a subprocess timeout, not as proof of a product defect. SHA-256 identifies the exact report bytes. max_failures (0 to 100, default 100) bounds returned failure details; zero returns a summary while preserving complete-report validation. This reads report evidence and does not independently attest that commands ran or that the file was created by this job. Use agy_list_artifacts and agy_read_artifact to inspect provenance and full details, and agy_events for CLI/process outcomes.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in verificationInput) (*mcp.CallToolResult, manager.VerificationResult, error) {
 		if in.MaxFailures != nil && (*in.MaxFailures < 0 || *in.MaxFailures > 100) {
 			return nil, manager.VerificationResult{}, fmt.Errorf("max_failures must be between 0 and 100")
 		}
-		out, err := mgr.Verification(in.JobID, in.Path)
+		out, err := mgr.VerificationReport(in.JobID, in.Path, in.Format)
 		if in.MaxFailures != nil && len(out.Failures) > *in.MaxFailures {
 			out.Failures = out.Failures[:*in.MaxFailures]
 			out.FailuresTruncated = true
