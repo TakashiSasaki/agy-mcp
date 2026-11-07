@@ -468,9 +468,9 @@ func (m *Manager) conversationLive(convID string) (bool, error) {
 
 // findIdempotentJob returns the existing job bound to req.IdempotencyKey. The
 // key is an at-most-once creation token, not an agy argument: request identity is
-// the normalized cwd plus the request itself (see sameRequest). Any
-// unreadable job makes the lookup fail closed because it could be the binding
-// this retry needs to find.
+// the normalized cwd plus the request itself (see sameRequest). An unreadable
+// record prevents starting new work because it might hold the binding. A
+// readable matching job can still be replayed without starting anything.
 func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool, error) {
 	if req.IdempotencyKey == "" {
 		return Job{}, false, nil
@@ -479,10 +479,14 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 	if err != nil {
 		return Job{}, false, fmt.Errorf("scan jobs for idempotency_key %q: %w", req.IdempotencyKey, err)
 	}
+	var scanErr error
 	for _, id := range ids {
 		meta, err := m.store.Load(id)
 		if err != nil {
-			return Job{}, false, fmt.Errorf("read job %s while resolving idempotency_key %q: %w", id, req.IdempotencyKey, err)
+			if scanErr == nil {
+				scanErr = fmt.Errorf("read job %s while resolving idempotency_key %q: %w", id, req.IdempotencyKey, err)
+			}
+			continue
 		}
 		if meta.IdempotencyKey != req.IdempotencyKey {
 			continue
@@ -518,7 +522,7 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 		}
 		return Job{ID: id, ConversationID: st.ConversationID, State: st.State}, true, nil
 	}
-	return Job{}, false, nil
+	return Job{}, false, scanErr
 }
 
 // normalizeRequest resolves stable request values and defaults before replay

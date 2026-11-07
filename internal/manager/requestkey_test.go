@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -9,6 +10,55 @@ import (
 
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
 )
+
+func TestFindIdempotentJobWithUnreadableEarlierRecord(t *testing.T) {
+	m := newManager(t, managerOpts{})
+	req := StartRequest{Prompt: "review", Cwd: t.TempDir(), IdempotencyKey: "retained", Timeout: time.Minute}
+	dir := createJob(t, m, "a-damaged")
+	if err := os.WriteFile(jobstore.MetaPath(dir), []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.store.Create(jobstore.Meta{
+		ID: "b-retained", PID: 1, Cwd: req.Cwd, IdempotencyKey: req.IdempotencyKey, RequestKey: requestKey(req),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.WriteExitCode("b-retained", jobstore.ExitTimeout); err != nil {
+		t.Fatal(err)
+	}
+	prepared := req
+	prepared.IdempotencyKey = "prepared"
+	if _, err := m.store.Create(jobstore.Meta{
+		ID: "c-prepared", Cwd: prepared.Cwd, IdempotencyKey: prepared.IdempotencyKey, RequestKey: requestKey(prepared),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("replay a readable admitted job", func(t *testing.T) {
+		job, found, err := m.findIdempotentJob(req, buildAgyArgs(req))
+		if err != nil || !found || job.ID != "b-retained" || job.State != StateFailed {
+			t.Fatalf("replay = %+v, %t, %v; want b-retained in failed state", job, found, err)
+		}
+	})
+	t.Run("preserve a readable conflict", func(t *testing.T) {
+		changed := req
+		changed.Prompt = "another task"
+		_, found, err := m.findIdempotentJob(changed, buildAgyArgs(changed))
+		if found || err == nil || !strings.Contains(err.Error(), "different normalized request") {
+			t.Fatalf("conflicting replay = %t, %v; want idempotency conflict", found, err)
+		}
+	})
+	t.Run("refuse new work if a binding might be unreadable", func(t *testing.T) {
+		unknown := req
+		unknown.IdempotencyKey = "unknown"
+		for _, request := range []StartRequest{unknown, prepared} {
+			_, found, err := m.findIdempotentJob(request, buildAgyArgs(request))
+			if found || err == nil || !strings.Contains(err.Error(), "read job a-damaged") {
+				t.Errorf("key %q lookup = %t, %v; want unreadable metadata error", request.IdempotencyKey, found, err)
+			}
+		}
+	})
+}
 
 // TestRequestKeyCoversEveryRequestField walks StartRequest by reflection, so a
 // field added later that requestKey forgets to hash fails here instead of
