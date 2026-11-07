@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"time"
@@ -19,10 +21,33 @@ type processCleanup interface {
 	reap() error
 }
 
+// awaitAdmission waits for the manager to close its side of the launch pipe.
+// The same EOF is delivered if the manager dies. In either case only a job
+// whose supervisor PID was published can execute.
+func awaitAdmission(jobDir string, gate io.Reader) error {
+	var b [1]byte
+	if n, err := gate.Read(b[:]); n != 0 || err != io.EOF {
+		return errors.New("supervisor admission pipe did not close cleanly")
+	}
+	meta, err := jobstore.LoadDir(jobDir)
+	if err != nil {
+		return err
+	}
+	if meta.PID != os.Getpid() {
+		return fmt.Errorf("supervisor PID was not published for job %s", meta.ID)
+	}
+	return nil
+}
+
 // RunProcess is the run-job process entrypoint. On Linux it adopts orphaned
 // descendants so cancellation can reach children that created new sessions.
 // Run remains available to in-process callers without process-wide adoption.
-func RunProcess(jobDir string) error {
+func RunProcess(jobDir string, gate io.Reader) error {
+	if gate != nil {
+		if err := awaitAdmission(jobDir, gate); err != nil {
+			return err
+		}
+	}
 	return runProcess(jobDir, newProcessCleanup)
 }
 

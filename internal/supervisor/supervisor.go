@@ -57,7 +57,7 @@ const (
 // knows how to decode, appending the flag when the job's persisted args lack it.
 //
 // This is the guard for an in-place binary upgrade. The supervisor is the same
-// agy-mcp binary re-executed as `agy-mcp run-job <dir>`, so replacing the binary
+// agy-mcp binary re-executed with the private run-job subcommand, so replacing the binary
 // while a server is live pairs an OLD manager with a NEW supervisor: the manager
 // writes args with no --output-format, agy prints plain text, and every line
 // fails to decode, leaving an empty result the manager reports as a clean, empty

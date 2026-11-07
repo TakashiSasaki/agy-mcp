@@ -585,7 +585,7 @@ agy-mcp -http 127.0.0.1:8765 -http-token "$(openssl rand -hex 32)"
 
 v2 requires agy 1.1.15 and drives it through `--output-format stream-json`. The upgrade is safe to do in place, but two things are worth knowing.
 
-**Stop the server before replacing the binary.** The supervisor is the same `agy-mcp` binary re-executed as `agy-mcp run-job <dir>`, so replacing it under a live v1 server pairs an old manager with a new supervisor. The supervisor detects that case and asks agy for the event stream anyway, so no result is lost, but a v1 manager and a v2 process sharing one `AGY_MCP_STATE_DIR` briefly disagree about cross-process locking, and a v1 run's conversation id can be misattributed in that window.
+**Stop the server before replacing the binary.** The supervisor is the same `agy-mcp` binary re-executed as a private `run-job` subprocess, so replacing it under a live v1 server pairs an old manager with a new supervisor. The supervisor detects that case and asks agy for the event stream anyway, so no result is lost, but a v1 manager and a v2 process sharing one `AGY_MCP_STATE_DIR` briefly disagree about cross-process locking, and a v1 run's conversation id can be misattributed in that window.
 
 **Jobs already in the state directory keep working.** A job dir written by v1 loads cleanly (the two removed `meta.json` fields are simply ignored) and its result is still reported in full. Two degradations apply until those jobs age out of the 24h TTL:
 

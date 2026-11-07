@@ -783,23 +783,17 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		return Job{}, fmt.Errorf("create job store entry: %w", err)
 	}
 
-	cmd := exec.Command(m.cfg.SupervisorExe, "run-job", dir)
+	cmd := exec.Command(m.cfg.SupervisorExe, "run-job", dir, "--await-admission")
 	cmd.Env = os.Environ()
-	// Detach stdio: supervisor must not inherit the manager's stdout (the
-	// JSON-RPC stream in stdio mode).
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	// StartDetached puts the supervisor in its own group/job and starts it detached
-	// so it survives the manager's death (init adoption on Linux; a non-kill-on-close
-	// Job Object on Windows).
-	if err := proc.StartDetached(cmd); err != nil {
-		// No supervisor was spawned, so the just-created job dir is a never-started
-		// orphan; remove it now rather than leaving it for a later GarbageCollect.
+	admission, err := startSupervisor(cmd)
+	if err != nil {
+		// No supervisor was spawned. Remove the unstarted job now.
 		_ = m.store.Remove(id)
 		m.releaseKey(key)
-		return Job{}, fmt.Errorf("spawn supervisor: %w", err)
+		return Job{}, err
 	}
+	// Release after the PID rewrite, before releasing the idempotency claim.
+	defer func() { _ = admission.Close() }()
 	// Capture a handle to the supervisor's process tree so the record-pid failure
 	// path below can terminate it (and any agy it already spawned) as a unit.
 	// killOnClose=false: closing the handle on manager exit must NOT kill the tree,
@@ -869,6 +863,26 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	// is AwaitConversationID's job, paid only by the caller that reports the id in
 	// its own response.
 	return Job{ID: id, ConversationID: req.ConversationID, State: StateRunning}, nil
+}
+
+// startSupervisor starts the detached child with a private admission pipe on
+// stdin. It must see EOF and find its PID in meta before starting agy. If the
+// manager dies, the kernel closes its writer and the same check applies.
+// The detached child can continue after manager exit, with init adoption on
+// Linux or a non-kill-on-close job on Windows.
+func startSupervisor(cmd *exec.Cmd) (*os.File, error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create supervisor admission pipe: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+	cmd.Stdin = reader
+	// Leave stdout and stderr detached from the manager's MCP stream.
+	if err := proc.StartDetached(cmd); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("spawn supervisor: %w", err)
+	}
+	return writer, nil
 }
 
 // abortSpawn tears down a supervisor that was started but cannot be recorded as

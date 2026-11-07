@@ -31,11 +31,16 @@ func main() {
 	log.SetPrefix("agy-mcp: ")
 
 	if len(os.Args) >= 2 && os.Args[1] == "run-job" {
-		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "usage: agy-mcp run-job <jobDir>")
+		admitted := len(os.Args) == 4 && os.Args[3] == "--await-admission"
+		if len(os.Args) != 3 && !admitted {
+			fmt.Fprintln(os.Stderr, "usage: agy-mcp run-job <jobDir> [--await-admission]")
 			os.Exit(2)
 		}
-		if err := supervisor.RunProcess(os.Args[2]); err != nil {
+		var gate io.Reader
+		if admitted {
+			gate = os.Stdin
+		}
+		if err := supervisor.RunProcess(os.Args[2], gate); err != nil {
 			fmt.Fprintf(os.Stderr, "run-job: %v\n", err)
 			os.Exit(1)
 		}

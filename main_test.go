@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,6 +102,65 @@ func TestRunJobSubcommandEndToEnd(t *testing.T) {
 	out, _ := os.ReadFile(jobstore.OutPath(jobDir))
 	if strings.TrimSpace(string(out)) != "E2E OK" {
 		t.Fatalf("out = %q", out)
+	}
+}
+
+// Use the real supervisor command with a private pipe, as StartJob does.
+func TestRunJobAdmission(t *testing.T) {
+	bin, err := buildBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, published := range []bool{false, true} {
+		t.Run(fmt.Sprintf("published=%t", published), func(t *testing.T) {
+			dir := t.TempDir()
+			store := jobstore.New(dir)
+			// A published supervisor should proceed as far as trying this
+			// missing executable. An unpublished one must not write job output.
+			meta := jobstore.Meta{ID: "admission", AgyPath: filepath.Join(dir, "absent-agy"), Cwd: dir}
+			jobDir, err := store.Create(meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = r.Close(); _ = w.Close() }()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, bin, "run-job", jobDir, "--await-admission")
+			cmd.Stdin = r
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if cmd.ProcessState == nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+				}
+			}()
+			if published {
+				meta.PID = cmd.Process.Pid
+				if err := store.UpdateMeta(meta); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); err == nil || ctx.Err() != nil {
+				t.Fatalf("want a supervisor failure before the deadline, got %v (context %v)", err, ctx.Err())
+			}
+			code, present := store.ExitCode(meta.ID)
+			if published {
+				if !present || code != jobstore.ExitSpawnFail {
+					t.Fatalf("published job did not attempt to spawn agy: code=%d present=%t", code, present)
+				}
+			} else if _, err := os.Stat(jobstore.OutPath(jobDir)); present || !os.IsNotExist(err) {
+				t.Fatalf("unpublished job wrote evidence: code=%d present=%t stat=%v", code, present, err)
+			}
+		})
 	}
 }
 
