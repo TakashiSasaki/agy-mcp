@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -304,60 +305,23 @@ func (m *Manager) ReadArtifact(req ReadArtifactRequest) (ReadArtifactResult, err
 	if err != nil {
 		return ReadArtifactResult{}, err
 	}
-	fullHash, err := fileSHA256(f)
+	fullHash, totalLines, err := hashArtifactLines(f)
 	if err != nil {
-		return ReadArtifactResult{}, fmt.Errorf("hash artifact: %w", err)
+		return ReadArtifactResult{}, fmt.Errorf("hash and count artifact: %w", err)
 	}
-	p := req.Path
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	// Buffer up to 1MB per line
-	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if scanErr := scanner.Err(); scanErr != nil && !errors.Is(scanErr, io.EOF) {
-		return ReadArtifactResult{}, fmt.Errorf("scan lines: %w", scanErr)
-	}
-
-	totalLines := len(lines)
-	startLine := req.StartLine
-	endLine := req.EndLine
-
+	startLine, endLine := req.StartLine, req.EndLine
 	if req.TailLines > 0 {
-		startLine = totalLines - req.TailLines + 1
-		if startLine < 1 {
-			startLine = 1
-		}
+		startLine = max(1, totalLines-req.TailLines+1)
 		endLine = totalLines
 	} else {
-		if startLine < 1 {
-			startLine = 1
-		}
+		startLine = max(1, startLine)
 		if endLine <= 0 || endLine > totalLines {
 			endLine = totalLines
 		}
-		if startLine > totalLines && totalLines > 0 {
-			startLine = totalLines
-		}
 	}
-
-	var selected []string
-	if totalLines > 0 && startLine <= endLine && startLine <= totalLines {
-		selected = lines[startLine-1 : endLine]
-	}
-
-	content := strings.Join(selected, "\n")
-	if len(selected) > 0 && totalLines > 0 {
-		content += "\n"
-	}
-
-	truncated := false
-	if len(content) > maxBytes {
-		truncated = true
-		content = truncateUTF8(content, maxBytes)
+	content, truncated, err := readArtifactLines(f, startLine, endLine, maxBytes)
+	if err != nil {
+		return ReadArtifactResult{}, fmt.Errorf("read artifact lines: %w", err)
 	}
 
 	after, statErr := f.Stat()
@@ -369,7 +333,7 @@ func (m *Manager) ReadArtifact(req ReadArtifactRequest) (ReadArtifactResult, err
 	}
 	return ReadArtifactResult{
 		JobID:      req.JobID,
-		Path:       p,
+		Path:       req.Path,
 		SizeBytes:  info.Size(),
 		SHA256:     fullHash,
 		TotalLines: totalLines,
@@ -378,6 +342,89 @@ func (m *Manager) ReadArtifact(req ReadArtifactRequest) (ReadArtifactResult, err
 		Truncated:  truncated,
 		Content:    content,
 	}, nil
+}
+
+// hashArtifactLines scans fixed-size chunks, including arbitrarily long lines.
+// It preserves Scanner's line count, including an unterminated final line.
+func hashArtifactLines(f *os.File) (digest string, totalLines int, err error) {
+	h := sha256.New()
+	buffer := make([]byte, 64*1024)
+	lines, last := 0, byte(0)
+	seenData := false
+	for {
+		n, err := f.Read(buffer)
+		if n > 0 {
+			_, _ = h.Write(buffer[:n])
+			lines += bytes.Count(buffer[:n], []byte{'\n'})
+			seenData = true
+			last = buffer[n-1]
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", 0, err
+		}
+	}
+	if seenData && last != '\n' {
+		lines++
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), lines, nil
+}
+
+// readArtifactLines retains only a bounded prefix, independent of file size or
+// the requested tail length. A pending CR preserves Scanner's CRLF semantics
+// even when CR and LF fall in different reader chunks.
+func readArtifactLines(f *os.File, startLine, endLine, maxBytes int) (content string, truncated bool, err error) {
+	if startLine > endLine {
+		return "", false, nil
+	}
+	reader := bufio.NewReaderSize(f, 64*1024)
+	prefix := make([]byte, 0, maxBytes+utf8.UTFMax)
+	length, line := 0, 1
+	pendingCR := false
+	appendText := func(part []byte) {
+		length = min(maxBytes+1, length+len(part))
+		remaining := maxBytes + utf8.UTFMax - len(prefix)
+		prefix = append(prefix, part[:min(len(part), remaining)]...)
+	}
+	for line <= endLine {
+		part, err := reader.ReadSlice('\n')
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
+			return "", false, err
+		}
+		ended := !errors.Is(err, bufio.ErrBufferFull)
+		if line >= startLine {
+			if ended {
+				part = bytes.TrimSuffix(part, []byte{'\n'})
+			}
+			if pendingCR && (len(part) > 0 || !ended) {
+				appendText([]byte{'\r'})
+			}
+			pendingCR = false
+			if bytes.HasSuffix(part, []byte{'\r'}) {
+				part = part[:len(part)-1]
+				pendingCR = !ended
+			}
+			appendText(part)
+			if ended {
+				appendText([]byte{'\n'})
+			}
+			if len(prefix) == maxBytes+utf8.UTFMax {
+				return truncateUTF8(string(prefix), maxBytes), true, nil
+			}
+		}
+		if ended {
+			line++
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	return truncateUTF8(string(prefix), maxBytes), length > maxBytes, nil
 }
 
 func truncateUTF8(s string, limit int) string {

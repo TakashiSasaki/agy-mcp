@@ -590,3 +590,14 @@ MCP and application access policies are configured separately.
 `deploy/icons.caddy` provides the `agy_mcp_icons` snippet. Import its
 file and then invoke the snippet with the absolute `web/` directory inside the
 existing site block. Preserve the existing MCP and application access rules.
+
+### Bounded artifact line reads
+
+`agy_read_artifact` hashes and counts the full stable file in fixed-size chunks,
+then retains only the requested byte-bounded selection. A long earlier line does
+not prevent reading a short final diagnostic, and large tail counts do not
+allocate a line array. CRLF becomes LF and an unterminated final line gets an LF.
+`start_line` beyond EOF returns empty content, retains the requested start index,
+and reports `end_line: total_lines` (zero for an empty file). `truncated` still
+indicates the byte limit shortened the selected content. File changes detected
+during these passes fail the read; use `agy_logs` for growing files.

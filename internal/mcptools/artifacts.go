@@ -40,7 +40,7 @@ type listArtifactsOutput struct {
 type readArtifactInput struct {
 	JobID     string `json:"job_id" jsonschema:"handle of the job whose artifact to read (from agy_run or agy_run_sync)"`
 	Path      string `json:"path" jsonschema:"file within artifact_dirs and job state directory; without artifact_dirs the legacy workspace/add-dir scope applies"`
-	StartLine int    `json:"start_line,omitempty" jsonschema:"1-based line number to start reading from (default 1)"`
+	StartLine int    `json:"start_line,omitempty" jsonschema:"1-based line number to start reading from (default 1); beyond EOF returns empty content without clamping"`
 	EndLine   int    `json:"end_line,omitempty" jsonschema:"1-based line number to end reading at, inclusive (0 = read to end or max_bytes)"`
 	TailLines int    `json:"tail_lines,omitempty" jsonschema:"if greater than 0, reads the trailing N lines of the file (useful for logs)"`
 	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum content bytes to return (default 64 KiB, max 256 KiB)"`
@@ -52,8 +52,8 @@ type readArtifactOutput struct {
 	SizeBytes  int64  `json:"size_bytes" jsonschema:"total file size in bytes on disk"`
 	SHA256     string `json:"sha256" jsonschema:"hex-encoded SHA-256 digest of the complete file on disk for evidence verification"`
 	TotalLines int    `json:"total_lines" jsonschema:"total line count of the file"`
-	StartLine  int    `json:"start_line" jsonschema:"1-based start line of the returned slice"`
-	EndLine    int    `json:"end_line" jsonschema:"1-based end line of the returned slice"`
+	StartLine  int    `json:"start_line" jsonschema:"normalized requested start line; may exceed end_line for an empty range"`
+	EndLine    int    `json:"end_line" jsonschema:"selected end line capped at total_lines; zero for an empty file; content may be byte-truncated"`
 	Truncated  bool   `json:"truncated" jsonschema:"true if content was truncated by max_bytes limit"`
 	Content    string `json:"content" jsonschema:"text content of the requested line range or tail"`
 }
@@ -63,7 +63,7 @@ func registerArtifacts(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyListArtifacts,
 		Title:       "List job artifacts and logs",
 		Annotations: annReadLocal,
-		Description: "Discover evidence files associated with an agy job without another model turn. When artifact_dirs were provided at creation, reads use those explicit directories and the job state directory; otherwise legacy workspace/add-dir roots apply. scope and roots make this distinction explicit. Association authorizes reading and does not prove the job created a file. Inner symlink escapes are rejected. Common dependency/cache directories are skipped. SHA-256 is omitted when a file exceeds 32 MiB or cannot be hashed. expires_at is job-handle GC eligibility, not a guarantee about external file retention. Pair with agy_read_artifact for stable-file line ranges, agy_logs for live tails and byte cursors, and agy_verification for JUnit or native Go test JSON reports. agy_status reports job lifecycle only.",
+		Description: "Discover evidence files associated with an agy job without another model turn. When artifact_dirs were provided at creation, reads use those explicit directories and the job state directory; otherwise legacy workspace/add-dir roots apply. scope and roots make this distinction explicit. Association authorizes reading and does not prove the job created a file. Inner symlink escapes are rejected. Common dependency/cache directories are skipped. SHA-256 is omitted when a file exceeds 32 MiB or cannot be hashed. expires_at is job-handle GC eligibility, not a guarantee about external file retention. Pair with agy_read_artifact for stable-file line ranges, agy_logs for live tails and byte cursors, and agy_verification for JUnit, native Go test JSON or restricted flat TAP reports. agy_status reports job lifecycle only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listArtifactsInput) (*mcp.CallToolResult, listArtifactsOutput, error) {
 		res, err := mgr.ListArtifacts(manager.ListArtifactsRequest{
 			JobID:      in.JobID,
@@ -96,7 +96,7 @@ func registerArtifacts(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyReadArtifact,
 		Title:       "Read job artifact or log file",
 		Annotations: annReadLocal,
-		Description: "Read stable evidence files with line ranges and byte limits without a model turn. artifact_dirs restrict reads to explicit job-associated directories plus job state; older/default jobs retain the legacy workspace/add-dir scope. Path traversal and inner symlink escapes are rejected using directory handles. Hashing and content use the same opened file; a detected file change fails the read instead of presenting inconsistent evidence. The full file is scanned for SHA-256 and line counts. Use agy_logs with stream artifact for bounded live byte reads, agy_verification to parse a selected JUnit or native Go test JSON report, agy_list_artifacts for discovery, or agy_status for lifecycle state.",
+		Description: "Read stable evidence files with line ranges and byte limits without a model turn. artifact_dirs restrict reads to explicit job-associated directories plus job state; older/default jobs retain the legacy workspace/add-dir scope. Path traversal and inner symlink escapes are rejected using directory handles. Hashing and content use the same opened file; a detected file change fails the read instead of presenting inconsistent evidence. The full file is scanned for SHA-256 and line counts using fixed memory, then the selected range is read with bounded buffering. Long lines have no fixed size limit. CRLF is normalized and an unterminated final line gets a newline. A start_line beyond EOF returns empty content with the requested start_line and end_line equal to total_lines. Use agy_logs with stream artifact for bounded live byte reads, agy_verification to parse a selected JUnit, native Go test JSON or restricted flat TAP report, agy_list_artifacts for discovery, or agy_status for lifecycle state.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in readArtifactInput) (*mcp.CallToolResult, readArtifactOutput, error) {
 		res, err := mgr.ReadArtifact(manager.ReadArtifactRequest{
 			JobID:     in.JobID,
