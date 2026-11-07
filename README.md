@@ -16,6 +16,8 @@ An MCP (Model Context Protocol) server that wraps the [Antigravity CLI](https://
 
 > Status: feature complete (stdio and HTTP transports, async and sync job lifecycle, model and session discovery, per-run controls and structured output, cross-platform builds) and verified against a live agy, with 1.1.15 the minimum supported version.
 
+To build this fork and connect it to ChatGPT from a new Linux host, follow the [self-hosting guide](docs/self-hosting.md). It covers installation, the systemd service, validation, updates and job recovery.
+
 ## Why
 
 Driving `agy` from a shell for automation has two recurring problems:
@@ -150,10 +152,6 @@ go build -trimpath \
 
 To verify a change before using the binary, run `go vet ./...` and `go test ./...` (see [AGENTS.md](AGENTS.md) for the full list including lint).
 
-### Request diagnostics and cached tool definitions
-
-SIGTERM and SIGINT stop the stdio server successfully, without reporting context cancellation as a server failure.
-
 ### Linux job cleanup and systemd tunnel restarts
 
 The dedicated `run-job` process initializes Linux child-subreaper adoption and verifies pidfd signaling before starting AGY. This requires kernel support and permissions for `PR_SET_CHILD_SUBREAPER`, `pidfd_open`, and `pidfd_send_signal` (normally Linux 5.3 or newer), plus readable `/proc` process identities. Initialization failure records `spawn_failed` with the diagnostic in the job stderr artifact and starts no AGY turn. The long-lived manager is not made a subreaper.
@@ -164,6 +162,9 @@ A service restart can still kill the supervisor itself. [systemd's kill policy](
 
 For the specific deployment where a tunnel hosts these independently supervised jobs, [deploy/agy-tunnel-job-lifecycle.conf](deploy/agy-tunnel-job-lifecycle.conf) is an opt-in instance drop-in for `tunnel-client@agy.service`. It changes only `KillMode=process`; do not install it in the shared tunnel template or unrelated services. This intentionally lets bounded job supervisors outlive the tunnel service. systemd discourages process mode generally because descendants can outlive the unit, so it is not a generic safer default. After deployment, verify that the old tunnel and MCP server exit, exactly one new tunnel owns the profile, live jobs retain their identities and continue, and cancellation/timeouts still clean up their workload processes. Preserve credentials, tunnel ID and profile. Stop/cancel jobs explicitly when stopping their work is intended; do not infer job cancellation from stopping the tunnel.
 
+### Request diagnostics and cached tool definitions
+
+SIGTERM and SIGINT stop the stdio server successfully, without reporting context cancellation as a server failure.
 
 The server writes JSON request records to stderr for `initialize`, `server/discover`, `tools/list`, and `tools/call`. Each request has `started` and `completed` records correlated by the process `pid` and a process-local `call_id`, with the tool name and handler duration in `elapsed_ms`. `outcome` distinguishes `ok`, `tool_error`, `protocol_error`, `cancelled`, `deadline_exceeded`, and `panic`. An `outcome: "ok"` response may carry `job_state: "failed"` and `failure_reason: "timeout"`: the tool returned the job's failure successfully. These records describe handler completion, not delivery to the remote caller; reconcile them with the tunnel client's response-delivery counters. Arguments, headers, prompt text, result bodies, and error text are omitted. Only recognized tool names, server-generated job IDs, and the documented job state and failure categories are retained.
 
@@ -359,7 +360,7 @@ Rejected `agy_run` and `agy_run_sync` calls remain MCP tool errors (`isError: tr
 | `wait_interrupted` | Inspect the returned `job_id`; work has already started. |
 | `start_indeterminate`, `start_failed`, unknown future values | Inspect existing work before considering a retry. |
 
-`job_started: false` means this request started no new work; an earlier job may own a conflicting key. `true` means a job was created, for example before its inline wait was interrupted. `null` means execution is uncertain. A supervisor can start work before recording its PID fails; cleanup may subsequently remove that job directory, so a missing handle does not prove that no edits happened. Preserve the key, inspect the workspace and conversation, and do not blindly resubmit. `retryable` is advisory within `next_action` and never supplies user authorization. `retry_after` is absent when unknown, rather than an invented delay.
+`job_started: false` means this request started no new work; an earlier job may own a conflicting key. `true` means a job was created, for example before its inline wait was interrupted. `null` means execution is uncertain. A newly launched supervisor waits until its PID is recorded before starting AGY. If the response to a start is lost, the admitted job can already be running. Preserve the key, look up the existing job, and replay the exact request with that key if needed. `retryable` is advisory within `next_action` and never supplies user authorization. `retry_after` is absent when unknown, rather than an invented delay.
 
 ### Result pages
 
@@ -601,7 +602,7 @@ v2 requires agy 1.1.15 and drives it through `--output-format stream-json`. The 
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `AGY_MCP_AGY_PATH` | `agy` on PATH | path to the agy binary |
-| `AGY_MCP_STATE_DIR` | `$XDG_STATE_HOME/agy-mcp` | job state directory |
+| `AGY_MCP_STATE_DIR` | `$XDG_STATE_HOME/agy-mcp` or `~/.local/state/agy-mcp` | job state directory |
 | `AGY_MCP_DEFAULT_MODEL` | agy default | default model, as an id (`gemini-3.1-pro-high`), not a display label |
 | `AGY_MCP_HTTP_TOKEN` | (none) | optional bearer token for HTTP mode; empty = unauthenticated |
 | `AGY_MCP_SYNC_WAIT_CAP` | `90s` | inline-wait ceiling for `agy_run_sync` / `agy_wait` (the default when no `wait` is given, and the clamp for a larger one); the 90s default stays below common MCP clients' ~120s per-call timeout, and this variable raises or lowers it; a Go duration that does not parse as positive is ignored |
