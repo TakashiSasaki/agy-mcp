@@ -21,9 +21,9 @@ func ensureSysProcAttr(cmd *exec.Cmd) {
 	}
 }
 
-// ConfigureGroup puts the spawned process in its own process group, so the whole
-// group (the child and its descendants) can be terminated together via a Group
-// captured by Track. The manager uses it (through StartDetached) for the detached
+// ConfigureGroup puts the spawned process in its own process group, so the process
+// group (the child and descendants that retain that group) can be terminated
+// together via a Group captured by Track. The manager uses it (through StartDetached) for the detached
 // run-job supervisor; the agy child itself uses ConfigureSession instead, which
 // additionally drops the controlling terminal. It sets only Setpgid, preserving
 // any other SysProcAttr fields a caller configured first.
@@ -43,7 +43,7 @@ func ConfigureGroup(cmd *exec.Cmd) {
 // and it skips the raw-mode setup instead of stopping.
 //
 // A session leader has pgid == pid, so the Track/Terminate group kill (kill -pgid)
-// still tears the whole tree down; Setsid alone therefore replaces the Setpgid that
+// still terminates that group; Setsid alone therefore replaces the Setpgid that
 // ConfigureGroup sets. It clears the process-group request fields that conflict with
 // a new session (Setpgid, Pgid, Foreground) and preserves any other SysProcAttr a
 // caller set first, so it is safe to apply on top of a prior ConfigureGroup.
@@ -74,7 +74,8 @@ func StartDetached(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
 
-// Group is a handle to a spawned process tree that can be terminated as a unit.
+// Group is a handle to one spawned process group. Descendants that create
+// another group require the Linux supervisor's separate descendant cleanup.
 // On Linux and macOS it is identified by the leader pid (kill -pgid); the
 // Windows build wraps a Job Object handle.
 type Group struct {

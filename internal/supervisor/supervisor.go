@@ -222,6 +222,10 @@ func Run(jobDir string) error {
 // (rather than mutating a package global) keeps the timer goroutine's read
 // race-free.
 func run(jobDir string, grace, drainWait time.Duration) error {
+	return runWithCleanup(jobDir, grace, drainWait, nil)
+}
+
+func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup processCleanup) error {
 	if !proc.Supported {
 		// Job supervision is implemented on Linux and macOS (process groups) and
 		// Windows (Job Objects). On other platforms the proc stubs cannot terminate
@@ -303,7 +307,7 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
-		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: "supervisor", EndedAt: time.Now().UTC()})
+		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: processOutcomeSource, EndedAt: time.Now().UTC()})
 		_ = jobstore.WriteExitCodeDir(jobDir, jobstore.ExitSpawnFail)
 		return err
 	}
@@ -336,8 +340,10 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 	done := make(chan struct{})
 	timedOut := make(chan struct{})
 	cancelled := make(chan struct{})
+	cleanupDone := make(chan struct{})
 
 	go func() {
+		defer close(cleanupDone)
 		t := time.NewTimer(effectiveTimeout(m.Timeout))
 		defer t.Stop()
 		select {
@@ -347,6 +353,17 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 			close(cancelled) // cancel requested by the manager
 		case <-t.C:
 			close(timedOut)
+		}
+		if cleanup != nil {
+			if err := cleanup.signal(syscall.SIGTERM); err != nil {
+				_, _ = fmt.Fprintf(errF, "descendant SIGTERM: %v\n", err)
+			}
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			if err := finishProcessCleanup(cleanup, done, grace); err != nil {
+				_, _ = fmt.Fprintf(errF, "descendant cleanup incomplete: %v\n", err)
+				_ = cmd.Process.Kill()
+			}
+			return
 		}
 		_ = grp.Terminate(syscall.SIGTERM)
 		select {
@@ -382,6 +399,7 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 	waitErr := cmd.Wait()
 	endedAt := time.Now().UTC()
 	close(done)
+	<-cleanupDone // cancellation cleanup finishes before reports and terminal sentinel
 
 	// agy is reaped. Normally every descendant is gone too, the write end is
 	// closed, and the drain has already finished or is microseconds from EOF, so
@@ -422,7 +440,7 @@ func run(jobDir string, grace, drainWait time.Duration) error {
 	// Guarding on waitErr != nil keeps a job that finished naturally at the instant
 	// the timer fired (a natural success has waitErr == nil) from being mislabeled.
 	_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{
-		Source: "supervisor", PID: cmd.Process.Pid, StartedAt: new(startedAt), EndedAt: endedAt, ExitCode: new(code),
+		Source: processOutcomeSource, PID: cmd.Process.Pid, StartedAt: new(startedAt), EndedAt: endedAt, ExitCode: new(code),
 		TimedOut: waitErr != nil && closed(timedOut), Cancelled: waitErr != nil && closed(cancelled) && !closed(timedOut),
 	})
 	return jobstore.WriteExitCodeDir(jobDir, resolveExitCode(code, waitErr != nil, closed(timedOut), closed(cancelled)))

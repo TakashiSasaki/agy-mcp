@@ -35,7 +35,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: agy-mcp run-job <jobDir>")
 			os.Exit(2)
 		}
-		if err := supervisor.Run(os.Args[2]); err != nil {
+		if err := supervisor.RunProcess(os.Args[2]); err != nil {
 			fmt.Fprintf(os.Stderr, "run-job: %v\n", err)
 			os.Exit(1)
 		}
