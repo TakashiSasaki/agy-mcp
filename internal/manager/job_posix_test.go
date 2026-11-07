@@ -3,6 +3,7 @@
 package manager
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -187,6 +188,55 @@ func TestStartJobIdempotencyReplaysTerminalState(t *testing.T) {
 	}
 	if replay.ID != first.ID || replay.State != StateDone {
 		t.Fatalf("terminal replay = %+v, want same job %s in state done", replay, first.ID)
+	}
+}
+
+func TestStartJobIdempotencyRefusesNullJobMetadata(t *testing.T) {
+	opts := managerOpts{
+		agyPath:        "/usr/bin/agy",
+		supervisorExe:  testutil.WriteFakeSupervisor(t, testutil.FakeSupervisor{Out: "done"}),
+		defaultTimeout: time.Minute,
+	}
+	m := newManager(t, opts)
+	req := StartRequest{Prompt: "review", Cwd: t.TempDir(), IdempotencyKey: "retry-damaged"}
+	first, err := m.StartJob(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WaitFor(t, 15*time.Second, func() bool {
+		_, ok := m.store.ExitCode(first.ID)
+		return ok
+	}, "first idempotent job did not finish")
+	dir, err := m.store.Dir(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := jobstore.MetaPath(dir)
+	backup, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts.stateDir = m.cfg.StateDir
+	fresh := newManager(t, opts)
+	retry, err := fresh.StartJob(req)
+	if err == nil {
+		deferJobDone(t, fresh, retry.ID)
+		t.Fatalf("retry started job %s after losing the metadata for %s", retry.ID, first.ID)
+	}
+	ids, err := fresh.store.List()
+	if err != nil || !slices.Equal(ids, []string{first.ID}) {
+		t.Fatalf("job dirs after refusal = %v, %v; want only %s", ids, err, first.ID)
+	}
+	if err := os.WriteFile(path, backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := fresh.StartJob(req)
+	if err != nil || replay.ID != first.ID || replay.State != StateDone {
+		t.Fatalf("replay after metadata recovery = %+v, %v; want done job %s", replay, err, first.ID)
 	}
 }
 

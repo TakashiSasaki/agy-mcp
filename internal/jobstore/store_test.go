@@ -163,6 +163,22 @@ func TestCreateAndLoadMeta(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsMissingOrMismatchedMetadataID(t *testing.T) {
+	s := New(t.TempDir())
+	dir, err := s.Create(Meta{ID: "job-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contents := range []string{`null`, `{}`, `{"id":"job-b"}`} {
+		if err := os.WriteFile(MetaPath(dir), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if meta, err := s.Load("job-a"); err == nil {
+			t.Errorf("Load accepted metadata %s as job %q", contents, meta.ID)
+		}
+	}
+}
+
 func TestCreateCleansUpDirOnWriteFailure(t *testing.T) {
 	s := New(t.TempDir())
 	dir := s.jobDir("j")

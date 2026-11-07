@@ -5,6 +5,7 @@ package jobstore
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -476,12 +477,21 @@ func (s *Store) Create(m Meta) (string, error) {
 	return dir, nil
 }
 
-// Load reads a job's Meta.
+// Load reads a job's Meta and checks that it belongs to the requested job.
 func (s *Store) Load(id string) (Meta, error) {
 	if !validJobID(id) {
 		return Meta{}, ErrInvalidID
 	}
-	return LoadDir(s.jobDir(id))
+	meta, err := LoadDir(s.jobDir(id))
+	if err != nil {
+		return Meta{}, err
+	}
+	// A valid JSON value such as null can decode to a zero Meta. Treat it
+	// as damaged metadata so an idempotent replay cannot overlook the job.
+	if meta.ID != id {
+		return Meta{}, fmt.Errorf("metadata ID does not match job %q", id)
+	}
+	return meta, nil
 }
 
 // UpdateMeta atomically rewrites a job's meta.json. The caller supplies a
