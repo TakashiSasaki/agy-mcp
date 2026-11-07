@@ -8,9 +8,9 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"syscall"
 
+	"github.com/tphakala/agy-mcp/v2/internal/procstat"
 	"golang.org/x/sys/unix"
 )
 
@@ -47,29 +47,11 @@ func newProcessCleanup() (processCleanup, error) {
 }
 
 func readDescendantIdentity(pid int) (descendantIdentity, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	stat, err := procstat.Read(pid)
 	if err != nil {
 		return descendantIdentity{}, err
 	}
-	// comm may contain spaces and parentheses; fields after the last ')' begin
-	// at field 3 (state), while ppid and starttime are fields 4 and 22.
-	end := strings.LastIndexByte(string(data), ')')
-	if end < 0 {
-		return descendantIdentity{}, fmt.Errorf("malformed process stat for %d", pid)
-	}
-	fields := strings.Fields(string(data[end+1:]))
-	if len(fields) < 20 {
-		return descendantIdentity{}, fmt.Errorf("short process stat for %d", pid)
-	}
-	parent, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return descendantIdentity{}, err
-	}
-	ticks, err := strconv.ParseUint(fields[19], 10, 64)
-	if err != nil {
-		return descendantIdentity{}, err
-	}
-	return descendantIdentity{pid: pid, parent: parent, ticks: ticks, state: fields[0]}, nil
+	return descendantIdentity{pid: pid, parent: stat.Parent, ticks: stat.StartTicks, state: string(stat.State)}, nil
 }
 
 func (c *linuxProcessCleanup) descendants() ([]descendantIdentity, error) {
@@ -176,6 +158,25 @@ func (c *linuxProcessCleanup) remaining() (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// reapAdopted runs while cmd.Wait owns the root PID. Wait4 only targets
+// exited direct children, and the supervisor is their sole waiter.
+func (c *linuxProcessCleanup) reapAdopted(rootPID int) error {
+	children, err := c.descendants()
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if child.pid == rootPID || child.parent != c.owner || child.state != "Z" {
+			continue
+		}
+		_, err := unix.Wait4(child.pid, nil, unix.WNOHANG, nil)
+		if err != nil && !errors.Is(err, syscall.ECHILD) && !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (*linuxProcessCleanup) reap() error {

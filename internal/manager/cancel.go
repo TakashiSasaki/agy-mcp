@@ -11,17 +11,15 @@ import (
 // terminal state from disk.
 //
 // How the request reaches the supervisor is platform-specific (requestCancel):
-// Linux forwards SIGTERM to the supervisor PID; Windows writes a cancel sentinel
-// file the supervisor polls for, since Windows has no POSIX signal to deliver to
-// an arbitrary process.
+// Linux sends SIGTERM through a verified pidfd. Darwin uses a PID signal.
+// Windows writes a cancel sentinel file the supervisor polls for.
 func (m *Manager) Cancel(id string) error {
 	meta, err := m.store.Load(id)
 	if err != nil {
 		return fmt.Errorf("load job %s to cancel: %w", id, err)
 	}
-	// Confirm the recorded PID is still our supervisor before acting, so a recycled
-	// PID is never cancelled. requestCancel tolerates a supervisor that exits
-	// between this check and the request.
+	// Filter jobs that have already stopped. Linux requestCancel independently
+	// verifies identity after opening the pidfd used to send the signal.
 	if !m.processAlive(meta) {
 		return nil
 	}

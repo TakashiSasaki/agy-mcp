@@ -3,6 +3,7 @@ package manager
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -25,6 +26,8 @@ const (
 	DefaultReadArtifactBytes  = 64 * 1024  // 64 KiB
 	MaxReadArtifactBytes      = 256 * 1024 // 256 KiB
 	maxHashFileSize           = 32 << 20   // 32 MiB
+	listHashBytes             = 128 << 20
+	listHashTime              = 2 * time.Second
 )
 
 var defaultIgnoredDirs = map[string]bool{
@@ -160,19 +163,44 @@ func (m *Manager) resolveJobAndRoots(jobID string) (jobstore.Meta, string, []str
 	return meta, jobDir, roots, nil
 }
 
-func fileSHA256(f *os.File) (string, error) {
+type artifactHashReader struct {
+	ctx  context.Context
+	file *os.File
+}
+
+func (r artifactHashReader) Read(buf []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.file.Read(buf)
+}
+
+func listArtifactHash(ctx context.Context, file *os.File, budget int64) (digest string, read int64) {
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() > maxHashFileSize || before.Size() > budget {
+		return "", 0
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	read, err = io.CopyN(h, artifactHashReader{ctx: ctx, file: file}, before.Size())
+	if err != nil || ctx.Err() != nil {
+		return "", read
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", err
+	after, err := file.Stat()
+	if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return "", read
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), read
 }
 
 // ListArtifacts lists artifacts within allowed job directories.
 func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, error) {
+	return m.ListArtifactsContext(context.Background(), req)
+}
+
+func (m *Manager) ListArtifactsContext(ctx context.Context, req ListArtifactsRequest) (ListArtifactsResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ListArtifactsResult{}, err
+	}
 	meta, jobDir, roots, err := m.resolveJobAndRoots(req.JobID)
 	if err != nil {
 		return ListArtifactsResult{}, err
@@ -205,7 +233,13 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 	defer func() { _ = baseRoot.Close() }()
 	entries := make([]ArtifactEntry, 0)
 	limitReached := false
+	hashCtx, cancelHash := context.WithTimeout(ctx, listHashTime)
+	defer cancelHash()
+	hashBudget := int64(listHashBytes)
 	walkErr := fs.WalkDir(baseRoot.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return err
 		}
@@ -238,15 +272,12 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 		modTime := fi.ModTime().UTC().Format(time.RFC3339)
 
 		var hash string
-		if size <= maxHashFileSize {
+		if size <= maxHashFileSize && size <= hashBudget && hashCtx.Err() == nil {
 			f, openErr := baseRoot.OpenFile(filepath.FromSlash(p), artifactReadFlags, 0)
 			if openErr == nil {
-				opened, statErr := f.Stat()
-				if statErr == nil && opened.Mode().IsRegular() {
-					if h, hashErr := fileSHA256(f); hashErr == nil {
-						hash = h
-					}
-				}
+				var read int64
+				hash, read = listArtifactHash(hashCtx, f, hashBudget)
+				hashBudget -= read
 				_ = f.Close()
 			}
 		}
@@ -266,6 +297,9 @@ func (m *Manager) ListArtifacts(req ListArtifactsRequest) (ListArtifactsResult, 
 		return nil
 	})
 
+	if err := ctx.Err(); err != nil {
+		return ListArtifactsResult{}, err
+	}
 	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
 		return ListArtifactsResult{}, fmt.Errorf("walk directory: %w", walkErr)
 	}

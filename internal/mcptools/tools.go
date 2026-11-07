@@ -699,7 +699,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		Name:        toolAgyRun,
 		Title:       "Delegate to agy (async)",
 		Annotations: annDelegate,
-		Description: "Delegate a prompt to a background agy model as an async job (peer review, research, or any self-contained task) and keep working. Returns a job_id; block on it with agy_wait or poll it with agy_status. Prefer this over agy_run_sync for long runs, for open-ended work that routinely outlives an inline wait (web research, a large review), and to fan several tasks out in parallel; use agy_run_sync instead when you need the answer before your next step. If a transport failure could make job creation ambiguous, supply idempotency_key and reuse it on the retry. The delegated agent runs with permission checks disabled: it can edit files under cwd and under any dirs, and may reach the network. Say so in the prompt if the run must not touch the repo. For work that may be skipped (a peer review, a second opinion), check agy_usage and pass priority optional so the run is refused while quota is low.",
+		Description: "Delegate a prompt to a background agy model as an async job (peer review, research, or any self-contained task) and keep working. Returns a job_id; block on it with agy_wait or poll it with agy_status. Prefer this over agy_run_sync for long runs, for open-ended work that routinely outlives an inline wait (web research, a large review), and to fan several tasks out in parallel; use agy_run_sync instead when you need the answer before your next step. If a transport failure could make job creation ambiguous, supply idempotency_key and reuse it on the retry. The delegated agent runs with permission checks disabled: it can edit files under cwd and under any dirs, and may reach the network. Say so in the prompt if the run must not touch the repo. For work that may be skipped (a peer review, a second opinion), check agy_usage and pass priority optional to refuse low quota or unresolved mapping when a trusted reading exists. Missing or stale quota data permits admission.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in runInput) (*mcp.CallToolResult, runOutput, error) {
 		req, err := in.toStartRequest()
 		if err != nil {
@@ -779,7 +779,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		Name:        toolListModels,
 		Title:       "List agy models",
 		Annotations: annReadExternal,
-		Description: "List the agy model ids accepted by the model parameter of agy_run and agy_run_sync. Pass a value from models; model_details carries the same entries with their display labels, which are for showing a readable name only. Call it only when you intend to override the default; omitting model picks a default already, so most runs need no call here. Shells out to the agy CLI, so it fails if agy is missing from PATH or not authenticated.",
+		Description: "List the model IDs advertised by the agy CLI for agy_run and agy_run_sync. Listing an ID does not test account entitlement or execution. Pass a value from models; model_details carries the same entries with their display labels, which are for showing a readable name only. Call it only when you intend to override the default; omitting model picks a default already, so most runs need no call here. Shells out to the agy CLI, so it fails if agy is missing from PATH or not authenticated.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, modelsOutput, error) {
 		models, err := mgr.ListModels(ctx)
 		if err != nil {

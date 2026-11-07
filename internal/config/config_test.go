@@ -325,6 +325,9 @@ func TestResolveHTTPToken(t *testing.T) {
 // critical threshold above the low one.
 func TestResolveUsageSettings(t *testing.T) {
 	t.Setenv("AGY_MCP_STATE_DIR", t.TempDir())
+	t.Setenv("AGY_MCP_USAGE_INTERVAL", "")
+	t.Setenv("AGY_MCP_USAGE_LOW", "")
+	t.Setenv("AGY_MCP_USAGE_CRITICAL", "")
 	fakeAgyOnPath(t)
 
 	c, err := Resolve()

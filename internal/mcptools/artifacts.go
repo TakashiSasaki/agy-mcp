@@ -22,7 +22,7 @@ type listArtifactsInput struct {
 type artifactEntryOutput struct {
 	Path      string `json:"path" jsonschema:"path relative to the listed root directory"`
 	SizeBytes int64  `json:"size_bytes" jsonschema:"file size in bytes"`
-	SHA256    string `json:"sha256,omitempty" jsonschema:"hex-encoded SHA-256 digest of file contents"`
+	SHA256    string `json:"sha256,omitempty" jsonschema:"hex-encoded SHA-256 digest when available within the listing hash budget"`
 	ModTime   string `json:"mod_time" jsonschema:"RFC 3339 modification timestamp in UTC"`
 	IsDir     bool   `json:"is_dir" jsonschema:"true if entry is a directory"`
 }
@@ -63,9 +63,9 @@ func registerArtifacts(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyListArtifacts,
 		Title:       "List job artifacts and logs",
 		Annotations: annReadLocal,
-		Description: "Discover evidence files associated with an agy job without another model turn. When artifact_dirs were provided at creation, reads use those explicit directories and the job state directory; otherwise legacy workspace/add-dir roots apply. scope and roots make this distinction explicit. Association authorizes reading and does not prove the job created a file. Inner symlink escapes are rejected. Common dependency/cache directories are skipped. SHA-256 is omitted when a file exceeds 32 MiB or cannot be hashed. expires_at is job-handle GC eligibility, not a guarantee about external file retention. Pair with agy_read_artifact for stable-file line ranges, agy_logs for live tails and byte cursors, and agy_verification for JUnit, native Go test JSON or restricted flat TAP reports. agy_status reports job lifecycle only.",
+		Description: "Discover evidence files associated with an agy job without another model turn. When artifact_dirs were provided at creation, reads use those explicit directories and the job state directory; otherwise legacy workspace/add-dir roots apply. scope and roots make this distinction explicit. Association authorizes reading and does not prove the job created a file. Inner symlink escapes are rejected. Common dependency/cache directories are skipped. SHA-256 is optional. Listing hashes files up to 32 MiB each, within a shared 128 MiB and two-second hashing budget. Use agy_read_artifact for the full digest of an individual stable file. expires_at is job-handle GC eligibility, not a guarantee about external file retention. Pair with agy_read_artifact for stable-file line ranges, agy_logs for live tails and byte cursors, and agy_verification for JUnit, native Go test JSON or restricted flat TAP reports. agy_status reports job lifecycle only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listArtifactsInput) (*mcp.CallToolResult, listArtifactsOutput, error) {
-		res, err := mgr.ListArtifacts(manager.ListArtifactsRequest{
+		res, err := mgr.ListArtifactsContext(ctx, manager.ListArtifactsRequest{
 			JobID:      in.JobID,
 			Subpath:    in.Subpath,
 			Pattern:    in.Pattern,

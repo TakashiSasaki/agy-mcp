@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
+	"golang.org/x/sys/unix"
 )
 
 const cleanupRoleEnv = "AGY_TEST_CLEANUP_ROLE"
@@ -90,6 +91,22 @@ func TestProcessCleanupHelper(t *testing.T) {
 		}
 		<-term
 		os.Exit(1) // root exits early; descendants deliberately ignore SIGTERM
+	case "short-orphan":
+		runShortOrphan(dir)
+	case "short-bridge":
+		cmd := cleanupHelperCommand("short-orphan", "", dir)
+		if cmd.Start() != nil || waitCleanupFile(filepath.Join(dir, "short.pid"), 3*time.Second) != nil {
+			os.Exit(94)
+		}
+		os.Exit(0)
+	case "agy-reap":
+		bridge := cleanupHelperCommand("short-bridge", "", dir)
+		if bridge.Run() != nil || waitCleanupFile(filepath.Join(dir, "release-root"), 10*time.Second) != nil {
+			os.Exit(95)
+		}
+		os.Exit(42)
+	case "root-wait-guard":
+		verifyRootWaitGuard(t)
 	case "supervisor":
 		cleanup, err := newProcessCleanup()
 		if err == nil {
@@ -103,6 +120,24 @@ func TestProcessCleanupHelper(t *testing.T) {
 	default:
 		os.Exit(98)
 	}
+}
+
+func runShortOrphan(dir string) {
+	identity, err := readDescendantIdentity(os.Getpid())
+	if err != nil {
+		os.Exit(91)
+	}
+	path := filepath.Join(dir, "short.pid")
+	if err := os.WriteFile(path+".tmp", fmt.Appendf(nil, "%d %d\n", identity.pid, identity.ticks), 0o600); err != nil {
+		os.Exit(92)
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		os.Exit(92)
+	}
+	if waitCleanupFile(filepath.Join(dir, "release-orphan"), 10*time.Second) != nil {
+		os.Exit(93)
+	}
+	os.Exit(0)
 }
 
 func cleanupRecordedWorker(t *testing.T, path string) (pid int, ticks uint64) {
@@ -260,5 +295,109 @@ func TestRunProcessInitializationFailsBeforeSpawn(t *testing.T) {
 	data, readErr = os.ReadFile(filepath.Join(dir, jobstore.ProcessFile))
 	if readErr != nil || json.Unmarshal(data, &process) != nil || process.PID != 0 {
 		t.Fatalf("AGY should not have spawned: %s %v", data, readErr)
+	}
+}
+
+func TestSupervisorReapsAdoptedZombieDuringRun(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "fake-agy")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nexport " + cleanupRoleEnv + "=agy-reap\nexec '" + strings.ReplaceAll(binary, "'", "'\\''") + "' -test.run=^TestProcessCleanupHelper$\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeMeta(t, dir, jobstore.Meta{ID: "reap", AgyPath: fake, Cwd: dir, Timeout: 15 * time.Second, StartedAt: time.Now()})
+	cmd := cleanupHelperCommand("supervisor", "", dir)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() { released <- cmd.Wait() }()
+	release := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() {
+		release("release-orphan")
+		release("release-root")
+		if released != nil {
+			if err := <-released; err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	pidPath := filepath.Join(dir, "short.pid")
+	if err := waitCleanupFile(pidPath, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	pid, ticks := cleanupRecordedWorker(t, pidPath)
+	release("release-orphan")
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		current, err := readDescendantIdentity(pid)
+		if errors.Is(err, os.ErrNotExist) || (err == nil && current.ticks != ticks) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adopted child still exists while root is running: %+v", current)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(jobstore.ExitCodePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("root should still be running: %v", err)
+	}
+	release("release-root")
+	if err := <-released; err != nil {
+		released = nil
+		t.Fatal(err)
+	}
+	released = nil
+	outcome, err := jobstore.ReadProcessDir(dir)
+	if err != nil || outcome.ExitCode == nil || *outcome.ExitCode != 42 {
+		t.Fatalf("root exit status lost: %+v, %v", outcome, err)
+	}
+}
+
+func verifyRootWaitGuard(t *testing.T) {
+	t.Helper()
+	// Both children are already zombies when the periodic reaper runs.
+	// Keep this test in a dedicated process so it only owns fixture children.
+	root := exec.Command("sh", "-c", "exit 42")
+	child := exec.Command("true")
+	for _, cmd := range []*exec.Cmd{root, child} {
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Wait() })
+		var info unix.Siginfo
+		if err := unix.Waitid(unix.P_PID, cmd.Process.Pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanup := linuxProcessCleanup{owner: os.Getpid()}
+	if err := cleanup.reapAdopted(root.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Wait(); !errors.Is(err, syscall.ECHILD) {
+		t.Fatalf("adopted child not reaped: %v", err)
+	}
+	err := root.Wait()
+	exit, ok := errors.AsType[*exec.ExitError](err)
+	if !ok || exit.ExitCode() != 42 {
+		t.Fatalf("root's cmd.Wait lost exit 42: %v", err)
+	}
+}
+
+func TestReapAdoptedLeavesExitedRootForCmdWait(t *testing.T) {
+	cmd := cleanupHelperCommand("root-wait-guard", "", t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("root wait ownership fixture: %v\n%s", err, out)
 	}
 }

@@ -1,7 +1,7 @@
 package manager
 
 import (
-	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
+	"github.com/tphakala/agy-mcp/v2/internal/procstat"
 )
 
 // startTimeMandatory reports whether StartJob must fail when it cannot record a
@@ -34,82 +35,38 @@ func readBootID() string { return bootID() }
 // processAlive reports whether the job's recorded supervisor PID is still a
 // live supervisor process from the current boot.
 func (m *Manager) processAlive(meta jobstore.Meta) bool {
-	if meta.PID <= 0 {
+	return m.processAliveWithStat(meta, procstat.Read)
+}
+
+func (m *Manager) processAliveWithStat(meta jobstore.Meta, readStat func(int) (procstat.Stat, error)) bool {
+	if meta.PID <= 0 || meta.BootID != readBootID() {
 		return false
 	}
-	// The recorded boot id must match the current boot, otherwise the PID is from a
-	// previous boot and meaningless (PID recycling across reboots). This also fails
-	// closed in the issue's scenario: an empty recorded boot id (boot_id was
-	// unreadable at start) does not match a readable current one, so a recycled PID
-	// after a reboot cannot read as alive (which would keep the job uncollectable and
-	// its gate key held). When boot_id is unreadable host-wide (e.g. a restricted
-	// container) both are "" and compare equal, so liveness falls through to the PID
-	// and start-time checks rather than failing every job; there is no boot to
-	// disambiguate there anyway.
-	if meta.BootID != readBootID() {
+	if err := syscall.Kill(meta.PID, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
-	if err := syscall.Kill(meta.PID, 0); err != nil {
-		return false
+	stat, err := readStat(meta.PID)
+	if err == nil {
+		if stat.Exited() {
+			return false
+		}
+		if meta.StartTimeTicks != 0 {
+			return stat.StartTicks == meta.StartTimeTicks
+		}
+		return stat.Comm == expectedComm(m.cfg.SupervisorExe)
 	}
-	// A matching (boot id, pid, starttime) triple uniquely pins the process:
-	// starttime is set at fork and survives exec, and was recorded right after
-	// cmd.Start while the PID was unreapable. When the recorded ticks are
-	// readable they are authoritative liveness, and the comm check must NOT
-	// run: in the fork-to-exec window comm is inherited from the parent (or is
-	// briefly the script interpreter's), so requiring the supervisor name there
-	// would misread a just-spawned live job as dead. A successful read that
-	// mismatches proves same-boot PID recycling.
+	// An unavailable stat is not evidence of death. Keep a recorded identity
+	// live while the PID exists, even during the fork-to-exec name change.
 	if meta.StartTimeTicks != 0 {
-		if cur, ok := readStartTimeTicks(meta.PID); ok {
-			return cur == meta.StartTimeTicks
-		}
+		return true
 	}
-	// Fallback (no recorded starttime in older meta, or a transient stat read
-	// failure): confirm the process is still our supervisor by name.
 	comm, err := os.ReadFile("/proc/" + strconv.Itoa(meta.PID) + "/comm")
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(comm)) == expectedComm(m.cfg.SupervisorExe)
+	return err != nil || strings.TrimSpace(string(comm)) == expectedComm(m.cfg.SupervisorExe)
 }
 
-// readStartTimeTicks returns the process start time (field 22 of
-// /proc/<pid>/stat, in clock ticks since boot) for pid. The second result is
-// false on any read or parse failure, so a transient error is never mistaken for
-// a recycled pid: callers only act on a successful read.
 func readStartTimeTicks(pid int) (uint64, bool) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return 0, false
-	}
-	return parseStartTimeTicks(b)
-}
-
-// parseStartTimeTicks extracts field 22 (starttime) from a /proc/<pid>/stat line.
-// Field 2 (comm) is wrapped in parentheses and may itself contain spaces and
-// parentheses, so the fields after it are located from the LAST ')'. After that
-// ')' the first token is field 3 (state), making field 22 the token at index 19.
-func parseStartTimeTicks(stat []byte) (uint64, bool) {
-	i := bytes.LastIndexByte(stat, ')')
-	if i < 0 || i+1 >= len(stat) {
-		return 0, false
-	}
-	// Only field 22 is needed, so iterate (FieldsSeq) and stop at it rather than
-	// allocating a full slice of every field on each liveness poll.
-	const startTimeIdx = 19 // field 22 - field 3 (the first post-')' field)
-	idx := 0
-	for f := range bytes.FieldsSeq(stat[i+1:]) {
-		if idx == startTimeIdx {
-			ticks, err := strconv.ParseUint(string(f), 10, 64)
-			if err != nil {
-				return 0, false
-			}
-			return ticks, true
-		}
-		idx++
-	}
-	return 0, false
+	stat, err := procstat.Read(pid)
+	return stat.StartTicks, err == nil
 }
 
 // expectedComm returns the process name as the kernel records it in

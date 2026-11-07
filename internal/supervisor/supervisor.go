@@ -324,14 +324,12 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 
 	go func() {
 		defer close(cleanupDone)
-		t := time.NewTimer(effectiveTimeout(m.Timeout))
-		defer t.Stop()
-		select {
-		case <-done:
+		switch awaitJobStop(done, cancel, effectiveTimeout(m.Timeout), cleanup, cmd.Process.Pid, errF) {
+		case jobCompleted:
 			return
-		case <-cancel:
-			close(cancelled) // cancel requested by the manager
-		case <-t.C:
+		case jobCancelled:
+			close(cancelled)
+		case jobTimedOut:
 			close(timedOut)
 		}
 		if cleanup != nil {

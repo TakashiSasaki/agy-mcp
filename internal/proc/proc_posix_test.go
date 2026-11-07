@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tphakala/agy-mcp/v2/internal/testutil"
 )
 
 func TestConfigureGroupRequestsNewProcessGroup(t *testing.T) {
@@ -219,8 +221,12 @@ func TestConfigureSessionGroupStillTerminable(t *testing.T) {
 	if grandchild <= 1 {
 		t.Fatalf("implausible grandchild pid %d", grandchild)
 	}
-	if err := syscall.Kill(grandchild, 0); err != nil {
-		t.Fatalf("grandchild %d should be alive before the kill: %v", grandchild, err)
+	observe, err := testutil.ObserveProcess(grandchild)
+	if err != nil {
+		t.Fatalf("observe grandchild %d: %v", grandchild, err)
+	}
+	if live, err := observe(); err != nil || !live {
+		t.Fatalf("grandchild %d should be running before the kill: %v", grandchild, err)
 	}
 
 	g, err := Track(cmd, false)
@@ -232,15 +238,18 @@ func TestConfigureSessionGroupStillTerminable(t *testing.T) {
 	}
 	requireKilledBy(t, cmd, syscall.SIGKILL)
 
-	// The group kill must reach the grandchild too; it settles on ESRCH once reaped.
+	// The original grandchild must stop running, even if its parent has yet to reap it.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		gerr := syscall.Kill(grandchild, 0)
-		if errors.Is(gerr, syscall.ESRCH) {
+		live, err := observe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !live {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("grandchild %d still present after the group kill (Kill(pid,0)=%v): a non-leader member survived", grandchild, gerr)
+			t.Fatalf("grandchild %d still running after the group kill", grandchild)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -19,7 +19,7 @@ type ProjectWorktree struct {
 	Path     string `json:"path" jsonschema:"absolute path to the active linked worktree directory"`
 	Branch   string `json:"branch,omitempty" jsonschema:"active git branch name for this worktree"`
 	Head     string `json:"head,omitempty" jsonschema:"short commit SHA of the current HEAD"`
-	IsClean  bool   `json:"is_clean" jsonschema:"true if worktree has no uncommitted changes"`
+	IsClean  bool   `json:"is_clean" jsonschema:"true if Git reports no tracked changes; untracked files are ignored"`
 }
 
 // ProjectInfo provides structured metadata for a repository/project.
@@ -311,8 +311,13 @@ func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
 		if curPath != "" && !isBare && curPath != bareDir {
 			cleanPath := filepath.Clean(curPath)
 			if fi, err := os.Stat(cleanPath); err == nil && fi.IsDir() {
-				_, _, dirty := DetectGitMetadata(cleanPath)
-				isClean := dirty != nil && !*dirty
+				isClean := false
+				if validExpectedGitHead(curHead) && strings.Trim(curHead, "0") != "" {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					dirty := gitDirty(ctx, cleanPath)
+					cancel()
+					isClean = dirty != nil && !*dirty
+				}
 				branch := curBranch
 				if strings.HasPrefix(branch, "refs/heads/") {
 					branch = strings.TrimPrefix(branch, "refs/heads/")

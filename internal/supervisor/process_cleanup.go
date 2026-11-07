@@ -17,6 +17,7 @@ type processCleanup interface {
 	signal(syscall.Signal) error
 	remaining() (bool, error)
 	reap() error
+	reapAdopted(rootPID int) error
 }
 
 // awaitAdmission waits for the manager to close its side of the launch pipe.
@@ -59,6 +60,49 @@ func runProcess(jobDir string, initialize func() (processCleanup, error)) error 
 		return fmt.Errorf("%s", message)
 	}
 	return runWithCleanup(jobDir, killGrace, drainGrace, cleanup)
+}
+
+type jobStop uint8
+
+const (
+	jobCompleted jobStop = iota
+	jobCancelled
+	jobTimedOut
+)
+
+// awaitJobStop owns periodic reaping. The done channel closes after cmd.Wait
+// has consumed the root status, so the final reap may collect any exited child.
+func awaitJobStop(done, cancel <-chan struct{}, timeout time.Duration, cleanup processCleanup, rootPID int, stderr io.Writer) jobStop {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	var reapTick <-chan time.Time
+	if cleanup != nil {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		reapTick = ticker.C
+	}
+	reapWarned := false
+	for {
+		select {
+		case <-done:
+			if cleanup != nil {
+				if err := cleanup.reap(); err != nil {
+					_, _ = fmt.Fprintf(stderr, "reap exited descendants: %v\n", err)
+				}
+			}
+			return jobCompleted
+		case <-reapTick:
+			err := cleanup.reapAdopted(rootPID)
+			if err != nil && !reapWarned {
+				_, _ = fmt.Fprintf(stderr, "reap adopted descendants: %v\n", err)
+			}
+			reapWarned = err != nil
+		case <-cancel:
+			return jobCancelled
+		case <-deadline.C:
+			return jobTimedOut
+		}
+	}
 }
 
 // finishProcessCleanup keeps escalation alive after the AGY root exits. Only

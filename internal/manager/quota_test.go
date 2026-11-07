@@ -649,6 +649,41 @@ func TestQuotaTrustAgeFollowsInterval(t *testing.T) {
 	}
 }
 
+func TestOptionalQuotaStalesWhileTrackedJobPausesRefresh(t *testing.T) {
+	var calls atomic.Int32
+	m, offset := quotaTestManager(t, 5*time.Minute, okStub(&calls))
+	req := StartRequest{Priority: PriorityOptional, Model: "gemini-3.8-flash-high"}
+	m.quota.snap = quotaFixture(m.now(), 0.03, m.now().Add(time.Hour))
+	if err := m.checkPriority(req); err == nil {
+		t.Fatal("fresh critical reading must refuse optional work")
+	}
+	if !m.gate.forceAcquire("active") {
+		t.Fatal("failed to track running fixture")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); m.runUsageRefresher(ctx, 10*time.Millisecond) }()
+	offset.Store(int64(11 * time.Minute))
+	time.Sleep(40 * time.Millisecond)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("background probes while a job is tracked: %d", n)
+	}
+	if err := m.checkPriority(req); err != nil {
+		t.Fatalf("stale reading must preserve optional admission: %v", err)
+	}
+	m.gate.release("active")
+	deadline := time.Now().Add(time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("background refresh did not resume")
+	}
+	cancel()
+	<-done
+}
+
 func TestRunUsageRefresher(t *testing.T) {
 	var calls atomic.Int32
 	m, _ := quotaTestManager(t, 0, okStub(&calls))

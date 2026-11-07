@@ -93,18 +93,6 @@ func newTestManagerCfg(t *testing.T, fake testutil.FakeAgy, adjust func(*config.
 	return manager.New(c), stateDir
 }
 
-// structMap returns a tool result's structured content as a map, failing the
-// test (rather than panicking) when the payload is not the expected shape, so a
-// response-shape regression reports cleanly instead of crashing the test.
-func structMap(t *testing.T, sc any) map[string]any {
-	t.Helper()
-	m, ok := sc.(map[string]any)
-	if !ok {
-		t.Fatalf("structured content is %T, want map[string]any: %v", sc, sc)
-	}
-	return m
-}
-
 // waitForDone polls the manager directly until the job reports done with the
 // wanted result, or fails the test at the deadline.
 func waitForDone(t *testing.T, mgr *manager.Manager, jobID, want string, timeout time.Duration) {

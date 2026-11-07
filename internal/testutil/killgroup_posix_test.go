@@ -3,19 +3,21 @@
 package testutil
 
 import (
-	"errors"
+	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 )
 
 // KillProcessGroup must not return while a member of the group can still run
-// (issue #196). The leader forks a grandchild and execs sleep, so the group has
-// two members; a single SIGKILL pass returns before they have exited.
+// (issue #196). The grandchild writes while the group leader sleeps.
 func TestKillProcessGroupLeavesNoLiveMember(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "sleep 60 & echo $! ; exec sleep 60")
+	writes := filepath.Join(t.TempDir(), "writes")
+	cmd := exec.Command("sh", "-c", `(while :; do printf x >> "$1"; sleep 0.02; done) & echo $!; exec sleep 60`, "sh", writes)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -45,10 +47,32 @@ func TestKillProcessGroupLeavesNoLiveMember(t *testing.T) {
 		t.Fatalf("read grandchild pid: %v", err)
 	}
 
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		info, err := os.Stat(writes)
+		if err == nil && info.Size() >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("negative control: the grandchild did not write repeatedly")
+		}
+		time.Sleep(pollInterval)
+	}
+	if live, err := groupHasLiveMembers(pgid); err != nil || !live {
+		t.Fatalf("negative control: group with a writer reported stopped: %v", err)
+	}
 	KillProcessGroup(t, pgid, 10*time.Second)
-
-	if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EPERM) {
-		t.Fatalf("Kill(-%d, 0) = %v after KillProcessGroup, want ESRCH or EPERM: a member is still live", pgid, err)
+	if live, err := groupHasLiveMembers(pgid); err != nil || live {
+		t.Fatalf("group has a running member after SIGKILL: %v", err)
+	}
+	before, err := os.ReadFile(writes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	after, err := os.ReadFile(writes)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("grandchild kept writing after group cleanup: %v", err)
 	}
 }
 
@@ -74,10 +98,8 @@ func TestKillProcessGroupRefusesNonPositivePgid(t *testing.T) {
 	}
 }
 
-// A group still signalable when the timeout expires fails the test. A negative
-// timeout has expired before the first kill, which succeeds because the target
-// was running when it was sent.
-func TestKillProcessGroupReportsTimeout(t *testing.T) {
+// A running sleeper must count as a live group member.
+func TestGroupHasLiveMembersDetectsSleeper(t *testing.T) {
 	cmd := exec.Command("sleep", "60")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -89,9 +111,7 @@ func TestKillProcessGroupReportsTimeout(t *testing.T) {
 		_ = cmd.Wait()
 	})
 
-	rec := &errRecorder{TB: t}
-	KillProcessGroup(rec, pgid, -time.Nanosecond)
-	if len(rec.errs) != 1 {
-		t.Fatalf("errors = %q, want exactly one timeout failure", rec.errs)
+	if live, err := groupHasLiveMembers(pgid); err != nil || !live {
+		t.Fatalf("running control is not detected: %v", err)
 	}
 }

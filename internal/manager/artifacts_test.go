@@ -1,8 +1,11 @@
 package manager
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,5 +205,40 @@ func TestReadArtifactCanReadJobDirFiles(t *testing.T) {
 
 	if !strings.Contains(res.Content, "assistant response") {
 		t.Errorf("unexpected content for out: %q", res.Content)
+	}
+}
+
+func TestListArtifactsBoundsTotalHashBytes(t *testing.T) {
+	m, id, root := setupTestJobWithFiles(t)
+	for i := range 5 {
+		path := filepath.Join(root, fmt.Sprintf("data-%d.bin", i))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, 32<<20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := m.ListArtifacts(ListArtifactsRequest{JobID: id, Pattern: "*.bin"})
+	if err != nil || len(res.Entries) != 5 {
+		t.Fatalf("listing omitted metadata: %+v, %v", res, err)
+	}
+	var hashed int64
+	for _, entry := range res.Entries {
+		if entry.SHA256 != "" {
+			hashed += entry.SizeBytes
+		}
+	}
+	if hashed <= 0 || hashed > 128<<20 {
+		t.Fatalf("hashed bytes = %d, want positive and at most 128 MiB", hashed)
+	}
+}
+
+func TestListArtifactsHonorsCancellation(t *testing.T) {
+	m, id, _ := setupTestJobWithFiles(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := m.ListArtifactsContext(ctx, ListArtifactsRequest{JobID: id}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled listing = %v", err)
 	}
 }

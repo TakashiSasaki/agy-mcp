@@ -19,8 +19,8 @@ type quotaBucketOutput struct {
 	Name              string  `json:"name" jsonschema:"human-readable name of the window"`
 	Window            string  `json:"window" jsonschema:"the window length as agy reports it, e.g. 5h or weekly"`
 	RemainingFraction float64 `json:"remaining_fraction" jsonschema:"remaining quota from 0 to 1 as agy last reported it; not adjusted for a reset that has passed since, see refilled"`
-	ResetTime         string  `json:"reset_time,omitempty" jsonschema:"when this window resets, RFC3339 UTC; absent when agy reported none"`
-	Refilled          bool    `json:"refilled" jsonschema:"true when reset_time has passed since the reading, so this window counts as full for level and remaining_percent"`
+	ResetTime         string  `json:"reset_time,omitempty" jsonschema:"reset timestamp reported by agy, RFC3339 UTC; absent when agy reported none"`
+	Refilled          bool    `json:"refilled" jsonschema:"true when the reported reset has passed and the server assumes a refill for level and remaining_percent"`
 }
 
 // quotaGroupSummary is the per-group reading both quota shapes share: the
@@ -30,12 +30,12 @@ type quotaGroupSummary struct {
 	Level            string `json:"level" jsonschema:"ok, low, critical or exhausted, set by the tightest window of the group at the time of the call; see agy_usage for the thresholds"`
 	RemainingPercent int    `json:"remaining_percent" jsonschema:"remaining quota of the tightest window, as a whole percent rounded down; level is the authority, so 0.4 percent reads 0 with level critical"`
 	Window           string `json:"window" jsonschema:"the tightest window, the one that sets level"`
-	ResetTime        string `json:"reset_time,omitempty" jsonschema:"when the tightest window resets, RFC3339 UTC; absent when agy reported none"`
+	ResetTime        string `json:"reset_time,omitempty" jsonschema:"binding window's reported reset timestamp, RFC3339 UTC; absent when agy reported none"`
 }
 
 type quotaGroupOutput struct {
 	quotaGroupSummary
-	Description string              `json:"description,omitempty" jsonschema:"what agy says the group covers"`
+	Description string              `json:"description,omitempty" jsonschema:"group coverage and plan wording supplied by agy, when available"`
 	Buckets     []quotaBucketOutput `json:"buckets" jsonschema:"every window of the group"`
 }
 
@@ -47,7 +47,7 @@ type quotaOutput struct {
 
 type modelQuotaOutput struct {
 	Model  string `json:"model" jsonschema:"model string supplied in models, in request order"`
-	Status string `json:"status" jsonschema:"exact when one quota group was inferred; unknown for an unrecognized model or missing group; ambiguous for multiple candidates; unpinned for an empty model. Does not establish that the model is available or executable"`
+	Status string `json:"status" jsonschema:"exact when the local classifier inferred one quota group from the model ID and CLI group metadata; unknown for an unrecognized model or missing group; ambiguous for multiple candidates; unpinned for an empty model. Does not establish that the model is available or executable"`
 	Group  string `json:"group,omitempty" jsonschema:"name of the matching entry in groups; present only for exact, otherwise no group is guessed"`
 }
 
@@ -139,11 +139,11 @@ func registerUsage(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyUsage,
 		Title:       "Check agy quota",
 		Annotations: annReadExternal,
-		Description: "Report how much agy quota is left, per quota group, with a level per group: ok, low, critical or exhausted. The returned groups are authoritative for this reading; do not assume every Gemini model shares one pool. Gemini Models and Gemini 4 Argon can be separate. " +
+		Description: "Report how much agy quota is left, per quota group, with a level per group: ok, low, critical or exhausted. Groups and plan descriptions come from the CLI reading. Gemini Models and Gemini 4 Argon can be separate. " +
 			"Optional models is an array of up to 128 model IDs; model_groups maps them against this same snapshot using the admission classifier, with exact, unknown, ambiguous or unpinned status. These are inferences from CLI group metadata, not proof of model availability or provider-guaranteed membership. Omit models for no mappings. " +
-			"The level comes from the group's tightest active window (5h or weekly; disabled buckets are skipped), counts a window whose reset time has passed as full, and uses the server's thresholds: low below 25 percent remaining, critical below 5, exhausted at 0 (AGY_MCP_USAGE_LOW and AGY_MCP_USAGE_CRITICAL change the first two). " +
-			"It spends no model quota: it runs agy's /usage command, which starts no agent turn. " +
-			"Check it before optional work, and pass priority optional to agy_run or agy_run_sync so the server refuses the run while the model's group is low or when the model's quota group mapping cannot be established; the same reading rides on the quota field of run, status and wait results. " +
+			"The level comes from the group's tightest active window (5h or weekly; disabled buckets are skipped), assumes a full window after its reported reset time, and uses the server's thresholds: low below 25 percent remaining, critical below 5, exhausted at 0 (AGY_MCP_USAGE_LOW and AGY_MCP_USAGE_CRITICAL change the first two). " +
+			"It requests agy's non-turn /usage command. The server rejects replies that indicate a model turn and disables further probes in that server process. " +
+			"With priority optional, agy_run and agy_run_sync use a trusted cached reading to refuse low quota or unresolved mappings. Missing or stale readings permit admission. Background refresh pauses during tracked jobs. Use checked_at to assess the age of this reading. " +
 			"max_age bounds how old a cached reading may be (default 60s, minimum 10s); a fresh reading takes a few seconds. " +
 			"Shells out to the agy CLI, so it fails if agy is missing from PATH or not authenticated.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in quotaInput) (*mcp.CallToolResult, quotaOutput, error) {

@@ -32,12 +32,15 @@ func DetectGitMetadata(cwd string) (branch, head string, dirty *bool) {
 		return "", "", nil
 	}
 
-	// 3. Fast dirty check (-uno ignores untracked files to avoid scanning huge untracked build dirs)
-	cmdStatus := probeCmd(ctx, "git", "-C", cwd, "status", "--porcelain", "-uno")
-	if out, err := cmdStatus.Output(); err == nil {
-		isDirty := len(strings.TrimSpace(string(out))) > 0
-		dirty = &isDirty
-	}
+	return branch, head, gitDirty(ctx, cwd)
+}
 
-	return branch, head, dirty
+func gitDirty(ctx context.Context, cwd string) *bool {
+	// Ignore untracked files to avoid scanning large build directories.
+	cmd := probeCmd(ctx, "git", "-C", cwd, "status", "--porcelain", "-uno")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return new(strings.TrimSpace(string(out)) != "")
 }
