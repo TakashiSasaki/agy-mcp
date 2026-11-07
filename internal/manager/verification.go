@@ -157,6 +157,7 @@ type junitParser struct {
 	counts                      junitCounts
 	suites                      []junitSuite
 	current                     *junitCase
+	nodeSummary                 map[string]int
 	depth                       int
 	seenRoot, closedRoot, valid bool
 }
@@ -190,11 +191,14 @@ func parseJUnit(data []byte) VerificationResult {
 	if p.counts.tests == 0 || p.counts.tests == p.counts.skipped {
 		p.warn("no_executed_testcases")
 	}
+	p.validateNodeSummary()
 	return finishJUnit(p.out, p.counts, p.valid)
 }
 
 func (p *junitParser) consume(token xml.Token) bool {
 	switch token := token.(type) {
+	case xml.Comment:
+		p.nodeComment(string(token))
 	case xml.Directive:
 		p.warn("xml_directive_not_supported")
 	case xml.StartElement:
@@ -207,6 +211,64 @@ func (p *junitParser) consume(token xml.Token) bool {
 		}
 	}
 	return true
+}
+
+// MEASURED against Node.js v24.22.2: parent assertions can fail after a
+// passing child while the JUnit reporter emits only that child as a testcase.
+// Its root-level summary comments retain the otherwise missing failure. Parent
+// tests also increase summary totals, so they need not equal testcase counts.
+func (p *junitParser) nodeComment(comment string) {
+	if p.depth != 1 || len(p.suites) != 1 || p.suites[0].name != junitSuitesTag {
+		return
+	}
+	fields := strings.Fields(comment)
+	if len(fields) == 0 || !slices.Contains([]string{"tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"}, fields[0]) {
+		return
+	}
+	if p.nodeSummary == nil {
+		p.nodeSummary = make(map[string]int)
+	}
+	if _, duplicate := p.nodeSummary[fields[0]]; duplicate {
+		p.warn("invalid_node_summary")
+	}
+	if len(fields) != 2 {
+		p.warn("invalid_node_summary")
+		return
+	}
+	value, err := strconv.Atoi(fields[1])
+	if err != nil || value < 0 {
+		p.warn("invalid_node_summary")
+		return
+	}
+	p.nodeSummary[fields[0]] = value
+}
+
+func (p *junitParser) validateNodeSummary() {
+	if p.nodeSummary == nil {
+		return // General JUnit does not require Node-specific comments.
+	}
+	if len(p.nodeSummary) != 7 {
+		p.warn("incomplete_node_summary")
+		return
+	}
+	total, accounted := p.nodeSummary["tests"], 0
+	for _, key := range []string{"pass", "fail", "cancelled", "skipped", "todo"} {
+		value := p.nodeSummary[key]
+		if value > total-accounted {
+			p.warn("inconsistent_node_summary")
+			return
+		}
+		accounted += value
+	}
+	if accounted != total || total < p.counts.tests {
+		p.warn("inconsistent_node_summary")
+	}
+	// Todo failures may be emitted as both skipped and failure elements, so do
+	// not downgrade explicit failure evidence merely because footer fail is 0.
+	represented := p.counts.failed + p.counts.errors
+	if p.nodeSummary["fail"] > represented || p.nodeSummary["cancelled"] > represented-p.nodeSummary["fail"] {
+		p.warn("unrepresented_node_failure")
+	}
 }
 
 func (p *junitParser) start(token xml.StartElement) bool {
