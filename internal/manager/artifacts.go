@@ -323,6 +323,12 @@ func (m *Manager) ReadArtifact(req ReadArtifactRequest) (ReadArtifactResult, err
 	if err != nil {
 		return ReadArtifactResult{}, fmt.Errorf("read artifact lines: %w", err)
 	}
+	// Bound displayed UTF-8, not just source bytes: JSON replaces invalid bytes
+	// and can otherwise expand content beyond the caller's byte budget.
+	content = strings.ToValidUTF8(content, "\uFFFD")
+	if len(content) > maxBytes {
+		content, truncated = truncateUTF8(content, maxBytes), true
+	}
 
 	after, statErr := f.Stat()
 	if statErr != nil {

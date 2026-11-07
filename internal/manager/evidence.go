@@ -49,7 +49,8 @@ type LogPage struct {
 	SizeBytes   int64             `json:"size_bytes" jsonschema:"stream size observed before reading"`
 	Content     string            `json:"content" jsonschema:"UTF-8 text from this byte range; invalid UTF-8 is replaced"`
 	SHA256      string            `json:"sha256,omitempty" jsonschema:"SHA-256 of this page's original bytes, not the complete growing stream"`
-	HasMore     bool              `json:"has_more" jsonschema:"more bytes were present after this page in the observed snapshot"`
+	HasMore     bool              `json:"has_more" jsonschema:"more complete bytes can be read from this observed snapshot; false when only pending_utf8 bytes remain"`
+	PendingUTF8 bool              `json:"pending_utf8,omitempty" jsonschema:"a running job's incomplete UTF-8 suffix is withheld at the cursor; wait for append or job completion before retrying next_cursor"`
 	NextCursor  string            `json:"next_cursor,omitempty" jsonschema:"resume at this byte position; retain it even at EOF to follow later appends"`
 	Capture     *jobstore.Capture `json:"capture,omitempty" jsonschema:"event capture health when known; absence is unknown, including older jobs"`
 }
@@ -290,7 +291,7 @@ func (m *Manager) Logs(req LogRequest) (LogPage, error) {
 	out.Available = true
 	out.SizeBytes = size
 	out.StartOffset = c.Offset
-	data, readStart, err := readLogBytes(f, c.Offset, size, limit, req.Cursor == "" && c.Offset > 0)
+	data, readStart, pending, err := readLogBytes(f, c.Offset, size, limit, req.Cursor == "" && c.Offset > 0, st.State == StateRunning)
 	if err != nil {
 		return out, err
 	}
@@ -301,7 +302,8 @@ func (m *Manager) Logs(req LogRequest) (LogPage, error) {
 	out.SHA256 = hex.EncodeToString(digest[:])
 	c.Offset += int64(len(data))
 	out.EndOffset = c.Offset
-	out.HasMore = c.Offset < size
+	out.HasMore = c.Offset < size && !pending
+	out.PendingUTF8 = pending
 	out.NextCursor, err = encodeEvidenceCursor(f, c)
 	return out, err
 }
@@ -458,16 +460,22 @@ func scanEventRecords(reader *bufio.Reader, c *evidenceCursor, size int64, budge
 	return nil
 }
 
-func readLogBytes(f *os.File, offset, size int64, limit int, trimStart bool) (content []byte, nextStart int64, readErr error) {
+func readLogBytes(f *os.File, offset, size int64, limit int, trimStart, live bool) (content []byte, nextStart int64, pending bool, readErr error) {
 	if trimStart {
 		// Look behind the tail boundary to distinguish a split valid rune from
 		// standalone continuation bytes. Only the former should be skipped.
 		before := max(0, offset-utf8.UTFMax+1)
 		around, err := io.ReadAll(io.NewSectionReader(f, before, min(int64(2*utf8.UTFMax-1), size-before)))
 		if err != nil {
-			return nil, offset, err
+			return nil, offset, false, err
 		}
 		for i := 0; i < len(around) && int64(i) < offset-before; i++ {
+			if live && !utf8.FullRune(around[i:]) {
+				// A tail may begin inside the incomplete suffix. Keep its
+				// leading byte so an append can still complete the character.
+				offset = before + int64(i)
+				break
+			}
 			_, width := utf8.DecodeRune(around[i:])
 			if width > 1 && before+int64(i+width) > offset {
 				offset = before + int64(i+width)
@@ -477,10 +485,14 @@ func readLogBytes(f *os.File, offset, size int64, limit int, trimStart bool) (co
 	}
 	data, err := io.ReadAll(io.NewSectionReader(f, offset, min(int64(limit+utf8.UTFMax), size-offset)))
 	if err != nil {
-		return nil, offset, err
+		return nil, offset, false, err
 	}
 	end := 0
 	for end < len(data) && end < limit {
+		if live && !utf8.FullRune(data[end:]) {
+			pending = true
+			break
+		}
 		_, width := utf8.DecodeRune(data[end:])
 		if end+width > limit {
 			break
@@ -489,5 +501,5 @@ func readLogBytes(f *os.File, offset, size int64, limit int, trimStart bool) (co
 		// progress without splitting a valid rune across pages.
 		end += width
 	}
-	return data[:end], offset, nil
+	return data[:end], offset, pending, nil
 }

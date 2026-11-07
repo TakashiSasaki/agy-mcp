@@ -43,7 +43,7 @@ type readArtifactInput struct {
 	StartLine int    `json:"start_line,omitempty" jsonschema:"1-based line number to start reading from (default 1); beyond EOF returns empty content without clamping"`
 	EndLine   int    `json:"end_line,omitempty" jsonschema:"1-based line number to end reading at, inclusive (0 = read to end or max_bytes)"`
 	TailLines int    `json:"tail_lines,omitempty" jsonschema:"if greater than 0, reads the trailing N lines of the file (useful for logs)"`
-	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum content bytes to return (default 64 KiB, max 256 KiB)"`
+	MaxBytes  int    `json:"max_bytes,omitempty" jsonschema:"maximum UTF-8 content bytes after replacing invalid encoding (default 64 KiB, max 256 KiB); original-file hash and size are unchanged"`
 }
 
 type readArtifactOutput struct {
