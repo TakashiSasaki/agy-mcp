@@ -57,7 +57,7 @@ func parseFlatTAP(data []byte) VerificationResult {
 			continue
 		}
 		skipped := false
-		if before, directive, found := strings.Cut(line, "#"); found {
+		if before, directive, found := cutUnescapedHash(line); found {
 			fields := strings.Fields(directive)
 			if len(fields) == 0 || !strings.EqualFold(fields[0], "SKIP") {
 				warn("unsupported_tap_directive")
@@ -102,4 +102,19 @@ func parseFlatTAP(data []byte) VerificationResult {
 	}
 	return finishJUnit(out, junitCounts{tests: out.Tests, passed: out.Passed,
 		failed: out.Failed, skipped: out.Skipped}, len(out.Warnings) == 0)
+}
+
+func cutUnescapedHash(s string) (before, directive string, found bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '#' {
+			slashes := 0
+			for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+				slashes++
+			}
+			if slashes%2 == 0 {
+				return s[:i], s[i+1:], true
+			}
+		}
+	}
+	return "", "", false
 }

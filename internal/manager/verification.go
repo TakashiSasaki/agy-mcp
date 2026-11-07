@@ -60,8 +60,8 @@ type junitSuite struct {
 	name       string
 }
 type junitCase struct {
-	name, class              string
-	failed, errored, skipped bool
+	name, class                        string
+	failed, errored, skipped, disabled bool
 }
 
 // Verification preserves the original JUnit-only manager entry point.
@@ -141,6 +141,17 @@ func validateJUnitCounters(suite junitSuite, counts junitCounts) bool {
 	seen := make(map[string]bool)
 	for _, attr := range suite.attributes {
 		name := attr.Name.Local
+		if name == "disabled" {
+			if seen[name] {
+				return false
+			}
+			got, err := strconv.Atoi(attr.Value)
+			if err != nil || got != 0 {
+				return false
+			}
+			seen[name] = true
+			continue
+		}
 		want, known := values[name]
 		if !known {
 			continue
@@ -192,7 +203,7 @@ func parseJUnit(data []byte) VerificationResult {
 	if !p.seenRoot || !p.closedRoot || p.depth != 0 || p.current != nil || len(p.suites) != 0 {
 		p.warn("incomplete_report")
 	}
-	if p.counts.tests == 0 || p.counts.tests == p.counts.skipped {
+	if p.counts.tests == 0 || p.counts.passed+p.counts.failed+p.counts.errors == 0 {
 		p.warn("no_executed_testcases")
 	}
 	p.validateNodeSummary()
@@ -292,6 +303,11 @@ func (p *junitParser) start(token xml.StartElement) bool {
 		if p.current != nil || (p.depth > 1 && (len(p.suites) == 0 || p.depth != p.suites[len(p.suites)-1].depth+1)) {
 			p.warn("invalid_suite_nesting")
 		}
+		if d := xmlAttribute(token.Attr, "disabled"); d != "" {
+			if got, err := strconv.Atoi(d); err == nil && got > 0 {
+				p.warn("unsupported_disabled_tests")
+			}
+		}
 		p.suites = append(p.suites, junitSuite{before: p.counts, attributes: token.Attr, depth: p.depth, name: token.Name.Local})
 	case "testcase":
 		// MEASURED against Node.js v24.22.2: its built-in JUnit reporter writes
@@ -300,7 +316,11 @@ func (p *junitParser) start(token xml.StartElement) bool {
 		if p.current != nil || len(p.suites) == 0 || (!rootCases && p.suites[len(p.suites)-1].name != junitSuiteTag) || p.depth != p.suites[len(p.suites)-1].depth+1 {
 			p.warn("invalid_testcase_nesting")
 		}
-		p.current = &junitCase{name: xmlAttribute(token.Attr, "name"), class: xmlAttribute(token.Attr, "classname")}
+		p.current = &junitCase{
+			name:     xmlAttribute(token.Attr, "name"),
+			class:    xmlAttribute(token.Attr, "classname"),
+			disabled: p.disabledCase(token.Attr),
+		}
 	case "failure", agentOutcomeError, junitSkippedTag:
 		if p.current == nil {
 			p.warn("orphan_test_result")
@@ -319,6 +339,30 @@ func (p *junitParser) start(token xml.StartElement) bool {
 		p.depth--
 	}
 	return true
+}
+
+// GoogleTest v1.16.0 emits notrun/suppressed for disabled cases. Read every
+// execution attribute: encoding/xml does not reject duplicate attributes.
+func (p *junitParser) disabledCase(attrs []xml.Attr) bool {
+	seen := make(map[string]bool)
+	disabled := false
+	for _, attr := range attrs {
+		name := attr.Name.Local
+		if name != "status" && name != "result" {
+			continue
+		}
+		if seen[name] {
+			p.warn("duplicate_testcase_execution_attribute")
+		}
+		seen[name] = true
+		if (name == "status" && attr.Value == "notrun") || (name == "result" && attr.Value == "suppressed") {
+			disabled = true
+		}
+	}
+	if disabled {
+		p.warn("unsupported_disabled_tests")
+	}
+	return disabled
 }
 
 func (p *junitParser) failure(token xml.StartElement) bool {
@@ -368,6 +412,7 @@ func (p *junitParser) end(token xml.EndElement) {
 				p.counts.failed++
 			case p.current.skipped:
 				p.counts.skipped++
+			case p.current.disabled:
 			default:
 				p.counts.passed++
 			}
