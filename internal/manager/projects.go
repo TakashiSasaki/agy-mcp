@@ -15,10 +15,11 @@ import (
 
 // ProjectWorktree models a linked worktree or checkout associated with a project.
 type ProjectWorktree struct {
-	Path    string `json:"path" jsonschema:"absolute path to the active linked worktree directory"`
-	Branch  string `json:"branch,omitempty" jsonschema:"active git branch name for this worktree"`
-	Head    string `json:"head,omitempty" jsonschema:"short commit SHA of the current HEAD"`
-	IsClean bool   `json:"is_clean" jsonschema:"true if worktree has no uncommitted changes"`
+	HeadFull string `json:"head_full,omitempty" jsonschema:"full Git commit object ID for expected_git_head preconditions; absent if unavailable"`
+	Path     string `json:"path" jsonschema:"absolute path to the active linked worktree directory"`
+	Branch   string `json:"branch,omitempty" jsonschema:"active git branch name for this worktree"`
+	Head     string `json:"head,omitempty" jsonschema:"short commit SHA of the current HEAD"`
+	IsClean  bool   `json:"is_clean" jsonschema:"true if worktree has no uncommitted changes"`
 }
 
 // ProjectInfo provides structured metadata for a repository/project.
@@ -34,6 +35,7 @@ type ProjectInfo struct {
 // ResolveWorkspaceResult carries a path only for a unique selection. Resolved
 // and Ambiguous are mutually exclusive; candidates never authorize execution.
 type ResolveWorkspaceResult struct {
+	HeadFull   string   `json:"head_full,omitempty"`
 	Resolved   bool     `json:"resolved"`
 	Path       string   `json:"path,omitempty"`
 	Branch     string   `json:"branch,omitempty"`
@@ -316,14 +318,19 @@ func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
 					branch = strings.TrimPrefix(branch, "refs/heads/")
 				}
 				head := curHead
+				fullHead := curHead
+				if !validExpectedGitHead(fullHead) {
+					fullHead = ""
+				}
 				if len(head) > 7 {
 					head = head[:7]
 				}
 				worktrees = append(worktrees, ProjectWorktree{
-					Path:    cleanPath,
-					Branch:  branch,
-					Head:    head,
-					IsClean: isClean,
+					Path:     cleanPath,
+					HeadFull: fullHead,
+					Branch:   branch,
+					Head:     head,
+					IsClean:  isClean,
 				})
 			}
 		}
@@ -438,7 +445,10 @@ func resolveWorkspaceDirectory(path, branchQuery string) ResolveWorkspaceResult 
 	if branchQuery != "" && !strings.EqualFold(branch, branchQuery) && !strings.EqualFold(filepath.Base(path), branchQuery) {
 		return ResolveWorkspaceResult{Error: fmt.Sprintf("branch %q does not match directory %q (branch %q)", branchQuery, path, branch)}
 	}
-	return ResolveWorkspaceResult{Resolved: true, Path: path, Branch: branch, Head: head}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	fullHead, _ := readGitHead(ctx, path)
+	return ResolveWorkspaceResult{Resolved: true, Path: path, Branch: branch, Head: head, HeadFull: fullHead}
 }
 
 func worktreeCandidates(worktrees []ProjectWorktree) []string {
@@ -480,7 +490,7 @@ func resolveProjectWorktree(proj ProjectInfo, branchQuery string) ResolveWorkspa
 		// Recheck existence instead of returning a path that vanished since discovery.
 		out := resolveWorkspaceDirectory(wt.Path, "")
 		if out.Resolved {
-			out.Branch, out.Head = wt.Branch, wt.Head
+			out.Branch, out.Head, out.HeadFull = wt.Branch, wt.Head, wt.HeadFull
 		}
 		return out
 	default:

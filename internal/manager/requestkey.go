@@ -14,20 +14,22 @@ import (
 // and tags are part of the persisted key; TestRequestKeyGolden pins them and
 // TestRequestKeyFieldsAreOmitempty pins the omitempty rule.
 type requestKeyFields struct {
-	Cwd              string        `json:"cwd,omitempty"`
-	Prompt           string        `json:"prompt,omitempty"`
-	Model            string        `json:"model,omitempty"`
-	Effort           string        `json:"effort,omitempty"`
-	Mode             string        `json:"mode,omitempty"`
-	Agent            string        `json:"agent,omitempty"`
-	Sandbox          bool          `json:"sandbox,omitempty"`
-	Dirs             []string      `json:"dirs,omitempty"`
-	SkipProjectRules bool          `json:"skip_project_rules,omitempty"`
-	ConversationID   string        `json:"conversation_id,omitempty"`
-	ContinueLatest   bool          `json:"continue_latest,omitempty"`
-	JSONSchema       string        `json:"json_schema,omitempty"`
-	Timeout          time.Duration `json:"timeout,omitempty"`
-	ArtifactDirs     []string      `json:"artifact_dirs,omitempty"`
+	Cwd               string        `json:"cwd,omitempty"`
+	Prompt            string        `json:"prompt,omitempty"`
+	Model             string        `json:"model,omitempty"`
+	Effort            string        `json:"effort,omitempty"`
+	Mode              string        `json:"mode,omitempty"`
+	Agent             string        `json:"agent,omitempty"`
+	Sandbox           bool          `json:"sandbox,omitempty"`
+	Dirs              []string      `json:"dirs,omitempty"`
+	SkipProjectRules  bool          `json:"skip_project_rules,omitempty"`
+	ConversationID    string        `json:"conversation_id,omitempty"`
+	ContinueLatest    bool          `json:"continue_latest,omitempty"`
+	JSONSchema        string        `json:"json_schema,omitempty"`
+	Timeout           time.Duration `json:"timeout,omitempty"`
+	ArtifactDirs      []string      `json:"artifact_dirs,omitempty"`
+	ExpectedGitBranch string        `json:"expected_git_branch,omitempty"`
+	ExpectedGitHead   string        `json:"expected_git_head,omitempty"`
 }
 
 // requestKey identifies a normalized request for idempotency_key replays. It
@@ -60,20 +62,21 @@ func requestKey(req StartRequest) string {
 		convID = ""
 	}
 	b, err := json.Marshal(requestKeyFields{
-		Cwd:              req.Cwd,
-		Prompt:           req.Prompt,
-		Model:            req.Model,
-		Effort:           req.Effort,
-		Mode:             req.Mode,
-		Agent:            req.Agent,
-		Sandbox:          req.Sandbox,
-		Dirs:             req.Dirs,
-		SkipProjectRules: req.SkipProjectRules,
-		ConversationID:   convID,
-		ContinueLatest:   req.ContinueLatest,
-		JSONSchema:       req.JSONSchema,
-		Timeout:          req.Timeout,
-		ArtifactDirs:     req.ArtifactDirs,
+		Cwd:               req.Cwd,
+		Prompt:            req.Prompt,
+		Model:             req.Model,
+		Effort:            req.Effort,
+		Mode:              req.Mode,
+		Agent:             req.Agent,
+		Sandbox:           req.Sandbox,
+		Dirs:              req.Dirs,
+		SkipProjectRules:  req.SkipProjectRules,
+		ConversationID:    convID,
+		ContinueLatest:    req.ContinueLatest,
+		JSONSchema:        req.JSONSchema,
+		Timeout:           req.Timeout,
+		ArtifactDirs:      req.ArtifactDirs,
+		ExpectedGitBranch: req.ExpectedGitBranch, ExpectedGitHead: req.ExpectedGitHead,
 	})
 	if err != nil {
 		return ""
@@ -101,6 +104,11 @@ func requestKey(req StartRequest) string {
 func sameRequest(meta jobstore.Meta, req StartRequest, args []string) bool {
 	if meta.RequestKey != "" {
 		return meta.RequestKey == requestKey(req)
+	}
+	// CLI args never carried preconditions, so a legacy argument-only record
+	// must match the explicitly persisted expectations as well.
+	if meta.ExpectedGitBranch != req.ExpectedGitBranch || meta.ExpectedGitHead != req.ExpectedGitHead {
+		return false
 	}
 	if slices.Equal(meta.Args, args) {
 		return true

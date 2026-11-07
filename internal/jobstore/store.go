@@ -26,26 +26,28 @@ import (
 // progress.json. Anything that needs a fresh run's conversation id must read
 // progress.json, which is why Status and conversationLive both scan it.
 type Meta struct {
-	TaskLabel      string        `json:"task_label,omitempty"`
-	ArtifactDirs   []string      `json:"artifact_dirs,omitempty"`
-	ID             string        `json:"id"`
-	AgyPath        string        `json:"agy_path"`
-	Args           []string      `json:"args"`
-	Cwd            string        `json:"cwd"`
-	ExecutionCwd   string        `json:"execution_cwd,omitempty"`
-	GitBranch      string        `json:"git_branch,omitempty"`
-	GitHead        string        `json:"git_head,omitempty"`
-	GitDirty       *bool         `json:"git_dirty,omitempty"`
-	Model          string        `json:"model,omitempty"`
-	ConversationID string        `json:"conversation_id,omitempty"`
-	IdempotencyKey string        `json:"idempotency_key,omitempty"`
-	RequestKey     string        `json:"request_key,omitempty"` // hash of the normalized request, set only with an idempotency_key; compared on a replay
-	Prompt         string        `json:"prompt"`
-	StartedAt      time.Time     `json:"started_at"`
-	PID            int           `json:"pid"`
-	StartTimeTicks uint64        `json:"start_time_ticks,omitempty"` // supervisor start time (Linux /proc ticks, Windows FILETIME); 0 = unknown
-	BootID         string        `json:"boot_id"`
-	Timeout        time.Duration `json:"timeout,omitempty"`
+	ExpectedGitBranch string        `json:"expected_git_branch,omitempty"`
+	ExpectedGitHead   string        `json:"expected_git_head,omitempty"`
+	TaskLabel         string        `json:"task_label,omitempty"`
+	ArtifactDirs      []string      `json:"artifact_dirs,omitempty"`
+	ID                string        `json:"id"`
+	AgyPath           string        `json:"agy_path"`
+	Args              []string      `json:"args"`
+	Cwd               string        `json:"cwd"`
+	ExecutionCwd      string        `json:"execution_cwd,omitempty"`
+	GitBranch         string        `json:"git_branch,omitempty"`
+	GitHead           string        `json:"git_head,omitempty"`
+	GitDirty          *bool         `json:"git_dirty,omitempty"`
+	Model             string        `json:"model,omitempty"`
+	ConversationID    string        `json:"conversation_id,omitempty"`
+	IdempotencyKey    string        `json:"idempotency_key,omitempty"`
+	RequestKey        string        `json:"request_key,omitempty"` // hash of the normalized request, set only with an idempotency_key; compared on a replay
+	Prompt            string        `json:"prompt"`
+	StartedAt         time.Time     `json:"started_at"`
+	PID               int           `json:"pid"`
+	StartTimeTicks    uint64        `json:"start_time_ticks,omitempty"` // supervisor start time (Linux /proc ticks, Windows FILETIME); 0 = unknown
+	BootID            string        `json:"boot_id"`
+	Timeout           time.Duration `json:"timeout,omitempty"`
 }
 
 // Exit-code sentinels the supervisor writes to the exit_code file and the

@@ -121,23 +121,25 @@ func (m *Manager) SetProjectDirsForTest(projectsDir, dataDir string) {
 
 // StartRequest describes a run to start.
 type StartRequest struct {
-	TaskLabel        string   // optional human-readable label; metadata only, not part of request identity
-	ArtifactDirs     []string // explicit artifact read roots; not execution workspaces
-	Prompt           string
-	Model            string   // optional; falls back to cfg.DefaultModel, then reduced by modelID
-	Effort           string   // optional; --effort <low|medium|high>, reasoning effort for the session
-	Mode             string   // optional; --mode <accept-edits>, agy's agent execution mode (mcptools refuses plan, issue #219)
-	Agent            string   // optional; --agent <name>, selects a specific agy agent
-	Sandbox          bool     // optional; --sandbox, runs agy with terminal restrictions
-	Dirs             []string // repeated --add-dir
-	SkipProjectRules bool     // optional; omits the implicit --add-dir <Cwd>, which loads the project's rule files on agy that needs it (MEASURED: agy 1.2.16 and 1.4.8 load them without it)
-	ConversationID   string   // optional; --conversation <id>
-	JSONSchema       string   // optional; --json-schema <inline schema or path>, constrains the final stream-json result
-	IdempotencyKey   string   // optional; retry token used only by agy-mcp, never forwarded to agy
-	Priority         string   // optional; "optional" lets StartJob refuse the run when the model's quota group is low (see checkPriority); never forwarded to agy and not part of the request key
-	ContinueLatest   bool     // resolve cwd's latest conversation before the run
-	Cwd              string   // optional; defaults to process cwd
-	Timeout          time.Duration
+	ExpectedGitBranch string   // optional exact branch precondition for fresh work only
+	ExpectedGitHead   string   // optional full commit object ID precondition for fresh work only
+	TaskLabel         string   // optional human-readable label; metadata only, not part of request identity
+	ArtifactDirs      []string // explicit artifact read roots; not execution workspaces
+	Prompt            string
+	Model             string   // optional; falls back to cfg.DefaultModel, then reduced by modelID
+	Effort            string   // optional; --effort <low|medium|high>, reasoning effort for the session
+	Mode              string   // optional; --mode <accept-edits>, agy's agent execution mode (mcptools refuses plan, issue #219)
+	Agent             string   // optional; --agent <name>, selects a specific agy agent
+	Sandbox           bool     // optional; --sandbox, runs agy with terminal restrictions
+	Dirs              []string // repeated --add-dir
+	SkipProjectRules  bool     // optional; omits the implicit --add-dir <Cwd>, which loads the project's rule files on agy that needs it (MEASURED: agy 1.2.16 and 1.4.8 load them without it)
+	ConversationID    string   // optional; --conversation <id>
+	JSONSchema        string   // optional; --json-schema <inline schema or path>, constrains the final stream-json result
+	IdempotencyKey    string   // optional; retry token used only by agy-mcp, never forwarded to agy
+	Priority          string   // optional; "optional" lets StartJob refuse the run when the model's quota group is low (see checkPriority); never forwarded to agy and not part of the request key
+	ContinueLatest    bool     // resolve cwd's latest conversation before the run
+	Cwd               string   // optional; defaults to process cwd
+	Timeout           time.Duration
 }
 
 // Job is the handle returned to callers.
@@ -523,6 +525,12 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 // lookup. Mutable continue_latest resolution happens after modern replay, so
 // an unreadable conversation cache cannot hide an already-created job.
 func (m *Manager) normalizeRequest(req StartRequest) (StartRequest, error) {
+	if req.ExpectedGitHead != "" {
+		if !validExpectedGitHead(req.ExpectedGitHead) {
+			return StartRequest{}, fmt.Errorf("expected_git_head must be a full 40- or 64-character hexadecimal commit ID")
+		}
+		req.ExpectedGitHead = strings.ToLower(req.ExpectedGitHead)
+	}
 	var artifactErr error
 	req.ArtifactDirs, artifactErr = normalizeArtifactDirs(req.ArtifactDirs)
 	if artifactErr != nil {
@@ -658,6 +666,20 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		}
 	}()
 
+	// A replay above remains valid even if its former workspace was removed.
+	// New work must have a directory before probes, admission or job creation.
+	info, cwdErr := os.Stat(req.Cwd)
+	if cwdErr != nil {
+		return Job{}, refusedStart("workspace_unavailable", "change_request", false, fmt.Errorf("working directory %q is unavailable: %w", req.Cwd, cwdErr))
+	}
+	if !info.IsDir() {
+		return Job{}, refusedStart("workspace_unavailable", "change_request", false, fmt.Errorf("working directory %q is not a directory", req.Cwd))
+	}
+
+	if err := checkGitPreconditions(req); err != nil {
+		return Job{}, err
+	}
+
 	// A cache read failure must never turn a continuation into fresh work.
 	// Replay above already returned any matching modern request without needing
 	// this mutable cache. Resolve before the CLI probe, gate and job creation.
@@ -724,6 +746,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	}
 	gitBranch, gitHead, gitDirty := DetectGitMetadata(req.Cwd)
 	meta := jobstore.Meta{
+		ExpectedGitBranch: req.ExpectedGitBranch, ExpectedGitHead: req.ExpectedGitHead,
 		TaskLabel:      req.TaskLabel,
 		ArtifactDirs:   req.ArtifactDirs,
 		ID:             id,

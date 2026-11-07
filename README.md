@@ -201,8 +201,8 @@ Or add to your MCP client config:
 
 ## Tools
 
-- `agy_run(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, artifact_dirs?)` -> `{ job_id, conversation_id?, state, quota? }`
-- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, artifact_dirs?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
+- `agy_run(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, artifact_dirs?, expected_git_branch?, expected_git_head?)` -> `{ job_id, conversation_id?, state, quota? }`
+- `agy_run_sync(prompt, model?, effort?, mode?, agent?, sandbox?, dirs?, project_rules?, conversation_id?, continue_latest?, cwd?, timeout?, json_schema?, idempotency_key?, priority?, task_label?, artifact_dirs?, expected_git_branch?, expected_git_head?, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
 - `agy_status(job_id, include_result?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota? }`
 - `agy_wait(job_id, wait?)` -> `{ job_id, state, elapsed, result?, error?, failure_reason?, recovery?, retryable?, error_id?, conversation_id?, execution_cwd?, git_branch?, git_head?, git_dirty?, model?, requested_model?, selected_model?, selected_model_source?, effective_model, effective_model_source?, partial, num_turns?, usage?, job_usage?, usage_scope?, step_type?, quota?, note? }`
 - `agy_cancel(job_id)` -> `{ state }`
@@ -216,7 +216,7 @@ Or add to your MCP client config:
 - `agy_list_artifacts(job_id, subpath?, pattern?, max_entries?)` -> `{ job_id, root, entries, scope, roots, expires_at?, limit_reached }`
 - `agy_read_artifact(job_id, path, start_line?, end_line?, tail_lines?, max_bytes?)` -> `{ job_id, path, size_bytes, sha256, total_lines, start_line, end_line, truncated, content }`
 - `agy_list_projects(query?)` -> `{ projects }`
-- `agy_resolve_workspace(project, branch?)` -> `{ resolved, path?, branch?, head?, ambiguous, candidates?, error? }`
+- `agy_resolve_workspace(project, branch?)` -> `{ resolved, path?, branch?, head?, head_full?, ambiguous, candidates?, error? }`
 - `list_models()` -> `{ models, model_details }`
 - `list_agents(cwd?)` -> `{ agents }`
 - `list_sessions(dir?, exclude_transient?, limit?, offset?)` -> `{ sessions, total_count }`
@@ -319,15 +319,23 @@ The supervisor appends timestamped CLI events while the job runs and records its
 
 ### Planned execution controls
 
-Verified read-only filesystem/network/credential policies, pre-deadline cooperative checkpoints, workspace/head preconditions and provider-backed token budgets are separate follow-up work. This release exposes evidence and its limits; it does not promise resumable shell processes or token-budget enforcement. The installed agy 1.4.12 `--help` was inspected without starting a model turn; its listed flags alone do not establish a supported per-command receipt or token-budget contract. A general `agy_exec` interface remains deferred until its execution policy is specified.
+Verified read-only filesystem/network/credential policies, pre-deadline cooperative checkpoints, atomic workspace/head locks and provider-backed token budgets are separate follow-up work. This release exposes evidence and its limits; it does not promise resumable shell processes or token-budget enforcement. The installed agy 1.4.12 `--help` was inspected without starting a model turn; its listed flags alone do not establish a supported per-command receipt or token-budget contract. A general `agy_exec` interface remains deferred until its execution policy is specified.
 
 ### Start errors
+
+Start refusal outputs include `start_error_code`, equal to the native
+`error_code`. Use `start_error_code` when a connector replaces `error_code` with a
+generic transport category. The production connector was observed on 2026-11-07
+to replace native `idempotency_conflict` and `conversation_busy` with
+`INVALID_ARGUMENT` while retaining `job_started` and `next_action`.
 
 Rejected `agy_run` and `agy_run_sync` calls remain MCP tool errors (`isError: true`) with the original text, and also return structured `{ error_code, message, job_id?, job_started, retryable, next_action, retry_after?, quota_group? }`. The output schema accepts either the existing success object or this error object. These operation errors do not add job states or change the closed `failure_reason` set.
 
 | `error_code` | Recommended action |
 |---|---|
 | `invalid_argument`, `idempotency_conflict` | Fix the request; do not change keys merely to evade a conflict. |
+| `workspace_unavailable` | Select or create an existing working directory; no job was started. Existing idempotent replays do not require their former directory to remain present. |
+| `workspace_mismatch` | Recheck the selected Git branch/full HEAD and update the expected preconditions only when the changed workspace is intended; no job was started. |
 | `capacity_exceeded` | Wait for capacity before retrying the same request. |
 | `conversation_busy` | Wait for the conversation's active job. |
 | `conversation_cache_unavailable` | No new job started. Retry the same request when the conversation cache is readable, or deliberately select an explicit `conversation_id`. |
@@ -347,6 +355,18 @@ Omitting `include_result` preserves the full-result `agy_status`, `agy_wait` and
 `agy_get_result` returns at most `max_bytes` UTF-8 bytes of result text per page (default 16 KiB, minimum 4 bytes, maximum 1 MiB); metadata is additional. Invalid UTF-8 is replaced with the replacement character. Concatenate `content` in order until `complete` is true. A running job returns `next_action: "wait"` without result text. Cursors are bound to the job ID, whole-result SHA-256, job state and partial flag. Malformed cursors, different jobs, changed snapshots and invalid byte offsets fail rather than mix answers. An expired job cannot be recovered by a cursor. Schema-constrained JSON results remain text; parse them after assembling every page. The final page marks a terminal result collected, while intermediate pages do not. A collection marker records handler completion and does not prove transport delivery.
 
 `list_sessions` lists known conversations. By default, `exclude_transient` is true, omitting defunct or missing directories as well as ephemeral scratch and test directories (/tmp, /var/tmp, scratch, and shim directories). Pass `exclude_transient: false` to include all cached entries. Supports pagination with `limit` and `offset`, returning `total_count` of matching entries before slicing.
+
+For new jobs, `expected_git_branch` can require an exact branch name and
+`expected_git_head` can require a full 40- or 64-character hexadecimal commit ID.
+Use `head_full` from `agy_resolve_workspace` (or `git rev-parse HEAD`); the
+existing short `head` display remains unchanged and is not a valid full-ID
+precondition. `head_full` is omitted for unavailable or uncommitted Git state. Hex case is normalized. The manager checks these
+expectations before creating a fresh job and refuses mismatches or unverifiable
+Git state with `workspace_mismatch` and `job_started: false`. Both expectations
+are included in idempotency identity and retained in job metadata. Same-key
+replay returns the existing job even after that job changed HEAD or the former
+working directory was removed. These checks do not lock the repository or
+prevent a later change between preflight and agent execution.
 
 `execution_cwd`, `git_branch`, `git_head` (short commit SHA), and `git_dirty` in job status outputs capture the concrete directory and Git metadata at job invocation time, allowing callers to verify which branch and commit were active during execution.
 

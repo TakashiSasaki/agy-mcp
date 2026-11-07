@@ -79,7 +79,7 @@ func startValidationErrors(next mcp.MethodHandler) mcp.MethodHandler {
 					break
 				}
 			}
-			data, _ := json.Marshal(startErrorOutput{ErrorCode: "invalid_argument", Message: message, JobStarted: new(false), NextAction: actionChangeRequest})
+			data, _ := json.Marshal(startErrorOutput{StartErrorCode: startInvalidArgument, ErrorCode: startInvalidArgument, Message: message, JobStarted: new(false), NextAction: actionChangeRequest})
 			response.StructuredContent = json.RawMessage(data)
 		}
 		return result, err

@@ -71,7 +71,7 @@ func TestAgentRunRejectionsAreStructured(t *testing.T) {
 				if err := schemas[tool].Validate(out); err != nil {
 					t.Fatalf("error does not satisfy the advertised output schema: %v", err)
 				}
-				if out["error_code"] != "invalid_argument" || out["job_started"] != false || out["retryable"] != false || out["next_action"] != "change_request" || out["job_id"] != nil {
+				if out["start_error_code"] != "invalid_argument" || out["error_code"] != "invalid_argument" || out["job_started"] != false || out["retryable"] != false || out["next_action"] != "change_request" || out["job_id"] != nil {
 					t.Fatalf("unsafe rejection metadata: %+v", out)
 				}
 				if out["message"] == "" || len(res.Content) == 0 {
@@ -111,7 +111,7 @@ func TestAgentStartErrorRecoveryContract(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := describeStartError(fmt.Errorf("context: %w", tc.err))
-			if out.ErrorCode != tc.code || out.NextAction != tc.action || !eqBoolPtr(out.JobStarted, tc.started) || out.Message != "context: "+tc.err.Error() {
+			if out.StartErrorCode != tc.code || out.ErrorCode != tc.code || out.NextAction != tc.action || !eqBoolPtr(out.JobStarted, tc.started) || out.Message != "context: "+tc.err.Error() {
 				t.Fatalf("error decision: %+v", out)
 			}
 			if tc.name == "quota" && (out.RetryAfter != "2026-11-04T00:00:00Z" || out.QuotaGroup != "Gemini Models" || out.Retryable) {

@@ -26,6 +26,7 @@ type resolveWorkspaceInput struct {
 }
 
 type resolveWorkspaceOutput struct {
+	HeadFull   string   `json:"head_full,omitempty" jsonschema:"full Git commit object ID for expected_git_head on agy_run; present only for a uniquely resolved committed Git workspace, absent when unavailable"`
 	Resolved   bool     `json:"resolved" jsonschema:"true if a concrete workspace directory was unambiguously resolved"`
 	Path       string   `json:"path,omitempty" jsonschema:"execution directory; present only when resolved is true and ambiguous is false; never use candidate descriptions as cwd"`
 	Branch     string   `json:"branch,omitempty" jsonschema:"active git branch for the resolved directory"`
@@ -56,7 +57,7 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyResolveWorkspace,
 		Title:       "Resolve project workspace",
 		Annotations: annReadLocal,
-		Description: "Resolve project (required name, ID, repository URL or server-side absolute directory) and optional branch to a unique cwd for agy_run or agy_run_sync. Only resolved true with ambiguous false carries a usable path. Multiple matches return resolved false, ambiguous true and candidates, with no path/branch/head; a default branch is never selected implicitly. Specify a full branch name or an absolute candidate path, then resolve again. Exact case-sensitive branch names outrank case-insensitive branch/folder aliases; aliases must be unique. For an absolute directory, branch is a constraint on that directory, not a request to switch branches. Missing branches or directories return resolved false and an error, without a fallback path. A project registered with multiple roots remains ambiguous by ID; select an absolute root directory. Call agy_list_projects to browse choices. This tool never starts work or changes a checkout.",
+		Description: "Resolve project (required name, ID, repository URL or server-side absolute directory) and optional branch to a unique cwd for agy_run or agy_run_sync. Only resolved true with ambiguous false carries a usable path. A resolved committed Git workspace includes head_full for agy_run expected_git_head; head retains its short display value. Multiple matches return resolved false, ambiguous true and candidates, with no path/branch/head; a default branch is never selected implicitly. Specify a full branch name or an absolute candidate path, then resolve again. Exact case-sensitive branch names outrank case-insensitive branch/folder aliases; aliases must be unique. For an absolute directory, branch is a constraint on that directory, not a request to switch branches. Missing branches or directories return resolved false and an error, without a fallback path. A project registered with multiple roots remains ambiguous by ID; select an absolute root directory. Call agy_list_projects to browse choices. This tool never starts work or changes a checkout.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in resolveWorkspaceInput) (*mcp.CallToolResult, resolveWorkspaceOutput, error) {
 		res, err := mgr.ResolveWorkspace(in.Project, in.Branch)
 		if err != nil {
@@ -67,6 +68,7 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 			Path:       res.Path,
 			Branch:     res.Branch,
 			Head:       res.Head,
+			HeadFull:   res.HeadFull,
 			Ambiguous:  res.Ambiguous,
 			Candidates: res.Candidates,
 			Error:      res.Error,
