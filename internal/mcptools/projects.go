@@ -17,7 +17,7 @@ type listProjectsInput struct {
 }
 
 type listProjectsOutput struct {
-	Projects []manager.ProjectInfo `json:"projects" jsonschema:"list of discovered projects, repositories, and linked worktrees"`
+	Projects []manager.ProjectInfo `json:"projects" jsonschema:"list of discovered projects, repositories, and linked worktrees; multi-root projects have one entry per root and may repeat a project ID"`
 }
 
 type resolveWorkspaceInput struct {
@@ -40,7 +40,7 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyListProjects,
 		Title:       "List registered projects",
 		Annotations: annReadLocal,
-		Description: "List registered Antigravity projects and repositories under /data with their paths, git remote URLs, default branches, and active linked worktrees. Use it to discover available projects before starting a run, or pass query to filter by name, ID, or repo URL. Pair with agy_resolve_workspace to resolve a project to a concrete working directory for agy_run.",
+		Description: "List registered Antigravity projects and repositories under /data with their paths, git remote URLs, default branches, and active linked worktrees. Every local resource is retained; project IDs can repeat across roots, and distinct registrations sharing a root remain discoverable. Ordinary repositories and shared-bare repositories both enumerate linked worktrees. Local file URIs are decoded; remote file authorities and nonlocal URIs are omitted. Use it to discover available projects before starting a run, or pass query to filter by name, ID, or repo URL. Pair with agy_resolve_workspace to resolve a project to a concrete working directory for agy_run.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listProjectsInput) (*mcp.CallToolResult, listProjectsOutput, error) {
 		projs, err := mgr.ListProjects(in.Query)
 		if err != nil {
@@ -56,7 +56,7 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyResolveWorkspace,
 		Title:       "Resolve project workspace",
 		Annotations: annReadLocal,
-		Description: "Resolve project (required name, ID, repository URL or server-side absolute directory) and optional branch to a unique cwd for agy_run or agy_run_sync. Only resolved true with ambiguous false carries a usable path. Multiple matches return resolved false, ambiguous true and candidates, with no path/branch/head; a default branch is never selected implicitly. Specify a full branch name or an absolute candidate path, then resolve again. Exact case-sensitive branch names outrank case-insensitive branch/folder aliases; aliases must be unique. For an absolute directory, branch is a constraint on that directory, not a request to switch branches. Missing branches or directories return resolved false and an error, without a fallback path. Call agy_list_projects to browse choices. This tool never starts work or changes a checkout.",
+		Description: "Resolve project (required name, ID, repository URL or server-side absolute directory) and optional branch to a unique cwd for agy_run or agy_run_sync. Only resolved true with ambiguous false carries a usable path. Multiple matches return resolved false, ambiguous true and candidates, with no path/branch/head; a default branch is never selected implicitly. Specify a full branch name or an absolute candidate path, then resolve again. Exact case-sensitive branch names outrank case-insensitive branch/folder aliases; aliases must be unique. For an absolute directory, branch is a constraint on that directory, not a request to switch branches. Missing branches or directories return resolved false and an error, without a fallback path. A project registered with multiple roots remains ambiguous by ID; select an absolute root directory. Call agy_list_projects to browse choices. This tool never starts work or changes a checkout.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in resolveWorkspaceInput) (*mcp.CallToolResult, resolveWorkspaceOutput, error) {
 		res, err := mgr.ResolveWorkspace(in.Project, in.Branch)
 		if err != nil {

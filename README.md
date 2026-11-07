@@ -348,6 +348,16 @@ Omitting `include_result` preserves the full-result `agy_status`, `agy_wait` and
 
 `agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
 
+Project discovery retains one entry per registered resource root. A multi-root
+project therefore repeats its project ID; resolving that ID requires an absolute
+directory selection instead of silently choosing the last resource. Distinct
+registrations that share a root retain their own IDs. Local `file:` URIs decode
+percent escapes once (including spaces and Unicode); `localhost` is accepted,
+while remote file authorities, relative paths and nonlocal URI schemes are
+omitted. Both ordinary repositories and shared-bare layouts enumerate linked
+worktrees. NUL-delimited Git output preserves spaces, newlines and trailing
+whitespace in worktree paths. Listings and ambiguity candidates are sorted.
+
 Workspace resolution returns a usable `path` only when `resolved: true` and
 `ambiguous: false`. Multiple project/worktree matches return `resolved: false`,
 `ambiguous: true`, candidate descriptions and advice, with no `path`, `branch`

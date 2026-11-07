@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,7 +23,7 @@ type ProjectWorktree struct {
 
 // ProjectInfo provides structured metadata for a repository/project.
 type ProjectInfo struct {
-	ID            string            `json:"id" jsonschema:"unique project identifier"`
+	ID            string            `json:"id" jsonschema:"project identifier; a multi-root project has one entry per root with the same identifier"`
 	Name          string            `json:"name" jsonschema:"human-readable project name"`
 	Root          string            `json:"root" jsonschema:"root directory of the project container or repository"`
 	RepositoryURL string            `json:"repository_url,omitempty" jsonschema:"git remote fetch URL if configured"`
@@ -61,7 +63,9 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 		dataDir = "/data"
 	}
 
-	projects := make(map[string]*ProjectInfo)
+	type projectKey struct{ id, name, root string }
+	projects := make(map[projectKey]*ProjectInfo)
+	registeredRoots := make(map[string]bool)
 
 	// 1. Scan Antigravity project config files
 	if projDir != "" {
@@ -95,38 +99,28 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 				if pDef.ID == "" && pDef.Name == "" {
 					continue
 				}
-				var rootPath, defBranch string
 				for _, r := range pDef.ProjectResources.Resources {
 					uri := r.GitFolder.FolderURI
 					if uri == "" {
 						uri = r.FolderURI
 					}
-					if strings.HasPrefix(uri, "file://") {
-						rootPath = strings.TrimPrefix(uri, "file://")
-					} else if uri != "" {
-						rootPath = uri
+					cleanRoot, ok := projectResourcePath(uri)
+					if !ok {
+						continue
 					}
-					if r.GitFolder.DefaultBranch != "" {
-						defBranch = r.GitFolder.DefaultBranch
+					id, name := pDef.ID, pDef.Name
+					if id == "" {
+						id = filepath.Base(cleanRoot)
 					}
-				}
-				if rootPath == "" {
-					continue
-				}
-				cleanRoot := filepath.Clean(rootPath)
-				id := pDef.ID
-				if id == "" {
-					id = filepath.Base(cleanRoot)
-				}
-				name := pDef.Name
-				if name == "" {
-					name = filepath.Base(cleanRoot)
-				}
-				projects[cleanRoot] = &ProjectInfo{
-					ID:            id,
-					Name:          name,
-					Root:          cleanRoot,
-					DefaultBranch: defBranch,
+					if name == "" {
+						name = filepath.Base(cleanRoot)
+					}
+					// Keep every resource and every registration identity. A project
+					// ID alone must not silently choose the last of several roots.
+					key := projectKey{id, name, cleanRoot}
+					projects[key] = &ProjectInfo{ID: id, Name: name, Root: cleanRoot,
+						DefaultBranch: r.GitFolder.DefaultBranch}
+					registeredRoots[cleanRoot] = true
 				}
 			}
 		}
@@ -153,8 +147,8 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 				}
 
 				if isGit {
-					if _, exists := projects[cleanSub]; !exists {
-						projects[cleanSub] = &ProjectInfo{
+					if !registeredRoots[cleanSub] {
+						projects[projectKey{entry.Name(), entry.Name(), cleanSub}] = &ProjectInfo{
 							ID:   entry.Name(),
 							Name: entry.Name(),
 							Root: cleanSub,
@@ -195,13 +189,45 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 	}
 
 	sort.Slice(out, func(i, j int) bool {
-		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+		a, b := out[i], out[j]
+		lowerA, lowerB := strings.ToLower(a.Name), strings.ToLower(b.Name)
+		if lowerA != lowerB {
+			return lowerA < lowerB
+		}
+		if a.Root != b.Root {
+			return a.Root < b.Root
+		}
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
+		return a.Name < b.Name
 	})
 
 	if out == nil {
 		out = []ProjectInfo{}
 	}
 	return out, nil
+}
+
+// projectResourcePath accepts absolute local paths and local file URIs only.
+// URL.Path decodes percent escapes once, preserving literal percent sequences.
+func projectResourcePath(resource string) (string, bool) {
+	path := resource
+	if strings.HasPrefix(strings.ToLower(resource), "file:") {
+		u, err := url.Parse(resource)
+		if err != nil || u.Opaque != "" || (u.Host != "" && !strings.EqualFold(u.Host, "localhost")) || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return "", false
+		}
+		path = filepath.FromSlash(u.Path)
+		// A Windows file URI uses /C:/..., while native paths use C:\\... .
+		if len(path) > 1 && os.IsPathSeparator(path[0]) && filepath.VolumeName(path[1:]) != "" {
+			path = path[1:]
+		}
+	}
+	if !filepath.IsAbs(path) || strings.ContainsRune(path, 0) {
+		return "", false
+	}
+	return filepath.Clean(path), true
 }
 
 func inspectProjectGit(root string) (remoteURL, defBranch string, worktrees []ProjectWorktree) {
@@ -212,10 +238,8 @@ func inspectProjectGit(root string) (remoteURL, defBranch string, worktrees []Pr
 	gitDir := filepath.Join(root, ".git")
 
 	targetGitDir := ""
-	isBare := false
 	if s, err := os.Stat(bareDir); err == nil && s.IsDir() {
 		targetGitDir = bareDir
-		isBare = true
 	} else if _, err := os.Stat(gitDir); err == nil {
 		targetGitDir = gitDir
 	}
@@ -240,26 +264,10 @@ func inspectProjectGit(root string) (remoteURL, defBranch string, worktrees []Pr
 		}
 	}
 
-	// Worktrees
-	if isBare {
-		cmdWt := probeCmd(ctx, "git", "--git-dir="+targetGitDir, "worktree", "list", "--porcelain")
-		if out, err := cmdWt.Output(); err == nil {
-			worktrees = parseWorktreeListPorcelain(string(out), targetGitDir)
-		}
-	} else {
-		// Single non-bare checkout
-		if s, err := os.Stat(root); err == nil && s.IsDir() {
-			branch, head, dirty := DetectGitMetadata(root)
-			isClean := dirty != nil && !*dirty
-			worktrees = []ProjectWorktree{
-				{
-					Path:    root,
-					Branch:  branch,
-					Head:    head,
-					IsClean: isClean,
-				},
-			}
-		}
+	// Both ordinary and shared-bare repositories can own linked worktrees.
+	cmdWt := probeCmd(ctx, "git", "--git-dir="+targetGitDir, "worktree", "list", "--porcelain", "-z")
+	if out, err := cmdWt.Output(); err == nil {
+		worktrees = parseWorktreeList(string(out), targetGitDir, "\x00")
 	}
 
 	// Find default branch
@@ -288,8 +296,12 @@ func parseGitRemotes(output string) map[string]string {
 }
 
 func parseWorktreeListPorcelain(output, bareDir string) []ProjectWorktree {
+	return parseWorktreeList(output, bareDir, "\n")
+}
+
+func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
 	var worktrees []ProjectWorktree
-	lines := strings.Split(output, "\n")
+	lines := strings.Split(output, separator)
 	var curPath, curHead, curBranch string
 	var isBare bool
 
@@ -320,7 +332,6 @@ func parseWorktreeListPorcelain(output, bareDir string) []ProjectWorktree {
 	}
 
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
 		if line == "" {
 			flush()
 			continue
@@ -407,6 +418,7 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 		for _, p := range matched {
 			candNames = append(candNames, fmt.Sprintf("%s (%s)", p.Name, p.Root))
 		}
+		slices.Sort(candNames)
 		return ResolveWorkspaceResult{
 			Resolved:   false,
 			Ambiguous:  true,
@@ -434,6 +446,7 @@ func worktreeCandidates(worktrees []ProjectWorktree) []string {
 	for _, wt := range worktrees {
 		paths = append(paths, fmt.Sprintf("%s [%s]", wt.Path, wt.Branch))
 	}
+	slices.Sort(paths)
 	return paths
 }
 
