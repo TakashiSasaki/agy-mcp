@@ -118,3 +118,21 @@ func TestAgyCancelMarksStagedJobDismissedNotCollected(t *testing.T) {
 		t.Fatal("agy_cancel marked the job collected, which would suppress an owed wake")
 	}
 }
+
+// Mutation guards: summary waits must omit text without suppressing collection.
+func TestAgyWaitSummaryThenPagedCollection(t *testing.T) {
+	mgr, id := stageTerminalJob(t)
+	cs := connect(t, mgr, nil)
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyWait, Arguments: map[string]any{"job_id": id, "include_result": false}})
+	if err != nil || res.IsError {
+		t.Fatalf("summary wait: %+v %v", res, err)
+	}
+	out := structuredMap(t, res)
+	if out["state"] != manager.StateDone || out["result"] != nil || out["result_included"] != false || out["result_available"] != true || out["next_action"] != "get_result" || mgr.Collected(id) {
+		t.Fatalf("summary leaked/collected result: %+v", out)
+	}
+	res, err = cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyGetResult, Arguments: map[string]any{"job_id": id}})
+	if err != nil || res.IsError || structuredMap(t, res)["content"] != "RESULT" || !mgr.Collected(id) {
+		t.Fatalf("paged collection: %+v %v", res, err)
+	}
+}

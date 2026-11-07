@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	toolAgyListJobs    = "agy_list_jobs"
-	toolAgyGetResult   = "agy_get_result"
-	defaultResultBytes = 16 * 1024
-	maxResultBytes     = 1024 * 1024
+	nextActionGetResult = "get_result"
+	toolAgyListJobs     = "agy_list_jobs"
+	toolAgyGetResult    = "agy_get_result"
+	defaultResultBytes  = 16 * 1024
+	maxResultBytes      = 1024 * 1024
 )
 
 type jobsInput struct {
@@ -115,7 +116,7 @@ func resultPage(st manager.Status, in resultInput) (resultOutput, error) {
 		snapshot.Offset = end
 		data, _ := json.Marshal(snapshot)
 		out.NextCursor = base64.RawURLEncoding.EncodeToString(data)
-		out.NextAction = "get_result"
+		out.NextAction = nextActionGetResult
 	}
 	return out, nil
 }

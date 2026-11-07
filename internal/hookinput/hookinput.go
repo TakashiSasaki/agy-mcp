@@ -43,8 +43,10 @@ type payload struct {
 
 // Input is what hook-wait reads from a PostToolUse payload.
 type Input struct {
-	JobID    string
-	ToolName string
+	// ResultDeferred means the response asks the caller to retrieve terminal text separately.
+	ResultDeferred bool
+	JobID          string
+	ToolName       string
 	// State is the response's own job-state string, or empty.
 	State string
 	// AgentType is the calling subagent's type, or empty when the payload names none.
@@ -77,7 +79,7 @@ func ParseInput(r io.Reader) (Input, bool) {
 		return Input{ToolName: p.ToolName}, false
 	}
 	id := extractField(resp, "job_id")
-	in := Input{JobID: id, ToolName: p.ToolName, State: extractField(resp, "state"), AgentType: p.AgentType}
+	in := Input{JobID: id, ToolName: p.ToolName, State: extractField(resp, "state"), AgentType: p.AgentType, ResultDeferred: extractField(resp, "next_action") == "get_result"}
 	return in, id != ""
 }
 

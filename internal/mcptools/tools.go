@@ -731,7 +731,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		if !include {
 			out.Result, out.ResultIncluded = "", false
 			if out.ResultAvailable {
-				out.NextAction = "get_result"
+				out.NextAction = nextActionGetResult
 			}
 		}
 		out.Quota = quotaFor(mgr)

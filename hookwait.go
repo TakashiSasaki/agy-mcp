@@ -71,7 +71,7 @@ func hookWaitMain(args []string, stdin io.Reader, stderr io.Writer) int {
 		return 0
 	}
 	// A sync tool that already returned a terminal result delivered it inline, so
-	// waking Claude again would be noise. Suppress only when all three hold: the
+	// waking Claude again would be noise. A summary that defers result retrieval still owes a wake. Suppress only when all three hold: the
 	// tool is agy_run_sync, its recorded response state is a KNOWN terminal state
 	// (not "" and not running), AND the job is terminal on disk now. An absent or
 	// unknown payload state must fail toward waking: a "running" response means the
@@ -79,7 +79,7 @@ func hookWaitMain(args []string, stdin io.Reader, stderr io.Writer) int {
 	// owed no matter what the live status now says), and an empty/odd state is not
 	// proof of inline delivery either. A redundant wake is only noise; a suppressed
 	// owed wake is a lost result. agy_run never delivers inline, so it always wakes.
-	if strings.HasSuffix(toolName, mcptools.ToolAgyRunSync) &&
+	if strings.HasSuffix(toolName, mcptools.ToolAgyRunSync) && !in.ResultDeferred &&
 		respState != "" && respState != manager.StateRunning {
 		if st, err := mgr.Status(jobID); err == nil && st.State != manager.StateRunning {
 			return 0

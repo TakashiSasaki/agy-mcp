@@ -317,3 +317,16 @@ func TestHookWaitNamesSubagentOwner(t *testing.T) {
 		t.Fatalf("stderr = %q, want it to name the subagent", errb.String())
 	}
 }
+
+// Mutation guard: a summary sync response must not suppress the owed result wake.
+func TestHookWaitWakesOnSummarySync(t *testing.T) {
+	setFakeHome(t)
+	stateDir := t.TempDir()
+	writeTerminalJob(t, stateDir, "job-hw-1")
+	t.Setenv("AGY_MCP_STATE_DIR", stateDir)
+	payload := `{"tool_name":"mcp__agy__agy_run_sync","tool_response":{"job_id":"job-hw-1","state":"done","result_included":false,"next_action":"get_result"}}`
+	var errb bytes.Buffer
+	if code := hookWaitMain(nil, strings.NewReader(payload), &errb); code != 2 {
+		t.Fatalf("summary lost wake: exit=%d stderr=%s", code, errb.String())
+	}
+}

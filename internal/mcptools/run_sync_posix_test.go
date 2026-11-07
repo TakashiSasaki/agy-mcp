@@ -464,3 +464,18 @@ func TestAgyRunSyncReportsFullUsage(t *testing.T) {
 		t.Errorf("num_turns = %v, want 1", sc["num_turns"])
 	}
 }
+
+// Mutation guards: sync must forward include_result to the shared wait path.
+func TestRunSyncSummaryDoesNotCollect(t *testing.T) {
+	mgr, _ := newTestManager(t, testutil.FakeAgy{Stdout: "ANSWER"})
+	cs := connect(t, mgr, nil)
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyRunSync, Arguments: map[string]any{"prompt": "task", "wait": "10s", "include_result": false}})
+	if err != nil || res.IsError {
+		t.Fatalf("sync: %+v %v", res, err)
+	}
+	out := structuredMap(t, res)
+	id, _ := out["job_id"].(string)
+	if out["state"] != manager.StateDone || out["result"] != nil || out["result_included"] != false || out["result_available"] != true || out["next_action"] != "get_result" || mgr.Collected(id) {
+		t.Fatalf("sync summary: %+v", out)
+	}
+}

@@ -44,7 +44,7 @@ func progressHeartbeat() time.Duration {
 // MCP progress notifications when the client supplied a progress token.
 // Notifications are throttled to fire on step changes or a 10s heartbeat to avoid
 // overwhelming network transports while remaining responsive.
-func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manager, jobID string, deadline time.Time) (runSyncOutput, error) {
+func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manager, jobID string, deadline time.Time, includeResult *bool) (runSyncOutput, error) {
 	token := req.Params.GetProgressToken()
 	lastNotified := time.Duration(-1)
 	lastStepType := ""
@@ -95,8 +95,17 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 	}
 	out := runSyncOutput{JobID: jobID, statusOutput: toStatusOutput(st)}
 	out.Quota = quotaFor(mgr)
+	include := includeResult == nil || *includeResult
+	if !include {
+		out.Result, out.ResultIncluded = "", false
+		if out.ResultAvailable {
+			out.NextAction = nextActionGetResult
+		}
+	}
 	if terminal {
-		markCollected(mgr, jobID)
+		if include {
+			markCollected(mgr, jobID)
+		}
 	} else {
 		// Name agy_wait first: one blocking call is cheaper than an agy_status poll
 		// loop, and the note is the instruction a caller actually acts on at overrun

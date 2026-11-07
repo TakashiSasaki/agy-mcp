@@ -49,6 +49,7 @@ func maxSyncWait() time.Duration {
 
 // runSyncInput is runInput plus the inline wait cap.
 type runSyncInput struct {
+	IncludeResult *bool `json:"include_result,omitempty" jsonschema:"include terminal result body (default true); false returns metadata without collecting the job; retrieve text with agy_get_result"`
 	runInput
 	Wait string `json:"wait,omitempty" jsonschema:"positive Go duration such as 30s or 1m; omitted or empty defaults to the effective inline-wait ceiling (built-in 90s; AGY_MCP_SYNC_WAIT_CAP can change it; see agy_info.max_inline_wait). A larger value silently clamps to that ceiling. Limits only this call, not the job: expiry leaves it running and the returned job_id can be waited on with agy_wait or inspected with agy_status; never re-send the prompt just because wait expired"`
 }
@@ -73,7 +74,7 @@ func registerRunSync(s *toolServer, mgr *manager.Manager) {
 			"and for parallel work, prefer agy_run. If this call outlives its wait the job keeps running: " +
 			"block on the returned job_id with agy_wait, or take a single non-blocking look with agy_status. " +
 			"If a transport failure could make job creation ambiguous, supply idempotency_key and reuse it on the retry. " +
-			"Streams progress notifications while waiting when the client asks for them. " +
+			"Streams progress notifications while waiting when the client asks for them. include_result false omits terminal text and leaves it uncollected for agy_get_result. " +
 			"The delegated agent runs with permission checks disabled: it can edit files under cwd and under any " +
 			"dirs, and may reach the network. Say so in the prompt if the run must not touch the repo. " +
 			"For work that may be skipped (a peer review, a second opinion, a rubber-duck pass), check agy_usage and pass priority optional so the run is refused while quota is low.",
@@ -90,7 +91,7 @@ func registerRunSync(s *toolServer, mgr *manager.Manager) {
 		if err != nil {
 			return nil, runSyncOutput{}, err
 		}
-		out, err := awaitJob(ctx, req, mgr, job.ID, time.Now().Add(wait))
+		out, err := awaitJob(ctx, req, mgr, job.ID, time.Now().Add(wait), in.IncludeResult)
 		if err != nil {
 			return nil, runSyncOutput{}, &manager.StartError{Code: "wait_interrupted", NextAction: "inspect_job", JobID: job.ID, JobStarted: new(true), Err: err}
 		}

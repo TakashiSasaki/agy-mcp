@@ -10,8 +10,9 @@ import (
 
 // waitInput is the input for agy_wait.
 type waitInput struct {
-	JobID string `json:"job_id" jsonschema:"job id to wait for, as returned by agy_run or agy_run_sync"`
-	Wait  string `json:"wait,omitempty" jsonschema:"max time to block inline (Go duration); a larger value is silently clamped to the inline-wait ceiling. That ceiling defaults to 90s, kept below common MCP clients' ~120s per-call timeout so a still-running result is delivered inline, and is overridable with AGY_MCP_SYNC_WAIT_CAP, which can raise or lower it. Caps only the inline wait, not the job itself: on overrun the job keeps running and can be waited on again or polled with agy_status"`
+	IncludeResult *bool  `json:"include_result,omitempty" jsonschema:"include terminal result body (default true); false returns metadata without collecting the job; retrieve text with agy_get_result"`
+	JobID         string `json:"job_id" jsonschema:"job id to wait for, as returned by agy_run or agy_run_sync"`
+	Wait          string `json:"wait,omitempty" jsonschema:"max time to block inline (Go duration); a larger value is silently clamped to the inline-wait ceiling. That ceiling defaults to 90s, kept below common MCP clients' ~120s per-call timeout so a still-running result is delivered inline, and is overridable with AGY_MCP_SYNC_WAIT_CAP, which can raise or lower it. Caps only the inline wait, not the job itself: on overrun the job keeps running and can be waited on again or polled with agy_status"`
 }
 
 // registerWait adds the agy_wait tool: block on an existing job until it
@@ -29,7 +30,7 @@ func registerWait(s *toolServer, mgr *manager.Manager) {
 			"when the next step depends on the job's result; use agy_status instead for a " +
 			"single non-blocking check. Streams progress notifications while waiting when the " +
 			"client asks for them. Outliving the wait cap is not a failure: the job keeps " +
-			"running under its own timeout, so call agy_wait again." + inlineWaitGuide,
+			"running under its own timeout, so call agy_wait again. include_result false omits terminal text and leaves it uncollected for agy_get_result." + inlineWaitGuide,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in waitInput) (*mcp.CallToolResult, runSyncOutput, error) {
 		wait, err := parseWait(in.Wait)
 		if err != nil {
@@ -40,7 +41,7 @@ func registerWait(s *toolServer, mgr *manager.Manager) {
 		// "status read failed" path already fails a typo'd id fast. The pre-check only
 		// duplicated a potentially large out-file read on every wait against a
 		// terminal job.
-		out, err := awaitJob(ctx, req, mgr, in.JobID, time.Now().Add(wait))
+		out, err := awaitJob(ctx, req, mgr, in.JobID, time.Now().Add(wait), in.IncludeResult)
 		if err != nil {
 			return nil, runSyncOutput{}, err
 		}

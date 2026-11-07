@@ -68,6 +68,8 @@ func TestEvidenceToolsSeparateJobAndVerification(t *testing.T) {
 	if verification["job_state"] != "done" || verification["verification_outcome"] != "failed" || verification["errors"] != float64(1) || verification["complete"] != true {
 		t.Fatalf("model narrative overrode failing evidence: %+v", verification)
 	}
+
+	requireVerificationSummary(t, cs, id, verification["sha256"])
 	failure := verification["failures"].([]any)[0].(map[string]any)
 	if failure["kind"] != "subprocess_timeout" || failure["reported_type"] != "subprocess.TimeoutExpired" {
 		t.Fatalf("harness evidence was misattributed: %+v", failure)
@@ -134,5 +136,24 @@ func requireEvidenceIdentifier(t *testing.T, cs *mcp.ClientSession, wirePath, id
 	wire, err := os.ReadFile(wirePath)
 	if err != nil || !bytes.Contains(wire, []byte(`"execution_id":9007199254740993`)) {
 		t.Fatalf("structured wire payload rounded the provider identifier: %v", err)
+	}
+}
+
+func requireVerificationSummary(t *testing.T, cs *mcp.ClientSession, id string, hash any) {
+	t.Helper()
+	// Mutation guard: limiting details must retain failures and evidence identity.
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyVerification, Arguments: map[string]any{"job_id": id, "path": "junit.xml", "max_failures": 0}})
+	if err != nil || res.IsError {
+		t.Fatalf("summary: %+v %v", res, err)
+	}
+	summary := structuredMap(t, res)
+	if len(summary["failures"].([]any)) != 0 || summary["failures_truncated"] != true || summary["verification_outcome"] != "failed" || summary["errors"] != float64(1) || summary["complete"] != true || summary["sha256"] != hash {
+		t.Fatalf("summary changed evidence or leaked details: %+v", summary)
+	}
+	for _, limit := range []int{-1, 101} {
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyVerification, Arguments: map[string]any{"job_id": id, "path": "junit.xml", "max_failures": limit}})
+		if err == nil && !res.IsError {
+			t.Fatalf("accepted invalid max_failures %d", limit)
+		}
 	}
 }
