@@ -29,6 +29,9 @@ type JournalRecord struct {
 	Event      json.RawMessage `json:"event"`
 }
 
+// ProcessOutcomeSource identifies receipts written by the supervisor.
+const ProcessOutcomeSource = "supervisor"
+
 // ProcessOutcome describes agy, never a shell command launched by the model.
 type ProcessOutcome struct {
 	Source    string     `json:"source" jsonschema:"supervisor; observes the agy CLI process, not individual model tool commands"`
@@ -40,12 +43,46 @@ type ProcessOutcome struct {
 	Cancelled bool       `json:"cancelled" jsonschema:"the supervisor cancellation caused process termination"`
 }
 
+// ExitSentinel maps the observed process exit to the job completion code.
+// A timeout or cancellation retains its meaning even after SIGKILL escalation.
+func ExitSentinel(raw int, timedOut, cancelled bool) int {
+	switch {
+	case timedOut:
+		return ExitTimeout
+	case cancelled:
+		return ExitSIGTERM
+	default:
+		return raw
+	}
+}
+
+// ReadProcessExitCode recovers the completion code from a supervisor receipt
+// when the completion marker could not be published.
+func ReadProcessExitCode(dir string) (int, bool) {
+	// A supervisor receipt is a small regular file. Ignore other shapes so a
+	// damaged store cannot stall status on a named pipe or a large file.
+	const maxReceiptBytes = 4096
+	info, err := os.Lstat(filepath.Join(dir, ProcessFile))
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReceiptBytes {
+		return 0, false
+	}
+	o, err := ReadProcessDir(dir)
+	if err != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() || o.ExitCode == nil {
+		return 0, false
+	}
+	if o.PID <= 0 || o.StartedAt == nil || o.StartedAt.IsZero() || *o.ExitCode < 0 ||
+		(o.TimedOut && o.Cancelled) || (*o.ExitCode == 0 && (o.TimedOut || o.Cancelled)) {
+		return 0, false
+	}
+	return ExitSentinel(*o.ExitCode, o.TimedOut, o.Cancelled), true
+}
+
 func WriteProcessDir(dir string, outcome ProcessOutcome) error {
 	data, err := json.Marshal(outcome)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(dir, ProcessFile, data)
+	return writeFileAtomicDurable(dir, ProcessFile, data)
 }
 
 func ReadProcessDir(dir string) (*ProcessOutcome, error) {

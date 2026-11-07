@@ -78,8 +78,9 @@ embeds, so a plain `go build` inside a Git checkout is self-identifying. The sam
 
 Every package that touches a job directory uses the file-name constants in
 `internal/jobstore/store.go`, never string literals. The supervisor writes `result.json` only after agy
-has been reaped, and writes the `exit_code` sentinel last, because the manager treats the sentinel as
-the completion signal. Keep that order when changing the supervisor.
+has been reaped. It writes the process outcome before the result and publishes the `exit_code`
+sentinel last. The manager can recover the exit code from the process outcome if the supervisor
+has stopped and the sentinel is unavailable. Keep that order when changing the supervisor.
 
 The exit-code sentinels in the same file carry meaning beyond agy's own exit code; `statusFromExitCode`
 in `internal/manager/status.go` interprets them.

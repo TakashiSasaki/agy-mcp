@@ -13,8 +13,6 @@ import (
 
 // processCleanup belongs to a dedicated, single-job supervisor process. It
 // must never be initialized in the long-lived manager or an embedding caller.
-const processOutcomeSource = "supervisor"
-
 type processCleanup interface {
 	signal(syscall.Signal) error
 	remaining() (bool, error)
@@ -56,7 +54,7 @@ func runProcess(jobDir string, initialize func() (processCleanup, error)) error 
 	if err != nil {
 		message := fmt.Sprintf("initialize supervisor descendant cleanup: %v", err)
 		_ = os.WriteFile(jobstore.ErrPath(jobDir), []byte(message+"\n"), 0o600)
-		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: processOutcomeSource, EndedAt: time.Now().UTC()})
+		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: jobstore.ProcessOutcomeSource, EndedAt: time.Now().UTC()})
 		_ = jobstore.WriteExitCodeDir(jobDir, jobstore.ExitSpawnFail)
 		return fmt.Errorf("%s", message)
 	}

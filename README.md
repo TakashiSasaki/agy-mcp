@@ -326,6 +326,8 @@ These outcomes remain independent:
 
 For example, a job may be `done`, have `agent_outcome: "success"` and CLI `process.exit_code: 0`, while a JUnit report says `failed` with an explicit `subprocess.TimeoutExpired` type. That describes a reported harness timeout; it does not prove a product fault or that a child process stopped. Narrative text is never converted into execution receipts or passing tests. Report contents also do not independently attest that commands ran or that the file was produced by this job.
 
+If the supervisor has stopped and its completion marker is unavailable, the server uses a valid recorded CLI exit status and the supervisor's timeout or cancellation flag to classify the job. A saved answer is still available for inspection. Jobs with only a saved response keep the legacy recovery behavior.
+
 The supervisor appends timestamped CLI events while the job runs and records its process outcome before the completion sentinel. These files survive ordinary timeout/cancellation with the job's existing retention. The journal cap is 64 MiB per job. `capture.truncated`, `capture.dropped_events`, `capture.malformed_lines`, `skipped_records` and `incomplete_record` expose lost evidence. `capture.closed` describes capture closure, not task success. Incomplete live records are withheld at the same cursor; a terminal incomplete record is counted as lost and skipped. Cursors bind job, stream, file identity, generation and nearby preceding content, and reject replaced/truncated streams rather than silently rewind. None of these reads marks the final model answer collected. Older jobs can have `available: false` and no process receipt; their missing history is not reconstructed by another model turn.
 
 ### Planned execution controls

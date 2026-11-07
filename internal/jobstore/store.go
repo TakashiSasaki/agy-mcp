@@ -322,8 +322,8 @@ func writeFileAtomic(dir, name string, b []byte) error {
 // directory, so the rename survives a crash and not just the file's data. It is
 // for the low-frequency files whose loss would misreport a job afterwards: meta.json
 // (its absence orphans the dir), result.json (its absence downgrades a complete
-// answer to partial), and the exit_code sentinel (whose absence misreports a
-// finished job's outcome).
+// answer to partial), process.json (the supervisor's exit receipt), and the
+// exit_code sentinel (the ordinary completion signal).
 //
 // The directory fsync is BEST EFFORT. The file is already published by the time
 // it runs, so a failure must not fail the write: a filesystem that cannot fsync a

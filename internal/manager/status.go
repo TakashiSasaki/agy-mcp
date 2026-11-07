@@ -266,6 +266,11 @@ func (m *Manager) Status(id string) (Status, error) {
 	if code, ok := m.store.ExitCode(id); ok {
 		return m.statusFromExitCode(dir, meta, st, code), nil
 	}
+	// The supervisor may have published its process outcome before failing to
+	// write the sentinel. Use the same classification as a normal completion.
+	if code, ok := jobstore.ReadProcessExitCode(dir); ok {
+		return m.statusFromExitCode(dir, meta, st, code), nil
+	}
 	// Process is gone without a sentinel. The job is terminal (no supervisor is
 	// left to write one), so freeze elapsed at the best available end time before
 	// classifying the outcome, so a recovered job's elapsed does not keep growing.
@@ -273,8 +278,8 @@ func (m *Manager) Status(id string) (Status, error) {
 	return recoverInterrupted(dir, meta, st), nil
 }
 
-// recoverInterrupted classifies a job whose supervisor vanished without writing
-// the exit-code sentinel (killed by a reboot, say).
+// recoverInterrupted classifies a dead job without a usable exit-code sentinel
+// or process outcome receipt.
 //
 // A terminal result payload can still be present: the supervisor writes it
 // before the sentinel, so a supervisor that died between those two writes left
@@ -408,7 +413,7 @@ func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, 
 
 // applyCleanExitNotices lets agy's stderr notices reclassify a run whose outcome
 // was derived as though agy finished its work: a clean exit (code 0), or a
-// recovered job whose supervisor died after persisting agy's result payload. The
+// recovered job whose only terminal evidence is agy's result payload. The
 // supervisor persists that payload only after agy has been reaped (see run in
 // internal/supervisor), so in both cases agy's stderr is complete. done is the status
 // derived from the payload (or its absence); res and hasResult are that payload.

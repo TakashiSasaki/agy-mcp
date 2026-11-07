@@ -188,27 +188,6 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
-// resolveExitCode applies the supervisor's termination overrides to the raw exit
-// code derived from agy's wait status. A supervisor-initiated termination keeps
-// its own meaning even when it escalated to SIGKILL: agy that ignores SIGTERM and
-// is then SIGKILLed dies with signal 9 (raw 137), but the job was timed out or
-// cancelled, not crashed, so it must report ExitTimeout or ExitSIGTERM rather
-// than the raw signal failure. A natural exit (waitFailed false, or neither flag
-// set) keeps its raw code. Timeout takes precedence; in practice only one flag is
-// ever set.
-func resolveExitCode(raw int, waitFailed, timedOut, cancelled bool) int {
-	if !waitFailed {
-		return raw
-	}
-	switch {
-	case timedOut:
-		return jobstore.ExitTimeout
-	case cancelled:
-		return jobstore.ExitSIGTERM
-	}
-	return raw
-}
-
 // Run executes the agy process described by jobDir/meta.json. It captures
 // stdout to jobDir/out and stderr to jobDir/err, redirects agy stdin from
 // /dev/null, and writes jobDir/exit_code on completion (including on cancel).
@@ -307,7 +286,7 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
-		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: processOutcomeSource, EndedAt: time.Now().UTC()})
+		_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{Source: jobstore.ProcessOutcomeSource, EndedAt: time.Now().UTC()})
 		_ = jobstore.WriteExitCodeDir(jobDir, jobstore.ExitSpawnFail)
 		return err
 	}
@@ -416,11 +395,6 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 		outcome = <-drained
 	}
 
-	// Record what the stream reported, before the exit-code sentinel: the
-	// manager treats the sentinel as the completion signal, so anything written
-	// after it could be missed by a poller that observes the sentinel first.
-	outcome.persist(jobDir, errF)
-
 	code := 0
 	if waitErr != nil {
 		if ee, ok := errors.AsType[*exec.ExitError](waitErr); ok {
@@ -439,9 +413,15 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 	// closed before the kill, so they are observable by the time Wait returns.
 	// Guarding on waitErr != nil keeps a job that finished naturally at the instant
 	// the timer fired (a natural success has waitErr == nil) from being mislabeled.
-	_ = jobstore.WriteProcessDir(jobDir, jobstore.ProcessOutcome{
-		Source: processOutcomeSource, PID: cmd.Process.Pid, StartedAt: new(startedAt), EndedAt: endedAt, ExitCode: new(code),
+	receipt := jobstore.ProcessOutcome{
+		Source: jobstore.ProcessOutcomeSource, PID: cmd.Process.Pid, StartedAt: new(startedAt), EndedAt: endedAt, ExitCode: new(code),
 		TimedOut: waitErr != nil && closed(timedOut), Cancelled: waitErr != nil && closed(cancelled) && !closed(timedOut),
-	})
-	return jobstore.WriteExitCodeDir(jobDir, resolveExitCode(code, waitErr != nil, closed(timedOut), closed(cancelled)))
+	}
+	// Publish the process outcome before any terminal result. If the supervisor
+	// stops before writing exit_code, recovery can still classify the job.
+	if err := jobstore.WriteProcessDir(jobDir, receipt); err != nil {
+		_, _ = fmt.Fprintf(errF, "persist process outcome: %v\n", err)
+	}
+	outcome.persist(jobDir, errF)
+	return jobstore.WriteExitCodeDir(jobDir, jobstore.ExitSentinel(code, receipt.TimedOut, receipt.Cancelled))
 }

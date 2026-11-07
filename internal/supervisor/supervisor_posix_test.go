@@ -18,7 +18,7 @@ import (
 
 // These tests drive Run, which supervises on Linux and macOS (process groups,
 // signal forwarding); the file is gated linux || darwin. The pure tests
-// (resolveExitCode, effectiveTimeout) stay in supervisor_test.go so they run
+// for effectiveTimeout stay in supervisor_test.go so they run
 // everywhere.
 
 // TestSupervisorEscalatesToSIGKILL: when agy ignores SIGTERM, the supervisor
