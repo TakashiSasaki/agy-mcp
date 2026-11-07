@@ -21,10 +21,10 @@ const (
 )
 
 type VerificationFailure struct {
-	Test         string `json:"test" jsonschema:"testcase name reported in the artifact; empty for a Go package/build failure"`
-	Class        string `json:"class,omitempty" jsonschema:"JUnit testcase classname or Go package/import path"`
+	Test         string `json:"test" jsonschema:"testcase name reported in the artifact, bounded to 2048 UTF-8 bytes; empty for a Go package/build failure"`
+	Class        string `json:"class,omitempty" jsonschema:"JUnit testcase classname or Go package/import path, bounded to 2048 UTF-8 bytes"`
 	Kind         string `json:"kind" jsonschema:"test_failure, test_error, package_failure, build_failure or subprocess_timeout; the latter requires an explicit TimeoutExpired exception type"`
-	ReportedType string `json:"reported_type,omitempty" jsonschema:"failure/error type from XML, not a model diagnosis of the product"`
+	ReportedType string `json:"reported_type,omitempty" jsonschema:"failure/error type from XML, bounded to 2048 UTF-8 bytes; classification uses the full type; not a model diagnosis of the product"`
 	Message      string `json:"message,omitempty" jsonschema:"reported message, bounded to 2048 UTF-8 bytes"`
 	Detail       string `json:"detail,omitempty" jsonschema:"reported failure text, bounded to 2048 UTF-8 bytes; full details remain in the artifact"`
 }
@@ -256,14 +256,19 @@ func (p *junitParser) start(token xml.StartElement) bool {
 }
 
 func (p *junitParser) failure(token xml.StartElement) bool {
-	failure := VerificationFailure{Test: p.current.name, Class: p.current.class, Kind: "test_failure", ReportedType: xmlAttribute(token.Attr, "type"), Message: truncateUTF8(xmlAttribute(token.Attr, "message"), 2048)}
+	reportedType := xmlAttribute(token.Attr, "type")
+	failure := VerificationFailure{
+		Test: truncateUTF8(p.current.name, 2048), Class: truncateUTF8(p.current.class, 2048),
+		Kind: "test_failure", ReportedType: truncateUTF8(reportedType, 2048),
+		Message: truncateUTF8(xmlAttribute(token.Attr, "message"), 2048),
+	}
 	if token.Name.Local == agentOutcomeError {
 		p.current.errored = true
 		failure.Kind = "test_error"
 	} else {
 		p.current.failed = true
 	}
-	if failure.ReportedType == "subprocess.TimeoutExpired" || failure.ReportedType == "TimeoutExpired" {
+	if reportedType == "subprocess.TimeoutExpired" || reportedType == "TimeoutExpired" {
 		failure.Kind = "subprocess_timeout"
 	}
 	var detail struct {
