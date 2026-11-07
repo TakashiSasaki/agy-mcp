@@ -912,8 +912,8 @@ func (m *Manager) loadJob(id string) loadedJob {
 // restoration in a single job-store scan, halving the meta.json reads versus
 // calling GarbageCollect and RestoreGate back to back (each previously loaded
 // every job's meta). The single loadJob result is shared by both decisions; each
-// still reads the exit_code sentinel itself, fresh, exactly as the two methods
-// did standalone, so the sentinel's read count and freshness are unchanged. Each
+// still reads the exit_code sentinel itself, fresh. Completion-based retention
+// also inspects recent terminal/dead jobs so their observation can be recorded. Each
 // job's keep/remove and restore decisions are independent and mutually exclusive
 // (GC only removes terminal or dead jobs; restore only re-occupies the gate for
 // live ones), so one pass produces the same result as the two sequential scans it
@@ -947,7 +947,8 @@ func (m *Manager) RestoreAndCollect() (removed []string, err error) {
 	return removed, nil
 }
 
-// GarbageCollect removes jobs older than the configured TTL. A job whose
+// GarbageCollect retains terminal jobs for the configured TTL after completion
+// (or first observed death when no terminal receipt survives). A job whose
 // supervisor is still alive (including one that survived a manager restart) is
 // never removed, even past the TTL, so a live job is never deleted out from
 // under its supervisor. A non-positive TTL disables collection.
@@ -1002,9 +1003,6 @@ func (m *Manager) gcEvaluate(l loadedJob, cutoff time.Time) bool {
 		log.Printf("GC: job %s meta unreadable (not reaping, may be transient): %v", l.id, l.metaErr)
 		return false
 	}
-	if !l.meta.StartedAt.Before(cutoff) {
-		return false // too recent to collect (and so the exit_code sentinel is never read)
-	}
 	_, terminal := m.store.ExitCode(l.id)
 	if !terminal {
 		if m.processAlive(l.meta) {
@@ -1014,8 +1012,8 @@ func (m *Manager) gcEvaluate(l loadedJob, cutoff time.Time) bool {
 		// written its sentinel and exited between the ExitCode and processAlive
 		// checks above (the same race Status guards against); re-read once. If it
 		// is now terminal the job just finished, so its result is freshly written
-		// and unread; keep it this sweep and collect it on the next one (where the
-		// first read sees the sentinel).
+		// and unread; keep it this sweep. A later sweep uses its completion time
+		// rather than the creation time to start its retention window.
 		//
 		// A terminal job needs no equivalent guard. The supervisor writes
 		// result.json before the exit-code sentinel, so once the sentinel exists
@@ -1023,6 +1021,14 @@ func (m *Manager) gcEvaluate(l loadedJob, cutoff time.Time) bool {
 		if _, t := m.store.ExitCode(l.id); t {
 			return false
 		}
+	}
+	retainedFrom, err := m.retentionStart(l.meta, terminal, true)
+	if err != nil {
+		log.Printf("GC: job %s completion/observation time unavailable, keeping: %v", l.id, err)
+		return false
+	}
+	if !retainedFrom.Before(cutoff) {
+		return false
 	}
 	if err := m.store.Remove(l.id); err != nil {
 		log.Printf("GC: remove expired job %s: %v", l.id, err)

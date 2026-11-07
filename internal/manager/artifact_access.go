@@ -69,15 +69,18 @@ func artifactTarget(meta jobstore.Meta, jobDir, path string) (string, error) {
 }
 
 func (m *Manager) artifactExpiry(meta jobstore.Meta) string {
-	if m.cfg.JobTTL <= 0 || meta.StartedAt.IsZero() {
+	if m.cfg.JobTTL <= 0 {
 		return ""
 	}
-	if _, terminal := m.store.ExitCode(meta.ID); !terminal && m.processAlive(meta) {
+	_, terminal := m.store.ExitCode(meta.ID)
+	if !terminal && m.processAlive(meta) {
 		return ""
 	}
-	// gcEvaluate uses creation age, even for interrupted jobs without a result.
-	// A live job is retained regardless of age; collection cadence is separate.
-	return meta.StartedAt.Add(m.cfg.JobTTL).UTC().Format(time.RFC3339Nano)
+	retainedFrom, err := m.retentionStart(meta, terminal, false)
+	if err != nil {
+		return ""
+	}
+	return retainedFrom.Add(m.cfg.JobTTL).UTC().Format(time.RFC3339Nano)
 }
 
 // The selected root is an authority boundary. Open relative to its live root

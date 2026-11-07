@@ -31,6 +31,21 @@ func (r *reReadExitStore) ExitCode(id string) (int, bool) {
 	return r.jobStore.ExitCode(id)
 }
 
+func stageExpiredTerminal(t *testing.T, m *Manager, id string) {
+	t.Helper()
+	if err := m.store.WriteExitCode(id, 0); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := m.store.Dir(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-90 * time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, jobstore.ExitCodeFile), old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGarbageCollectReapsExpiredOrphanDir(t *testing.T) {
 	m := newManager(t, managerOpts{maxConcurrency: 4, jobTTL: time.Hour})
 	// A job dir with no meta.json: a crash between Create's MkdirAll and its meta
@@ -146,6 +161,7 @@ func TestGarbageCollectRemovesExpired(t *testing.T) {
 	if _, err := m.store.Create(jobstore.Meta{ID: "old", StartedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
+	stageExpiredTerminal(t, m, "old")
 	if _, err := m.store.Create(jobstore.Meta{ID: "fresh", StartedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,18 +174,16 @@ func TestGarbageCollectRemovesExpired(t *testing.T) {
 	}
 }
 
-func TestGarbageCollectRemovesTerminalJobImmediately(t *testing.T) {
+func TestGarbageCollectRemovesTerminalJobAfterRetention(t *testing.T) {
 	m := newManager(t, managerOpts{maxConcurrency: 4, jobTTL: time.Hour})
-	// A terminal job past the TTL is removed on the first sweep. GC used to hold
+	// A terminal job whose completion is past the TTL is removed on the first sweep. GC used to hold
 	// such a job back while a conversation-id capture wrote into its dir; the
 	// supervisor now writes result.json before the exit-code sentinel, so a
 	// visible sentinel means nothing is still writing and the dir is safe to take.
 	if _, err := m.store.Create(jobstore.Meta{ID: "settled", StartedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.store.WriteExitCode("settled", 0); err != nil {
-		t.Fatal(err)
-	}
+	stageExpiredTerminal(t, m, "settled")
 	removed, err := m.GarbageCollect()
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +213,7 @@ func TestRunPeriodicGCCollectsAndStops(t *testing.T) {
 	if _, err := m.store.Create(jobstore.Meta{ID: "old", StartedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
+	stageExpiredTerminal(t, m, "old")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel() // stop the goroutine even if an assertion below fails early
 	done := make(chan struct{})

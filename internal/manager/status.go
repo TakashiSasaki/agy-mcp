@@ -269,7 +269,7 @@ func (m *Manager) Status(id string) (Status, error) {
 	// Process is gone without a sentinel. The job is terminal (no supervisor is
 	// left to write one), so freeze elapsed at the best available end time before
 	// classifying the outcome, so a recovered job's elapsed does not keep growing.
-	st.Elapsed = m.frozenElapsed(meta, st.Elapsed)
+	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, false)
 	return recoverInterrupted(dir, meta, st), nil
 }
 
@@ -332,7 +332,7 @@ func recoverInterrupted(dir string, meta jobstore.Meta, st Status) Status {
 func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, code int) Status {
 	// The job is terminal, so freeze Elapsed at the completion time rather than
 	// letting it grow forever as time.Since(StartedAt).
-	st.Elapsed = m.frozenElapsed(meta, st.Elapsed)
+	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, true)
 	res, hasResult := readResultPayload(dir)
 	switch code {
 	case 0:
@@ -534,7 +534,7 @@ const legacyPrintTimeoutSlack = time.Second
 // that ends early has not. A job with no recorded timeout is left alone. It
 // reads only an agy_error, so callers run it after applyAgyError has had its
 // chance to promote the reason to quota_exhausted. The run length is st.Elapsed,
-// which the caller has already frozen at jobstore.CompletedAt. The reason and
+// which the caller has already frozen at its terminal or observed-death time. The reason and
 // the message change; State, Result and Partial are untouched so carryText still
 // decides the text.
 func markLegacyPrintTimeout(meta jobstore.Meta, st Status, res streamjson.Result) Status {
@@ -906,16 +906,14 @@ func stateForCode(code int) string {
 	}
 }
 
-// frozenElapsed returns a terminal job's run duration measured to its recorded
-// completion time (see jobstore.CompletedAt), so a long-finished job does not
-// report an ever-growing elapsed. It falls back to the passed-in running
-// duration (time.Since(StartedAt)) only when no completion time exists at all;
-// if the completion time implausibly precedes StartedAt (clock skew) it clamps
-// to 0, because the job is terminal and elapsed must stay frozen rather than
-// resume growing.
-func (m *Manager) frozenElapsed(meta jobstore.Meta, running time.Duration) time.Duration {
-	end, ok := m.store.CompletedAt(meta.ID)
-	if !ok {
+// frozenElapsed uses terminal receipt times, or the durable first observed death
+// when a receipt is missing. The latter is an observation estimate, not the exact
+// death time; an empty output file's creation time must not imply a zero run.
+// Failure to persist/read the observation falls back to the running duration.
+// A completion timestamp before StartedAt is clamped to zero under clock skew.
+func (m *Manager) frozenElapsed(meta jobstore.Meta, running time.Duration, terminal bool) time.Duration {
+	end, err := m.retentionStart(meta, terminal, true)
+	if err != nil {
 		return running
 	}
 	if d := end.Sub(meta.StartedAt); d >= 0 {

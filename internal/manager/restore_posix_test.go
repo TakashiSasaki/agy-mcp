@@ -242,9 +242,7 @@ func TestRestoreAndCollectCollectsExpiredAndRestoresLive(t *testing.T) {
 	if _, err := m.store.Create(jobstore.Meta{ID: "old-done", StartedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.store.WriteExitCode("old-done", 0); err != nil {
-		t.Fatal(err)
-	}
+	stageExpiredTerminal(t, m, "old-done")
 	// A live job whose supervisor survived the restart, itself past the TTL: GC must
 	// keep it (alive), and the gate must re-occupy its key.
 	liveCwd := t.TempDir()

@@ -36,9 +36,9 @@ func (c *countingStore) ExitCode(id string) (int, bool) {
 // RestoreAndCollect must read each job's meta.json exactly once, the IO win it
 // exists for: the two scans it replaces loaded every job's meta twice (once per
 // scan). The single loadJob result is shared by the GC and restore decisions. Each
-// decision still reads the exit_code sentinel itself; for these two job categories
-// (an expired job GC removes, and a recent job restore inspects) that is one read
-// each, which this also asserts. Terminal jobs keep the test pure (no processAlive
+// decision still reads the exit_code sentinel itself. GC now observes recent
+// terminal/dead jobs too so their retention window starts promptly; a retained
+// job can therefore receive one GC read and one restore read. Terminal jobs keep the test pure (no processAlive
 // / proc dependency), so it runs on every platform.
 func TestRestoreAndCollectScansEachJobOnce(t *testing.T) {
 	m := New(config.Config{StateDir: t.TempDir(), MaxConcurrency: 4, JobTTL: time.Hour})
@@ -46,9 +46,7 @@ func TestRestoreAndCollectScansEachJobOnce(t *testing.T) {
 	if _, err := m.store.Create(jobstore.Meta{ID: "old-done", StartedAt: time.Now().Add(-2 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.store.WriteExitCode("old-done", 0); err != nil {
-		t.Fatal(err)
-	}
+	stageExpiredTerminal(t, m, "old-done")
 	if _, err := m.store.Create(jobstore.Meta{ID: "recent-done", StartedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +68,8 @@ func TestRestoreAndCollectScansEachJobOnce(t *testing.T) {
 		if cs.loads[id] != 1 {
 			t.Errorf("job %s: meta loaded %d times, want exactly 1 (the fused scan must not re-read)", id, cs.loads[id])
 		}
-		if cs.exitReads[id] > 1 {
-			t.Errorf("job %s: exit_code read %d times, want at most 1", id, cs.exitReads[id])
+		if cs.exitReads[id] > 2 {
+			t.Errorf("job %s: exit_code read %d times, want at most 2 (GC and restore)", id, cs.exitReads[id])
 		}
 	}
 }

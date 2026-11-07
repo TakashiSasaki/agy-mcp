@@ -66,16 +66,17 @@ const (
 // than spelling the literals, so renaming a file is a single edit that the
 // compiler propagates instead of a silent skew caught only at integration time.
 const (
-	MetaFile     = "meta.json"     // job metadata (atomic rewrite)
-	OutFile      = "out"           // response text, appended as agy streams it
-	ErrFile      = "err"           // captured agy stderr
-	ExitCodeFile = "exit_code"     // completion sentinel
-	CancelFile   = "cancel"        // manager -> supervisor cancel request sentinel
-	ProgressFile = "progress.json" // latest stream position (atomic rewrite)
-	ResultFile   = "result.json"   // terminal stream-json result payload (written once)
-	EventsFile   = "events.ndjson" // timestamped CLI events, appended while running
-	CaptureFile  = "capture.json"  // journal generation and capture completeness
-	ProcessFile  = "process.json"  // supervisor-observed agy process outcome
+	MetaFile             = "meta.json"         // job metadata (atomic rewrite)
+	OutFile              = "out"               // response text, appended as agy streams it
+	ErrFile              = "err"               // captured agy stderr
+	ExitCodeFile         = "exit_code"         // completion sentinel
+	CancelFile           = "cancel"            // manager -> supervisor cancel request sentinel
+	ProgressFile         = "progress.json"     // latest stream position (atomic rewrite)
+	ResultFile           = "result.json"       // terminal stream-json result payload (written once)
+	EventsFile           = "events.ndjson"     // timestamped CLI events, appended while running
+	CaptureFile          = "capture.json"      // journal generation and capture completeness
+	TerminalObservedFile = "terminal_observed" // marker prefix; suffixed with supervisor PID/start ticks, created once
+	ProcessFile          = "process.json"      // supervisor-observed agy process outcome
 	// CollectedFile is the marker an MCP tool writes as it returns a job's
 	// terminal outcome, so hook-wait can skip a wake that would carry nothing new
 	// (issue #194). It does not prove the client received the response. Existence

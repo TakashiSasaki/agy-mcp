@@ -54,7 +54,7 @@ type Config struct {
 	DefaultModel   string        // a model id (see list_models); empty means let agy use its configured default
 	DefaultTimeout time.Duration // hard per-job timeout
 	MaxConcurrency int           // global cap on concurrent jobs
-	JobTTL         time.Duration // age after which finished jobs are GC'd
+	JobTTL         time.Duration // retention after completion or first observed death before jobs are GC'd
 	HTTPToken      string        // optional bearer token for HTTP mode; empty = unauthenticated
 
 	// ConversationIDWait bounds how long Manager.AwaitConversationID blocks waiting

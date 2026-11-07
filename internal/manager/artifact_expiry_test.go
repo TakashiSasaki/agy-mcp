@@ -2,15 +2,15 @@ package manager
 
 import (
 	"os"
-	"slices"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
 )
 
-// Mutation guard: artifact expiry must use the same StartedAt + JobTTL boundary
-// as garbage collection, including dead jobs with no completion files.
+// Mutation guard: artifact expiry and GC use the same completion/observation
+// boundary, independent of how long the job ran before becoming terminal.
 func TestArtifactExpiryMatchesCollection(t *testing.T) {
 	for _, terminal := range []bool{true, false} {
 		m, store, id, dir := stageEvidenceJob(t, false)
@@ -18,23 +18,42 @@ func TestArtifactExpiryMatchesCollection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		meta.StartedAt = time.Now().Add(-2 * time.Hour).UTC()
+		meta.StartedAt = time.Now().Add(-48 * time.Hour)
 		if err := store.UpdateMeta(meta); err != nil {
 			t.Fatal(err)
 		}
+		path := jobstore.ExitCodePath(dir)
 		if !terminal {
-			if err := os.Remove(jobstore.ExitCodePath(dir)); err != nil {
+			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
+			if got := m.artifactExpiry(meta); got != "" {
+				t.Fatalf("unobserved interruption invented expiry: %s", got)
+			}
+			if m.gcEvaluate(m.loadJob(id), time.Now().Add(-m.cfg.JobTTL)) {
+				t.Fatal("first interrupted observation removed result")
+			}
+			path = filepath.Join(dir, jobstore.TerminalObservedFile+".0.0")
 		}
+		end := time.Now().Add(-30 * time.Minute).UTC()
+		if err := os.Chtimes(path, end, end); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end = info.ModTime()
 		page, err := m.ListArtifacts(ListArtifactsRequest{JobID: id})
-		want := meta.StartedAt.Add(m.cfg.JobTTL).Format(time.RFC3339Nano)
+		want := end.Add(m.cfg.JobTTL).UTC().Format(time.RFC3339Nano)
 		if err != nil || page.ExpiresAt != want {
-			t.Fatalf("expiry must match creation-based GC, terminal=%v: got %+v, want %s, error %v", terminal, page, want, err)
+			t.Fatalf("expiry does not match completion/observation, terminal=%v: %+v want %s err %v", terminal, page, want, err)
 		}
-		removed, err := m.GarbageCollect()
-		if err != nil || !slices.Contains(removed, id) {
-			t.Fatalf("expired job was not collected: %v %v", removed, err)
+		if m.gcEvaluate(m.loadJob(id), end.Add(-time.Nanosecond)) {
+			t.Fatal("GC deleted before advertised threshold")
+		}
+		if !m.gcEvaluate(m.loadJob(id), end.Add(time.Nanosecond)) {
+			t.Fatal("GC kept job beyond retention threshold")
 		}
 	}
 }

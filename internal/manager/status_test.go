@@ -1678,9 +1678,8 @@ func TestStatusElapsedFrozenAtCompletion(t *testing.T) {
 // TestStatusRecoveredElapsedFrozen: a job recovered without a completion
 // sentinel (process gone) is terminal, so its elapsed must freeze at the best
 // available end time rather than growing forever as time.Since(StartedAt). That
-// is the out file's mtime for a recovery with no payload, and result.json's
-// mtime when there is one, because out is created at spawn and stays at the
-// spawn time when the run streamed no text (issue #233).
+// is the first observed death for a recovery with no receipt, and result.json's
+// mtime when there is one. Output/progress timestamps do not prove completion.
 func TestStatusRecoveredElapsedFrozen(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1689,7 +1688,7 @@ func TestStatusRecoveredElapsedFrozen(t *testing.T) {
 		wantPartial bool
 	}{
 		{
-			name: "out mtime bounds a recovery with no payload",
+			name: "observed death bounds a recovery with no payload",
 			stage: func(t *testing.T, dir string, _, end time.Time) {
 				t.Helper()
 				outPath := jobstore.OutPath(dir)
@@ -1743,8 +1742,16 @@ func TestStatusRecoveredElapsedFrozen(t *testing.T) {
 			if st.State != tc.wantState || st.Partial != tc.wantPartial {
 				t.Fatalf("status = %+v, want state %q partial=%v", st, tc.wantState, tc.wantPartial)
 			}
-			if d := st.Elapsed; d < 9*time.Minute || d > 11*time.Minute {
-				t.Fatalf("elapsed = %v, want ~10m frozen at the recovered end", d)
+			want := 10 * time.Minute
+			if tc.wantPartial {
+				want = time.Hour
+			}
+			if d := st.Elapsed; d < want-time.Minute || d > want+time.Minute {
+				t.Fatalf("elapsed = %v, want about %v at receipt or observation", d, want)
+			}
+			again, err := m.Status("j")
+			if err != nil || again.Elapsed != st.Elapsed {
+				t.Fatalf("terminal estimate did not freeze: %v %v", again.Elapsed, err)
 			}
 		})
 	}

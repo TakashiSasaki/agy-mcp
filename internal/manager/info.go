@@ -18,7 +18,7 @@ type RuntimeInfo struct {
 	DefaultCwd       string `json:"default_cwd" jsonschema:"server working directory used when cwd is omitted"`
 	DefaultModel     string `json:"default_model,omitempty" jsonschema:"configured model ID; absence means agy's own default is used"`
 	DefaultTimeout   string `json:"default_timeout" jsonschema:"configured job duration limit, distinct from the inline wait limit"`
-	JobTTL           string `json:"job_ttl" jsonschema:"minimum age since creation for automatic collection of non-running jobs; zero disables automatic expiry"`
+	JobTTL           string `json:"job_ttl" jsonschema:"minimum retention after completion or durable first observed death without a terminal receipt; live jobs are retained and zero disables automatic expiry"`
 	MaxConcurrency   int    `json:"max_concurrency" jsonschema:"maximum admitted jobs in this server process"`
 	RunningJobs      int    `json:"running_jobs" jsonschema:"jobs currently accounted for by this server process; not a host-wide count"`
 	ConcurrencyScope string `json:"concurrency_scope" jsonschema:"process; sibling servers have separate global admission counters"`

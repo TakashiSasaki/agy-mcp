@@ -24,6 +24,7 @@ type jobStore interface {
 	WriteExitCode(id string, code int) error
 	ExitCode(id string) (int, bool)
 	CompletedAt(id string) (time.Time, bool)
+	TerminalObservedAt(meta jobstore.Meta, create bool) (time.Time, error)
 	MarkCollected(id string) error
 	Collected(id string) bool
 	MarkDismissed(id string) error
