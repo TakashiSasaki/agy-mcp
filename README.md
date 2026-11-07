@@ -382,8 +382,9 @@ replay returns the existing job even after that job changed HEAD or the former
 working directory was removed. These checks do not lock the repository or
 prevent a later change between preflight and agent execution.
 
-Terminal timing uses the exit-code sentinel or final result receipt. If neither
-survives, status inspection or GC creates `terminal_observed.<pid>.<start_ticks>` exclusively in the
+Terminal timing uses the exit-code sentinel, the final result file, or the
+publication time of a valid supervisor process receipt, in that order. If those
+receipts are missing, status inspection or GC creates `terminal_observed.<pid>.<start_ticks>` exclusively in the
 job directory. Binding the marker to the recorded supervisor prevents a stale
 PID-zero startup observation from shortening a later interrupted run. The marker persists across reads and restarts and starts a full
 retention window; output/progress timestamps do not prove completion. In that

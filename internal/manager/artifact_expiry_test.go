@@ -58,6 +58,31 @@ func TestArtifactExpiryMatchesCollection(t *testing.T) {
 	}
 }
 
+func TestArtifactExpiryRereadsNewlyPublishedExitMarker(t *testing.T) {
+	m, _, id, dir := stageEvidenceJob(t, false)
+	end := time.Date(2026, 11, 7, 6, 0, 0, 0, time.UTC)
+	start := end.Add(-time.Minute)
+	if err := jobstore.WriteProcessDir(dir, jobstore.ProcessOutcome{
+		Source: jobstore.ProcessOutcomeSource, PID: 1, StartedAt: &start,
+		EndedAt: end.Add(-2 * time.Second), ExitCode: new(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stamp := filepath.Join(dir, jobstore.ProcessFile)
+	if err := os.Chtimes(stamp, end.Add(-time.Second), end.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(jobstore.ExitCodePath(dir), end, end); err != nil {
+		t.Fatal(err)
+	}
+	m.store = &reReadExitStore{jobStore: m.store, id: id}
+	page, err := m.ListArtifacts(ListArtifactsRequest{JobID: id})
+	want := end.Add(m.cfg.JobTTL).Format(time.RFC3339Nano)
+	if err != nil || page.ExpiresAt != want {
+		t.Fatalf("expiry = %q, want newly published exit marker expiry %q: %v", page.ExpiresAt, want, err)
+	}
+}
+
 // Mutation guards: live jobs and disabled expiry must not report a deadline.
 func TestArtifactExpiryOmitsLiveAndDisabled(t *testing.T) {
 	m, _, id, dir := stageEvidenceJob(t, true)

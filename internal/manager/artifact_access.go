@@ -73,8 +73,12 @@ func (m *Manager) artifactExpiry(meta jobstore.Meta) string {
 		return ""
 	}
 	_, terminal := m.store.ExitCode(meta.ID)
-	if !terminal && m.processAlive(meta) {
-		return ""
+	if !terminal {
+		if m.processAlive(meta) {
+			return ""
+		}
+		// The supervisor may have published the marker before exiting.
+		_, terminal = m.store.ExitCode(meta.ID)
 	}
 	retainedFrom, err := m.retentionStart(meta, terminal, false)
 	if err != nil {

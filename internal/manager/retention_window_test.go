@@ -125,6 +125,63 @@ func TestRecoveredResultRetentionUsesReceiptWithoutObservation(t *testing.T) {
 	}
 }
 
+func TestRecoveredProcessReceiptFreezesElapsedAndRetention(t *testing.T) {
+	for _, result := range []string{"saved", "missing", "blocked"} {
+		t.Run(result, func(t *testing.T) {
+			m := newManager(t, managerOpts{jobTTL: time.Hour})
+			end := time.Date(2026, 11, 7, 6, 0, 0, 0, time.UTC)
+			meta := jobstore.Meta{ID: "recovered-process", StartedAt: end.Add(-3 * time.Hour)}
+			dir, err := m.store.Create(meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(jobstore.ExitCodePath(dir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			receipt := jobstore.ProcessOutcome{
+				Source: jobstore.ProcessOutcomeSource, PID: 1, StartedAt: &meta.StartedAt,
+				EndedAt: end.Add(-time.Second), ExitCode: new(42),
+			}
+			if err := jobstore.WriteProcessDir(dir, receipt); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(filepath.Join(dir, jobstore.ProcessFile), end, end); err != nil {
+				t.Fatal(err)
+			}
+			switch result {
+			case "saved":
+				if err := jobstore.WriteResultDir(dir, []byte(`{"status":"SUCCESS","response":"saved answer"}`)); err != nil {
+					t.Fatal(err)
+				}
+				end = end.Add(time.Second)
+				if err := os.Chtimes(jobstore.ResultPath(dir), end, end); err != nil {
+					t.Fatal(err)
+				}
+			case "blocked":
+				if err := os.Mkdir(jobstore.ResultPath(dir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(jobstore.OutPath(dir), []byte("saved answer"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if expiry := m.artifactExpiry(meta); expiry != end.Add(time.Hour).Format(time.RFC3339Nano) {
+				t.Fatalf("artifact expiry = %q, want one hour after %v", expiry, end)
+			}
+			st, err := m.Status(meta.ID)
+			if err != nil || st.State != StateFailed || st.Result != "saved answer" || st.Partial != (result != "saved") || st.Elapsed != end.Sub(meta.StartedAt) {
+				t.Fatalf("unexpected recovered status: %+v, %v", st, err)
+			}
+			if m.gcEvaluate(m.loadJob(meta.ID), end.Add(-time.Nanosecond)) {
+				t.Fatal("GC removed recovered job before its advertised expiry")
+			}
+			if !m.gcEvaluate(m.loadJob(meta.ID), end.Add(time.Nanosecond)) {
+				t.Fatal("GC retained recovered job beyond its advertised expiry")
+			}
+		})
+	}
+}
+
 // Status/GC can observe a PID-zero entry between Create and PID publication.
 // Even an observer holding that stale snapshot after publication must not set
 // the eventual interrupted supervisor's retention window or elapsed time.

@@ -252,7 +252,7 @@ func (m *Manager) Status(id string) (Status, error) {
 	}
 
 	if code, ok := m.store.ExitCode(id); ok {
-		return m.statusFromExitCode(dir, meta, st, code), nil
+		return m.statusFromExitCode(dir, meta, st, code, true), nil
 	}
 
 	// No sentinel: decide running vs interrupted.
@@ -264,12 +264,12 @@ func (m *Manager) Status(id string) (Status, error) {
 	// checks above; re-read once so a job that just finished normally is not
 	// misreported as interrupted.
 	if code, ok := m.store.ExitCode(id); ok {
-		return m.statusFromExitCode(dir, meta, st, code), nil
+		return m.statusFromExitCode(dir, meta, st, code, true), nil
 	}
 	// The supervisor may have published its process outcome before failing to
 	// write the sentinel. Use the same classification as a normal completion.
-	if code, ok := jobstore.ReadProcessExitCode(dir); ok {
-		return m.statusFromExitCode(dir, meta, st, code), nil
+	if code, _, ok := jobstore.ReadProcessCompletion(dir); ok {
+		return m.statusFromExitCode(dir, meta, st, code, false), nil
 	}
 	// Process is gone without a sentinel. The job is terminal (no supervisor is
 	// left to write one), so freeze elapsed at the best available end time before
@@ -334,10 +334,10 @@ func recoverInterrupted(dir string, meta jobstore.Meta, st Status) Status {
 // happens to the answer and the accounting afterwards is the same for all of
 // them, and this file has regressed three times because that was not true and a
 // fix applied to one branch left the identical case open in its sibling.
-func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, code int) Status {
+func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, code int, hasExitMarker bool) Status {
 	// The job is terminal, so freeze Elapsed at the completion time rather than
 	// letting it grow forever as time.Since(StartedAt).
-	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, true)
+	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, hasExitMarker)
 	res, hasResult := readResultPayload(dir)
 	switch code {
 	case 0:

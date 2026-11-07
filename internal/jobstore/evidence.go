@@ -56,25 +56,26 @@ func ExitSentinel(raw int, timedOut, cancelled bool) int {
 	}
 }
 
-// ReadProcessExitCode recovers the completion code from a supervisor receipt
-// when the completion marker could not be published.
-func ReadProcessExitCode(dir string) (int, bool) {
+// ReadProcessCompletion recovers the completion code and receipt file timestamp
+// when the ordinary completion marker could not be published. The supervisor
+// writes the receipt after cleanup, while EndedAt describes the CLI process.
+func ReadProcessCompletion(dir string) (int, time.Time, bool) {
 	// A supervisor receipt is a small regular file. Ignore other shapes so a
 	// damaged store cannot stall status on a named pipe or a large file.
 	const maxReceiptBytes = 4096
 	info, err := os.Lstat(filepath.Join(dir, ProcessFile))
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReceiptBytes {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	o, err := ReadProcessDir(dir)
 	if err != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() || o.ExitCode == nil {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	if o.PID <= 0 || o.StartedAt == nil || o.StartedAt.IsZero() || *o.ExitCode < 0 ||
 		(o.TimedOut && o.Cancelled) || (*o.ExitCode == 0 && (o.TimedOut || o.Cancelled)) {
-		return 0, false
+		return 0, time.Time{}, false
 	}
-	return ExitSentinel(*o.ExitCode, o.TimedOut, o.Cancelled), true
+	return ExitSentinel(*o.ExitCode, o.TimedOut, o.Cancelled), info.ModTime(), true
 }
 
 func WriteProcessDir(dir string, outcome ProcessOutcome) error {

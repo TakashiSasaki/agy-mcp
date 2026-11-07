@@ -14,27 +14,37 @@ import (
 // retentionStart is shared by GC, artifact expiry and frozen terminal elapsed.
 // Callers first establish terminal/dead state. Receipt timestamps outrank a
 // durable observation estimate; progress/output mtimes are not completion.
-func (m *Manager) retentionStart(meta jobstore.Meta, terminal, observe bool) (time.Time, error) {
+func (m *Manager) retentionStart(meta jobstore.Meta, hasExitMarker, observe bool) (time.Time, error) {
 	dir, err := m.store.Dir(meta.ID)
 	if err != nil {
 		return time.Time{}, err
 	}
-	names := []string{jobstore.ResultFile}
-	if terminal {
-		names = []string{jobstore.ExitCodeFile, jobstore.ResultFile}
+	if hasExitMarker {
+		stamp, err := completionFileTime(jobstore.ExitCodePath(dir))
+		if !errors.Is(err, fs.ErrNotExist) {
+			return stamp, err
+		}
 	}
-	for _, name := range names {
-		info, err := os.Lstat(filepath.Join(dir, name))
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return time.Time{}, err
-		}
-		if !info.Mode().IsRegular() {
-			return time.Time{}, fmt.Errorf("completion receipt %q is not a regular file", name)
-		}
-		return info.ModTime(), nil
+	stamp, resultErr := completionFileTime(jobstore.ResultPath(dir))
+	if resultErr == nil {
+		return stamp, nil
+	}
+	if _, stamp, ok := jobstore.ReadProcessCompletion(dir); ok {
+		return stamp, nil
+	}
+	if !errors.Is(resultErr, fs.ErrNotExist) {
+		return time.Time{}, resultErr
 	}
 	return m.store.TerminalObservedAt(meta, observe)
+}
+
+func completionFileTime(path string) (time.Time, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return time.Time{}, fmt.Errorf("completion receipt %q is not a regular file", filepath.Base(path))
+	}
+	return info.ModTime(), nil
 }
