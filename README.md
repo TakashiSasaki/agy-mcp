@@ -16,7 +16,7 @@ An MCP (Model Context Protocol) server that wraps the [Antigravity CLI](https://
 
 > Status: feature complete (stdio and HTTP transports, async and sync job lifecycle, model and session discovery, per-run controls and structured output, cross-platform builds) and verified against a live agy, with 1.1.15 the minimum supported version.
 
-To build this fork and connect it to ChatGPT from a new Linux host, follow the [self-hosting guide](docs/self-hosting.md). It covers installation, the systemd service, validation, updates and job recovery.
+Use the [Linux self-hosting guide](docs/self-hosting.md) to build this fork and choose [ChatGPT through Secure MCP Tunnel](docs/self-hosting.md#connect-through-chatgpt-secure-mcp-tunnel) or a [standalone Streamable HTTP server under systemd](docs/self-hosting.md#run-a-standalone-http-server-with-systemd).
 
 ## Why
 

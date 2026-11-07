@@ -1,18 +1,19 @@
-# Self-host agy-mcp with ChatGPT
+# Self-host agy-mcp on Linux
 
-This guide builds the fork on a Linux host, verifies the local MCP server, and connects it to ChatGPT through OpenAI Secure MCP Tunnel. The host runs `tunnel-client`, which launches `agy-mcp` over stdio. A separate supervisor runs Antigravity CLI (`agy`) for each job and saves its state on the host.
+Choose how clients reach agy-mcp after the [shared build and local check](#build-and-check-the-local-server).
 
-```text
-ChatGPT <-> Secure MCP Tunnel <-> tunnel-client <-> agy-mcp
-                                                       |
-                                              job supervisor -> agy
-```
+| Deployment | Connection | What runs on the host |
+| --- | --- | --- |
+| [ChatGPT through Secure MCP Tunnel](#connect-through-chatgpt-secure-mcp-tunnel) | Select the tunnel in ChatGPT. | `tunnel-client` launches agy-mcp over stdio. |
+| [Standalone server under systemd](#run-a-standalone-http-server-with-systemd) | Point a Streamable HTTP MCP client at `http://127.0.0.1:8765/mcp`. | The `agy-mcp.service` user unit runs agy-mcp directly in HTTP mode. |
+
+In either deployment, a separate supervisor runs Antigravity CLI (`agy`) for each job and saves its state on the host. If both deployments run side by side and need independent job histories, give each a distinct `AGY_MCP_STATE_DIR`.
 
 ## Prerequisites
 
 - A Linux account with a systemd user session, Bash, Git, Go as specified in [go.mod](../go.mod), and `curl` and `jq` for the health checks. The local MCP check uses Python 3. Linux job cleanup requires a readable `/proc` and kernel support for subreapers and pidfds. See [Linux job cleanup](../README.md#linux-job-cleanup-and-systemd-tunnel-restarts).
 - Antigravity CLI 1.1.15 or later, signed in under the account that will run the service. Install the CLI from [Antigravity](https://antigravity.google/) and launch `agy` interactively to sign in. For a headless host using Google Application Default Credentials, see the authentication note in [Requirements](../README.md#requirements).
-- For ChatGPT, install `tunnel-client` on the same host. Get a binary for the host architecture from [OpenAI's tunnel-client releases](https://github.com/openai/tunnel-client/releases/latest) and put it on `PATH`. The commands below were checked with tunnel-client 0.0.18. The stdio tunnel uses outbound HTTPS to OpenAI and needs no public MCP listener. See the [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+- For the ChatGPT tunnel deployment, install `tunnel-client` on the same host. Get a binary for the host architecture from [OpenAI's tunnel-client releases](https://github.com/openai/tunnel-client/releases/latest) and put it on `PATH`. The commands below were checked with tunnel-client 0.0.18. The stdio tunnel uses outbound HTTPS to OpenAI and needs no public MCP listener. See the [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
 Use an account and workspace you trust with the host user's files. agy-mcp runs AGY with permission prompts disabled. An explicit job working directory selects the workspace, while the process retains the host user's filesystem permissions. See [execution boundaries](../README.md#agent-delegation-and-recovery).
 
@@ -93,7 +94,9 @@ with subprocess.Popen([sys.argv[1]], stdin=subprocess.PIPE, stdout=subprocess.PI
 PY
 ```
 
-## Set up a private tunnel
+## Connect through ChatGPT Secure MCP Tunnel
+
+### Set up a private tunnel
 
 In [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels), create or select a tunnel and copy its ID. Associate it with the Platform organization and the ChatGPT workspace that will use it. Creating a tunnel requires Tunnels Read and Manage. The runtime credential and the person selecting the tunnel in ChatGPT need Tunnels Read and Use. ChatGPT workspace controls also have to allow custom MCP servers. Create a restricted runtime key in [Platform API keys](https://platform.openai.com/settings/organization/api-keys). Keep management credentials separate. [OpenAI permission and workspace guidance](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#permissions-and-access)
 
@@ -126,7 +129,18 @@ install -d -m 700 "$profile_dir/secrets" "$runtime_dir"
 )
 ```
 
-## Run the tunnel as a user service
+### Start the tunnel client
+
+For an interactive setup, keep this command running in the terminal that has the build step's exported AGY settings. Use another terminal for the health check below, setting `health_url_file` to the same path.
+
+```bash
+"$tunnel_client_bin" run --profile-dir "$profile_dir" --profile agy \
+  --health.url-file "$health_url_file"
+```
+
+For a background service, use the next section. Stop the foreground client before switching to systemd.
+
+### Optional tunnel user service
 
 For a new host, install the following instance unit and its [job lifecycle drop-in](../deploy/agy-tunnel-job-lifecycle.conf). If you already manage the `agy` profile with systemd, compare these settings with `systemctl --user cat tunnel-client@agy.service` and adapt that service. Run one tunnel client per tunnel ID.
 
@@ -166,17 +180,81 @@ For ADC, add `AGY_ADC_AUTH=1` and the required credential environment to the ser
 
 The instance-specific `KillMode=process` lets active job supervisors outlive the tunnel. Use `agy_cancel` when the job itself needs to stop. For startup at boot without an interactive login, check the account's linger setting with `loginctl show-user "$USER" -p Linger` and use your host's user-service policy.
 
+### Verify the tunnel
+
 ```bash
 "$tunnel_client_bin" health --url-file "$health_url_file" --require-control-plane-poll
 ```
 
 If the first poll is still pending, check again when it completes. Use `journalctl --user -u tunnel-client@agy.service -n 50` for startup errors. For a healthy client, confirm readiness and a successful control-plane poll before connecting ChatGPT.
 
-## Connect and run a small job
+### Connect ChatGPT
 
 In [ChatGPT Plugins](https://chatgpt.com/#settings/Connectors), add a custom MCP server, choose **Tunnel** under Connection, and select the tunnel or enter its ID. Use **No authentication** for this private stdio server when no app-level authentication layer has been added. OpenAI still enforces tunnel and workspace access, and AGY uses its separate sign-in on the host. Create and install the plugin, then select it in a new conversation and call `agy_info`. Compare `server_version` with the installed binary and check that the expected tools are available. [OpenAI's ChatGPT connection steps](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#connect-from-chatgpt)
 
-Create an empty test directory on the host, for example `mkdir -p "$HOME/agy-mcp-smoke"`. Use its absolute path as `cwd`. Call `agy_run` with the following inputs, replacing the path and choosing a fresh idempotency key for this run. This step spends AGY model quota.
+## Run a standalone HTTP server with systemd
+
+After building and checking the binary, create a user service that runs agy-mcp directly. This path uses the server's Streamable HTTP transport. Install OpenSSL to generate the HTTP bearer token. Keep the service bound to loopback and give the token only to clients allowed to run jobs. For an independent job history alongside the tunnel, set `agy_state_dir="$HOME/.local/state/agy-mcp-http"` and run `install -d -m 700 "$agy_state_dir"` before writing the unit.
+
+```bash
+http_env_file="$HOME/.config/agy-mcp/http.env"
+unit_dir="$HOME/.config/systemd/user"
+unit_path="$unit_dir/agy-mcp.service"
+(
+  set -e
+  set -o noclobber
+  umask 077
+  install -d -m 700 "$HOME/.config/agy-mcp"
+  mkdir -p "$unit_dir"
+
+  http_token="$(openssl rand -hex 32)"
+  printf 'AGY_MCP_HTTP_TOKEN=%s\n' "$http_token" > "$http_env_file"
+  unset http_token
+
+  cat > "$unit_path" <<UNIT
+[Unit]
+Description=agy-mcp Streamable HTTP server
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment="AGY_MCP_AGY_PATH=$agy_bin"
+Environment="AGY_MCP_STATE_DIR=$agy_state_dir"
+EnvironmentFile=%h/.config/agy-mcp/http.env
+ExecStart="$agy_mcp_bin" -http 127.0.0.1:8765
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
+UNIT
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now agy-mcp.service
+  systemctl --user status agy-mcp.service --no-pager
+)
+```
+
+This unit uses systemd's default cgroup shutdown policy. Finish or explicitly cancel active jobs before stopping or restarting the service. Use `journalctl --user -u agy-mcp.service -n 50` for startup diagnostics. For startup at boot without an interactive login, check `loginctl show-user "$USER" -p Linger` and use your host's user-service policy.
+
+Check that an authenticated MCP initialization returns `serverInfo`. The token comes from the private environment file through curl's standard input.
+
+```bash
+{
+  printf 'Authorization: Bearer '
+  sed -n 's/^AGY_MCP_HTTP_TOKEN=//p' "$http_env_file"
+} | curl -fsS --max-time 10 --header @- \
+  --header 'Content-Type: application/json' \
+  --header 'Accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"agy-mcp-http-check","version":"1"}}}' \
+  http://127.0.0.1:8765/mcp
+```
+
+Configure a Streamable HTTP MCP client on the host with `http://127.0.0.1:8765/mcp` and the bearer token from the environment file. Call `agy_info` and compare its version with the installed binary. For a client on another machine, you can forward the loopback port over SSH, for example with `ssh -N -L 8765:127.0.0.1:8765 user@host`, then use the same client URL. See [HTTP mode](../README.md#http-mode).
+
+## Run a small job
+
+From ChatGPT or the standalone HTTP client, create an empty test directory on the host, for example `mkdir -p "$HOME/agy-mcp-smoke"`. Use its absolute path as `cwd`. Call `agy_run` with the following inputs, replacing the path and choosing a fresh idempotency key for this run. This step spends AGY model quota.
 
 ```json
 {
@@ -194,7 +272,9 @@ Save the exact arguments and returned `job_id`. Use `agy_wait` with `wait: "30s"
 
 Before the update, save the running `server_version` and a finished job ID for comparison. Check out the intended commit, record `git rev-parse HEAD`, and run the [repository checks](../AGENTS.md#build-test-lint).
 
-Pause new tool calls. Use the health command below to check the dispatcher, and inspect live jobs separately with `agy_info` or `agy_list_jobs`. Wait for active dispatches to finish. If work must continue through the restart, record the live supervisor's PID and start time for comparison afterward. A service restart with the drop-in can preserve live jobs. A host reboot ends their processes.
+Pause new tool calls and wait for active requests to finish. For the tunnel, inspect the dispatcher with the health command below. In either mode, inspect live jobs with `agy_info` or `agy_list_jobs`. Drain the standalone service's jobs before restarting it. For a tunnel service using the lifecycle drop-in, record the PID and start time of any job supervisor that must continue through the restart. A host reboot ends those processes.
+
+If the tunnel client is running in a terminal, stop it before replacing the executable.
 
 ```bash
 (
@@ -206,15 +286,16 @@ Pause new tool calls. Use the health command below to check the dispatcher, and 
   mv -- "$stage/previous" "$agy_mcp_bin.previous"
   mv -- "$stage/agy-mcp" "$agy_mcp_bin"
   rmdir -- "$stage"
-  systemctl --user restart tunnel-client@agy.service
 )
 ```
 
-Confirm the new service PID and a single owner for the profile with `systemctl --user show tunnel-client@agy.service -p MainPID` and `pgrep -a -x tunnel-client`. Wait for a successful control-plane poll, then call `agy_info` and retrieve the saved job with `agy_get_result` through ChatGPT. Keep the state directory and tunnel profile in place to preserve existing job IDs and keys.
+For a systemd deployment, set `agy_service` to `tunnel-client@agy.service` or `agy-mcp.service`, then run `systemctl --user restart "$agy_service"` and verify the new PID with `systemctl --user show "$agy_service" -p MainPID`. For a foreground tunnel, run its foreground command again. For either tunnel launch method, check for one tunnel owner with `pgrep -a -x tunnel-client` and wait for a successful poll. Through the client for your deployment, call `agy_info` and retrieve the saved job with `agy_get_result`. Keep the state directory and service configuration in place to preserve existing job IDs and keys.
 
-To roll back, pause new calls and wait for dispatches to finish, move `"$agy_mcp_bin.previous"` into `"$agy_mcp_bin"` with `mv`, and restart the same service. Repeat the version and result checks. After changing tool schemas, open the existing ChatGPT app, select **Refresh**, and test a changed tool in a new conversation. [Metadata refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
+To roll back, pause new calls and wait for dispatches to finish, move `"$agy_mcp_bin.previous"` into `"$agy_mcp_bin"` with `mv`, and restart the same service or foreground tunnel. Repeat the version and result checks. After changing tool schemas, open the existing ChatGPT app, select **Refresh**, and test a changed tool in a new conversation. [Metadata refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
 
 ## Troubleshoot and recover
+
+For tunnel diagnostics, inspect health and the tunnel unit. For standalone HTTP, check the `agy-mcp.service` journal and repeat the HTTP initialization above.
 
 ```bash
 health_url="$(cat "$health_url_file")"
