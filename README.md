@@ -235,6 +235,50 @@ All execution and schema-file paths refer to the server host, which can differ f
 4. If the handle is lost, call `agy_list_jobs` with the original `idempotency_key` or label and cwd, then inspect the match. Listing covers the configured retained job store, not agy's conversation history. It omits prompts, raw arguments, errors, result bodies and idempotency tokens. Labels match case-insensitive substrings; other filters match exactly, with cwd canonicalized. Default page size is 20, maximum 100. Results sort by start time descending, then job ID descending. `total_count` is a scan observation; concurrent starts or expiry can shift offset pages. Listing does not collect results.
 5. Use `agy_status` with `include_result: false` for metadata, then `agy_get_result` for terminal text. Inspect `state`, `partial`, `failure_reason`, `retryable` and recovery advice before adopting the answer or continuing. Retrieval succeeding does not mean the task succeeded. Verify edits and acceptance criteria in the caller's workspace before committing.
 
+### Reviews with inspectable evidence
+
+Choose the review's scope explicitly. A conceptual review assesses the supplied
+assumptions; it does not establish new defects in a repository that was never read.
+For a repository review, supply exact files and a revision or diff, including relevant
+DDL, design contracts and tests. `execution_cwd` and `git_head` record job context,
+not proof that the agent inspected those sources. Ask for an inspection inventory,
+supporting evidence and gaps, and independently reconcile each actionable finding.
+
+Adapt this prompt to the task; replace the paths and revision before sending it:
+
+```text
+Perform a repository review of <absolute repository path> at <commit or diff>.
+Read <DDL files>, <design contract files> and <test files>. If a source cannot be
+read or the revision differs, report the gap instead of assuming its contents.
+Do not edit/create/delete files or run mutating commands. Do the review directly
+and return findings yourself, without delegating it to another agent.
+Report:
+- Scope: conceptual, repository, or mixed; the actual inspected files/revision,
+  supplied assumptions, and requested sources you could not inspect.
+- Findings: distinguish confirmed defects, conditional risks and proposals.
+  Include severity, file/line or supplied premise, reasoning and a counterexample
+  or reproduction where possible. Do not invent findings to reach a target count.
+- Verification: commands actually run, observed results and checks not run.
+  Run authorized checks in the foreground and identify any retained evidence.
+- Standards/API proposals: exact specification version/profile, primary source,
+  required extensions and whether the target implementation supports them.
+  Label untested syntax as a proposal, not an executable fix.
+- Remaining gaps: what this review cannot establish, even if no defects were found.
+```
+
+These are instructions to the agent, not enforced read-only access or a server
+attestation of inspection. A structured `json_schema` response can make the inventory
+easier to consume, but neither JSON structure nor `partial: false` verifies its claims.
+Check the cited files, commands, artifacts and standards independently. Include both
+examples that must be accepted and counterexamples that must be rejected when testing
+proposed constraints; otherwise a constraint may pass by inspecting no relevant data
+or reject states the design deliberately permits.
+
+Report model provenance separately from review quality. `requested_model` and
+`selected_model` do not confirm backend execution. When `effective_model` is null,
+state that the actual backend model is unverified; do not ask the model to self-identify
+as a substitute for provider metadata. This limitation does not discard useful findings.
+
 ### Live progress and verification evidence
 
 For a long verification task, prepare a distinct evidence directory in the task prompt and declare it with `artifact_dirs`, for example `/tmp/pr253_evidence_20261103`. Have the delegated agent write test stdout/stderr there and request a JUnit report (`pytest --junitxml=...`). This field only authorizes evidence retrieval. It is not forwarded as an agy workspace, does not load extra workspace rules, and does not enforce where the agent can write.

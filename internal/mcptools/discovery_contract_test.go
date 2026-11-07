@@ -48,7 +48,7 @@ func TestRunDiscoveryContract(t *testing.T) {
 					}
 				}
 			}
-			for _, text := range []string{"server host", "not filesystem confinement", "not enforced read-only", "same conversation", "not per cwd or caller", "JSON-encoded schema string"} {
+			for _, text := range []string{"server host", "not filesystem confinement", "not enforced read-only", "same conversation", "not per cwd or caller", "JSON-encoded schema string", "conceptual review", "inspected files", "unverified claims", "specification version", "not server-attested inspection", "effective_model null"} {
 				if !strings.Contains(tool.Description, text) {
 					t.Errorf("tool-level guide lost %q", text)
 				}

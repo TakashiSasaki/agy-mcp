@@ -653,7 +653,7 @@ agy delegates a prompt to a background coding agent and manages the run as a res
 - Continue a prior thread with conversation_id or continue_latest instead of restating context.
 - Fan out freely: fresh runs in the same directory run concurrently, up to the server's concurrency cap. Only two runs continuing the SAME conversation_id conflict, and the second is refused rather than queued.
 
-- Peer review: have another model review code, a design, or a plan for bugs, security, and correctness.
+- Peer review: distinguish a conceptual review of assumptions from a repository review. Provide exact files/revision and ask for inspected sources, evidence, unverified claims and counterexamples. Execution context is not proof of inspection; job completion is not a correctness verdict. Verify standards/API syntax independently against the intended version and implementation.
 - Rubber-duck: talk through a decision and get pushback that catches blind spots your own reasoning would skip.
 - Research: fact-check a claim or look into a topic.
 - Background delegation: fire off an independent task and reconcile the result later, so two things run at once.

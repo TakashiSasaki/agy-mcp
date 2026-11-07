@@ -6,6 +6,12 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
+// Keep review limitations on each start tool: clients may abbreviate server
+// instructions and omit individual property descriptions.
+const reviewEvidenceGuide = `
+
+Review evidence: specify whether this is a conceptual review of supplied assumptions or a repository review. For repository work, give exact files and a revision/diff, and ask the agent to report inspected files, commands actually run, supporting evidence and unverified claims. cwd and git_head identify execution context, not proof that files were inspected. Separate confirmed defects, conditional risks and proposals; an empty findings list is not proof of correctness. For standards/API claims, request the specification version, primary source and implementation support; independently check proposed syntax and counterexamples before adoption. These are agent-reported findings, not server-attested inspection. A done job or partial false does not verify review coverage or correctness. requested_model and selected_model are request/pre-execution metadata; effective_model null means the backend model is unverified, not that the requested model was confirmed.`
+
 // Some clients render argument types without property descriptions. Keep the
 // execution boundary and a compact input reference on each start tool too.
 const runArgumentGuide = `
@@ -34,7 +40,7 @@ func runInputSchema[In any]() *jsonschema.Schema {
 	schema.Properties["continue_latest"].Default = json.RawMessage(`false`)
 	schema.Properties["project_rules"].Default = json.RawMessage(`true`)
 	examples := map[string]any{
-		"prompt":          "Read README.md and report unclear setup instructions. Do not edit files or run mutating commands.",
+		"prompt":          "Review README.md setup instructions. Read the file and report inspected revision, file/line evidence, assumptions and checks not run; distinguish confirmed defects from proposals. Do not edit files or run mutating commands. Write findings directly without delegating to another agent.",
 		"cwd":             "/srv/project",
 		"model":           "gemini-3.8-flash-medium",
 		"effort":          agyEffortMedium,
