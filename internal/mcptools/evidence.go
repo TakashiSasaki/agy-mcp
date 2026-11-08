@@ -33,11 +33,12 @@ type logsInput struct {
 }
 
 type verificationInput struct {
-	ExitCodePath string `json:"exit_code_path,omitempty" jsonschema:"optional job-associated artifact containing one signed 32-bit decimal command exit code, at most 64 bytes; nonzero prevents a report-only pass, incomplete reports stay unknown; caller must associate it with the same invocation"`
-	Format       string `json:"format,omitempty" jsonschema:"report format: junit (default), go_test_json for unmodified go test -json output, or tap for restricted flat numbered TAP; no filename guessing"`
-	MaxFailures  *int   `json:"max_failures,omitempty" jsonschema:"maximum failure details to return (0 to 100, default 100); zero returns counts and outcome only; the complete report is always parsed"`
-	JobID        string `json:"job_id" jsonschema:"job whose explicitly selected verification report to inspect"`
-	Path         string `json:"path" jsonschema:"JUnit XML, Go test JSON or restricted flat TAP report within the job's associated artifact roots; maximum 4 MiB"`
+	CommandReceiptPath string `json:"command_receipt_path,omitempty" jsonschema:"job-associated JSON artifact up to 8192 bytes with report_path (same spelling as path), report_sha256 (64 hex characters), and exit_code (signed 32-bit integer). Path and digest must match. Mutually exclusive with exit_code_path"`
+	ExitCodePath       string `json:"exit_code_path,omitempty" jsonschema:"optional job-associated artifact containing one signed 32-bit decimal command exit code, at most 64 bytes; nonzero prevents a report-only pass, incomplete reports stay unknown; caller must associate it with the same invocation"`
+	Format             string `json:"format,omitempty" jsonschema:"report format: junit (default), go_test_json for unmodified go test -json output, or tap for restricted flat numbered TAP; no filename guessing"`
+	MaxFailures        *int   `json:"max_failures,omitempty" jsonschema:"maximum failure details to return (0 to 100, default 100); zero returns counts and outcome only; the complete report is always parsed"`
+	JobID              string `json:"job_id" jsonschema:"job whose explicitly selected verification report to inspect"`
+	Path               string `json:"path" jsonschema:"JUnit XML, Go test JSON or restricted flat TAP report within the job's associated artifact roots; maximum 4 MiB"`
 }
 
 // SDK v1.8.0 applySchema re-marshals object outputs through float64 while
@@ -95,14 +96,26 @@ func registerEvidence(s *toolServer, mgr *manager.Manager) {
 		out, err := mgr.Logs(manager.LogRequest{JobID: in.JobID, Stream: in.Stream, Path: in.Path, Cursor: in.Cursor, FromStart: in.FromStart, TailBytes: in.TailBytes, MaxBytes: in.MaxBytes})
 		return nil, out, err
 	})
+	verificationSchema := inferredSchema[verificationInput]()
+	verificationSchema.Properties["command_receipt_path"].MinLength = new(1)
 	addEvidenceTool(s, &mcp.Tool{
 		Name: toolAgyVerification, Title: "Inspect test verification evidence", Annotations: annReadLocal,
-		Description: "Parse an explicitly selected JUnit XML (format junit, the default) or go test -json (format go_test_json), or restricted flat TAP (format tap) artifact into a verification outcome without an agent turn. Job state is independent: a done job can have a failed or unknown report. Malformed/truncated reports, invalid suite nesting, empty or duplicate counters, counter disagreements and reports with no executed testcases cannot pass. Go JSON requires terminal records for every observed package and testcase; package/build failures cannot pass, and malformed, truncated or unsupported records return unknown. Native Node.js JUnit testcases under testsuites are accepted; when summary comments are present, incomplete, duplicate or inconsistent summaries and unrepresented footer failures/cancellations return unknown. General JUnit does not require these comments. Native CTest explicit return-code and regular-expression skips count as skipped. Other notrun evidence, such as missing test executables, remains unknown. TAP accepts a single leading or trailing plan, sequential numbered cases, comments and SKIP directives; TODO, nested subtests, YAML diagnostics, bailouts and malformed/incomplete evidence return unknown. An explicit TimeoutExpired error type is classified as a subprocess timeout, not as proof of a product defect. SHA-256 identifies the exact report bytes. max_failures (0 to 100, default 100) bounds returned failure details; zero returns a summary while preserving complete-report validation. Optional exit_code_path selects a tiny command-status artifact: a nonzero code changes a report pass to failed, while incomplete reports remain unknown. Missing or malformed selected exit evidence is a tool error. report_outcome preserves the original verdict, and command_exit includes source, status and exact artifact hash. No job state or agent narrative supplies the code. This reads report evidence and does not independently attest that commands ran or that the file was created by this job. Use agy_list_artifacts and agy_read_artifact to inspect provenance and full details, and agy_events for CLI/process outcomes.",
+		InputSchema: verificationSchema,
+		Description: "Parse an explicitly selected JUnit XML (format junit, the default) or go test -json (format go_test_json), or restricted flat TAP (format tap) artifact into a verification outcome without an agent turn. Job state is independent: a done job can have a failed or unknown report. Malformed/truncated reports, invalid suite nesting, empty or duplicate counters, counter disagreements and reports with no executed testcases cannot pass. Go JSON requires terminal records for every observed package and testcase; package/build failures cannot pass, and malformed, truncated or unsupported records return unknown. Native Node.js JUnit testcases under testsuites are accepted; when summary comments are present, incomplete, duplicate or inconsistent summaries and unrepresented footer failures/cancellations return unknown. General JUnit does not require these comments. Native CTest explicit return-code and regular-expression skips count as skipped. Other notrun evidence, such as missing test executables, remains unknown. TAP accepts a single leading or trailing plan, sequential numbered cases, comments and SKIP directives; TODO, nested subtests, YAML diagnostics, bailouts and malformed/incomplete evidence return unknown. An explicit TimeoutExpired error type is classified as a subprocess timeout, not as proof of a product defect. SHA-256 identifies the exact report bytes. max_failures (0 to 100, default 100) bounds returned failure details; zero returns a summary while preserving complete-report validation. Optional command_receipt_path binds a command exit status to the exact report path and SHA-256 in a JSON receipt. Mismatches and malformed receipts return a tool error. Alternatively, exit_code_path selects an independent decimal status artifact. A nonzero code changes a report pass to failed, while incomplete reports remain unknown. Missing or malformed selected exit evidence is a tool error. report_outcome preserves the original verdict, and command_exit includes source, status and exact artifact hash. No job state or agent narrative supplies the code. This reads report evidence and does not independently attest that commands ran or that the file was created by this job. Use agy_list_artifacts and agy_read_artifact to inspect provenance and full details, and agy_events for CLI/process outcomes.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in verificationInput) (*mcp.CallToolResult, manager.VerificationResult, error) {
 		if in.MaxFailures != nil && (*in.MaxFailures < 0 || *in.MaxFailures > 100) {
 			return nil, manager.VerificationResult{}, fmt.Errorf("max_failures must be between 0 and 100")
 		}
-		out, err := mgr.VerificationWithExitCode(in.JobID, in.Path, in.Format, in.ExitCodePath)
+		if in.CommandReceiptPath != "" && in.ExitCodePath != "" {
+			return nil, manager.VerificationResult{}, fmt.Errorf("command_receipt_path and exit_code_path are mutually exclusive")
+		}
+		var out manager.VerificationResult
+		var err error
+		if in.CommandReceiptPath != "" {
+			out, err = mgr.VerificationWithCommandReceipt(in.JobID, in.Path, in.Format, in.CommandReceiptPath)
+		} else {
+			out, err = mgr.VerificationWithExitCode(in.JobID, in.Path, in.Format, in.ExitCodePath)
+		}
 		if in.MaxFailures != nil && len(out.Failures) > *in.MaxFailures {
 			out.Failures = out.Failures[:*in.MaxFailures]
 			out.FailuresTruncated = true

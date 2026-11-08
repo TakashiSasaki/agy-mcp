@@ -693,8 +693,37 @@ The exit artifact must contain one signed 32-bit decimal integer with optional
 surrounding whitespace, at most 64 bytes in total. Any nonzero code prevents a
 report pass. An incomplete or malformed report remains `unknown` even when the
 selected code is zero; missing, malformed, oversized or inaccessible selected
-exit evidence is a tool error. Omitting `exit_code_path` preserves the existing
+exit evidence is a tool error. Omitting both command evidence inputs leaves
 report-only behavior and omits `report_outcome` and `command_exit`.
+
+To catch an accidental mix of invocations, use `command_receipt_path` instead
+of `exit_code_path`. After the command finishes, write a JSON receipt alongside
+its report using the saved exit status. Use a fresh report path per invocation.
+For the example above, with `evidence` as the artifact root:
+
+```sh
+python3 - evidence/poststep-go.json poststep-go.json "$make_status" > evidence/make.receipt.json <<'PY'
+import hashlib, json, pathlib, sys
+
+file, path, status = sys.argv[1:]
+print(json.dumps({"report_path": path,
+                  "report_sha256": hashlib.sha256(pathlib.Path(file).read_bytes()).hexdigest(),
+                  "exit_code": int(status)}))
+PY
+```
+
+```json
+{"job_id":"<job-id>","path":"poststep-go.json","format":"go_test_json","command_receipt_path":"make.receipt.json","max_failures":0}
+```
+
+If supplied, `command_receipt_path` must be a nonempty string. The receipt is
+a JSON object up to 8 KiB with exactly the three fields shown.
+`report_path` must use the same spelling as `path`, and `report_sha256` must
+match the exact report bytes. A mismatch, missing field or duplicate key
+returns a tool error before any verdict. `command_exit` then identifies the
+receipt with source `command_receipt_artifact` and the SHA-256 of its bytes.
+This checks the producer's binding of report to exit status. The producer
+remains responsible for recording the actual invocation and exit status.
 
 These are caller-selected artifacts, not independently witnessed command
 execution. Associate the report and status with the same invocation, use fresh
