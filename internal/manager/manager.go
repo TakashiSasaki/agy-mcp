@@ -501,7 +501,7 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 			}
 			candidateArgs = buildAgyArgs(candidate)
 		}
-		if meta.Cwd != req.Cwd || !sameRequest(meta, candidate, candidateArgs) {
+		if (meta.Cwd != req.Cwd || !sameRequest(meta, candidate, candidateArgs)) && !matchesUnavailableCwdAlias(meta, req) {
 			return Job{}, false, refusedStart("idempotency_conflict", "change_request", false, fmt.Errorf("idempotency_key %q is already bound to job %s with a different normalized request", req.IdempotencyKey, id))
 		}
 		// A persisted record that never recorded a supervisor PID is a
@@ -639,6 +639,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	if !proc.Supported {
 		return Job{}, refusedStart("unsupported_platform", "change_environment", false, proc.ErrUnsupported)
 	}
+	requestedCwd := req.Cwd
 	req, err := m.normalizeRequest(req)
 	if err != nil {
 		return Job{}, refusedStart("invalid_argument", "change_request", false, err)
@@ -771,6 +772,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	}
 	if req.IdempotencyKey != "" {
 		meta.RequestKey = requestKey(req)
+		meta.CwdAliasKey = cwdAliasRequestKey(req, requestedCwd)
 	}
 	if meta.BootID == "" {
 		// boot_id was unreadable, so this job's PID cannot be pinned to a boot. While

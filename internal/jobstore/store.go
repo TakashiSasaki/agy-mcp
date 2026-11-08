@@ -42,7 +42,8 @@ type Meta struct {
 	Model             string        `json:"model,omitempty"`
 	ConversationID    string        `json:"conversation_id,omitempty"`
 	IdempotencyKey    string        `json:"idempotency_key,omitempty"`
-	RequestKey        string        `json:"request_key,omitempty"` // hash of the normalized request, set only with an idempotency_key; compared on a replay
+	RequestKey        string        `json:"request_key,omitempty"`   // hash of the normalized request, set only with an idempotency_key; compared on a replay
+	CwdAliasKey       string        `json:"cwd_alias_key,omitempty"` // request hash with the originally submitted absolute cwd before resolving symlinks
 	Prompt            string        `json:"prompt"`
 	StartedAt         time.Time     `json:"started_at"`
 	PID               int           `json:"pid"`

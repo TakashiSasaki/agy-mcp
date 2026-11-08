@@ -42,6 +42,67 @@ func TestWorkspacePreflightRetryAfterMkdir(t *testing.T) {
 	}
 }
 
+// Mutation guard: dropping the unavailable-alias replay check loses a
+// completed job when the originally submitted symlink disappears.
+func TestWorkspaceReplayWithUnavailableAlias(t *testing.T) {
+	if !proc.Supported {
+		t.Skip("job supervision unsupported on this platform")
+	}
+	target := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "workspace alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	m := newManager(t, managerOpts{agyPath: "/usr/bin/agy", supervisorExe: testutil.WriteFakeSupervisor(t, testutil.FakeSupervisor{Out: "done"}), defaultTimeout: time.Minute, maxConcurrency: 4})
+	req := StartRequest{Prompt: "report", Cwd: alias, IdempotencyKey: "alias-retry"}
+	job, err := m.StartJob(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferJobDone(t, m, job.ID)
+	testutil.WaitFor(t, 15*time.Second, func() bool { _, ok := m.store.ExitCode(job.ID); return ok }, "fake supervisor completion")
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := m.StartJob(req); err != nil || replay.ID != job.ID || replay.State != StateDone {
+		t.Fatalf("deleted alias lost replay: %+v %v", replay, err)
+	}
+	canonical := req
+	canonical.Cwd = target
+	if replay, err := m.StartJob(canonical); err != nil || replay.ID != job.ID {
+		t.Fatalf("canonical cwd lost replay: %+v %v", replay, err)
+	}
+	changed := req
+	changed.Prompt = "different request"
+	requireWorkspaceReplayConflict(t, m, changed)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), alias); err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := m.StartJob(req); err != nil || replay.ID != job.ID {
+		t.Fatalf("dangling alias lost replay: %+v %v", replay, err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), alias); err != nil {
+		t.Fatal(err)
+	}
+	requireWorkspaceReplayConflict(t, m, req)
+	ids, err := m.store.List()
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("expected exactly one retained job: %v %v", ids, err)
+	}
+}
+
+func requireWorkspaceReplayConflict(t *testing.T, m *Manager, req StartRequest) {
+	t.Helper()
+	job, err := m.StartJob(req)
+	start, ok := errors.AsType[*StartError](err)
+	if !ok || start.Code != "idempotency_conflict" || job.ID != "" {
+		t.Fatalf("changed request should be refused: %+v %v", job, err)
+	}
+}
+
 // Mutation guards: StartJob must invoke the Git preflight, persist expectations,
 // and replay before rechecking a repository changed by a completed job.
 func TestGitPreconditionsStartAndReplayAfterHeadChanges(t *testing.T) {

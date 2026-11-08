@@ -368,6 +368,11 @@ Rejected `agy_run` and `agy_run_sync` calls remain MCP tool errors (`isError: tr
 
 `job_started: false` means this request started no new work; an earlier job may own a conflicting key. `true` means a job was created, for example before its inline wait was interrupted. `null` means execution is uncertain. A newly launched supervisor waits until its PID is recorded before starting AGY. If the response to a start is lost, the admitted job can already be running. Preserve the key, look up the existing job, and replay the exact request with that key if needed. `retryable` is advisory within `next_action` and never supplies user authorization. `retry_after` is absent when unknown, rather than an invented delay.
 
+When a keyed start records a symlinked cwd, an exact retry can recover the job
+if the alias is missing or dangling. An alias that resolves to a different directory
+still conflicts. For older records created before the alias was recorded, use
+the original canonical cwd or recover the handle with `agy_list_jobs`.
+
 ### Result pages
 
 Omitting `include_result` preserves the full-result `agy_status`, `agy_wait` and `agy_run_sync` response and its terminal collected marker. `include_result: false` omits `result`, sets `result_included: false`, and leaves the job uncollected. It bounds response text, not disk I/O: deriving terminal status still reads the stored result.

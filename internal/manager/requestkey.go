@@ -4,11 +4,37 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
 )
+
+func cwdAliasRequestKey(req StartRequest, cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil || abs == req.Cwd {
+		return ""
+	}
+	req.Cwd = abs
+	return requestKey(req)
+}
+
+// An exact retry can recover a retained job when its recorded cwd alias can
+// no longer resolve. A currently usable alias must match its canonical cwd.
+func matchesUnavailableCwdAlias(meta jobstore.Meta, req StartRequest) bool {
+	if meta.CwdAliasKey == "" || meta.CwdAliasKey != requestKey(req) {
+		return false
+	}
+	_, err := os.Stat(req.Cwd)
+	return errors.Is(err, fs.ErrNotExist)
+}
 
 // requestKeyFields is the encoding requestKey hashes. Its field order, JSON names
 // and tags are part of the persisted key; TestRequestKeyGolden pins them and
