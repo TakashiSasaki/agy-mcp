@@ -19,10 +19,12 @@ type CommandExitEvidence struct {
 	ExitCode int32  `json:"exit_code" jsonschema:"reported signed 32-bit decimal command status; zero success, any nonzero failure"`
 }
 
-// VerificationWithExitCode preserves report-only behavior unless a caller
-// explicitly selects a command receipt. A successful child report must not
-// hide the enclosing command's reported failure. Incomplete reports stay unknown.
+// VerificationWithExitCode accepts a decimal exit artifact or an explicitly
+// bound JSON receipt. Incomplete reports stay unknown with either input.
 func (m *Manager) VerificationWithExitCode(jobID, path, format, exitPath string) (VerificationResult, error) {
+	if receiptPath, ok := strings.CutPrefix(exitPath, "receipt:"); ok {
+		return m.verificationWithCommandReceipt(jobID, path, format, receiptPath)
+	}
 	out, err := m.VerificationReport(jobID, path, format)
 	if err != nil || exitPath == "" {
 		return out, err
@@ -34,9 +36,9 @@ func (m *Manager) VerificationWithExitCode(jobID, path, format, exitPath string)
 	return applyCommandExit(out, exit), nil
 }
 
-// VerificationWithCommandReceipt checks a producer's report path and digest
+// verificationWithCommandReceipt checks a producer's report path and digest
 // before using the exit status bundled with them in the receipt.
-func (m *Manager) VerificationWithCommandReceipt(jobID, path, format, receiptPath string) (VerificationResult, error) {
+func (m *Manager) verificationWithCommandReceipt(jobID, path, format, receiptPath string) (VerificationResult, error) {
 	const maxReceiptBytes = 8 << 10
 	data, err := m.readCommandEvidence(jobID, receiptPath, "command receipt", maxReceiptBytes)
 	if err != nil {

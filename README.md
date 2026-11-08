@@ -693,11 +693,11 @@ The exit artifact must contain one signed 32-bit decimal integer with optional
 surrounding whitespace, at most 64 bytes in total. Any nonzero code prevents a
 report pass. An incomplete or malformed report remains `unknown` even when the
 selected code is zero; missing, malformed, oversized or inaccessible selected
-exit evidence is a tool error. Omitting both command evidence inputs leaves
+exit evidence is a tool error. Omitting `exit_code_path` leaves
 report-only behavior and omits `report_outcome` and `command_exit`.
 
-To catch an accidental mix of invocations, use `command_receipt_path` instead
-of `exit_code_path`. After the command finishes, write a JSON receipt alongside
+To catch an accidental mix of invocations, prefix the JSON receipt path with
+`receipt:` in `exit_code_path`. After the command finishes, write a JSON receipt alongside
 its report using the saved exit status. Use a fresh report path per invocation.
 For the example above, with `evidence` as the artifact root:
 
@@ -713,11 +713,12 @@ PY
 ```
 
 ```json
-{"job_id":"<job-id>","path":"poststep-go.json","format":"go_test_json","command_receipt_path":"make.receipt.json","max_failures":0}
+{"job_id":"<job-id>","path":"poststep-go.json","format":"go_test_json","exit_code_path":"receipt:make.receipt.json","max_failures":0}
 ```
 
-If supplied, `command_receipt_path` must be a nonempty string. The receipt is
-a JSON object up to 8 KiB with exactly the three fields shown.
+The path after `receipt:` must be nonempty. A literal filename starting with
+`receipt:` can be passed as an ordinary path beginning with `./`. The receipt
+is a JSON object up to 8 KiB with exactly the three fields shown.
 `report_path` must use the same spelling as `path`, and `report_sha256` must
 match the exact report bytes. A mismatch, missing field or duplicate key
 returns a tool error before any verdict. `command_exit` then identifies the

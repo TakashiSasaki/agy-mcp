@@ -69,7 +69,6 @@ func TestVerificationCommandReceiptWire(t *testing.T) {
 	cs := connect(t, manager.New(config.Config{StateDir: state, JobTTL: time.Hour}), nil)
 	for _, tc := range []struct {
 		name, contents, outcome string
-		both                    bool
 	}{
 		{name: "matching failed Make", contents: receipt("tests.tap", "2"), outcome: "failed"},
 		{name: "matching success", contents: receipt("tests.tap", "0"), outcome: "passed"},
@@ -80,24 +79,20 @@ func TestVerificationCommandReceiptWire(t *testing.T) {
 		{name: "null exit", contents: receipt("tests.tap", "null")},
 		{name: "out of range exit", contents: receipt("tests.tap", "2147483648")},
 		{name: "oversized", contents: receipt("tests.tap", "0") + strings.Repeat(" ", 8192)},
-		{name: "conflicting receipt inputs", contents: receipt("tests.tap", "0"), both: true},
-		{name: "explicit empty receipt path"},
-		{name: "explicit null receipt path"},
+		{name: "receipt mode with a decimal file"},
+		{name: "receipt mode with an empty path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			write(t, "receipt.json", tc.contents)
-			args := map[string]any{"job_id": id, "path": "tests.tap", "format": "tap", "command_receipt_path": "receipt.json", "max_failures": 0}
+			args := map[string]any{"job_id": id, "path": "tests.tap", "format": "tap", "exit_code_path": "receipt:receipt.json", "max_failures": 0}
 			switch tc.name {
 			case "stale receipt after report replacement":
 				write(t, "tests.tap", "1..1\nok 1 - replacement\n")
 				t.Cleanup(func() { write(t, "tests.tap", report) })
-			case "explicit empty receipt path":
-				args["command_receipt_path"] = ""
-			case "explicit null receipt path":
-				args["command_receipt_path"] = nil
-			}
-			if tc.both {
-				args["exit_code_path"] = "make.exit"
+			case "receipt mode with a decimal file":
+				args["exit_code_path"] = "receipt:make.exit"
+			case "receipt mode with an empty path":
+				args["exit_code_path"] = "receipt:"
 			}
 			res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: toolAgyVerification, Arguments: args})
 			if err != nil || res.IsError != (tc.outcome == "") {
