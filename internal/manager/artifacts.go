@@ -172,9 +172,14 @@ func (r artifactHashReader) Read(buf []byte) (int, error) {
 	return r.file.Read(buf)
 }
 
-func listArtifactHash(ctx context.Context, file *os.File, budget int64) (digest string, read int64) {
+func listArtifactHash(ctx context.Context, file *os.File, discovered os.FileInfo, budget int64) (digest string, read int64) {
 	before, err := file.Stat()
 	if err != nil || !before.Mode().IsRegular() || before.Size() > maxHashFileSize || before.Size() > budget {
+		return "", 0
+	}
+	// Discovery and open may observe different generations of this path.
+	if !os.SameFile(discovered, before) || before.Size() != discovered.Size() ||
+		!before.ModTime().Equal(discovered.ModTime()) {
 		return "", 0
 	}
 	h := sha256.New()
@@ -263,9 +268,17 @@ func (m *Manager) ListArtifactsContext(ctx context.Context, req ListArtifactsReq
 			rel = filepath.Base(p)
 		}
 
-		fi, err := d.Info()
+		// A Windows DirEntry can defer its file identity lookup until SameFile.
+		// Stat through the confined root so identity and metadata are read together.
+		fi, err := baseRoot.Lstat(filepath.FromSlash(p))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
+		}
+		if !fi.Mode().IsRegular() {
+			return nil
 		}
 		size := fi.Size()
 		modTime := fi.ModTime().UTC().Format(time.RFC3339)
@@ -275,7 +288,7 @@ func (m *Manager) ListArtifactsContext(ctx context.Context, req ListArtifactsReq
 			f, openErr := baseRoot.OpenFile(filepath.FromSlash(p), artifactReadFlags, 0)
 			if openErr == nil {
 				var read int64
-				hash, read = listArtifactHash(hashCtx, f, hashBudget)
+				hash, read = listArtifactHash(hashCtx, f, fi, hashBudget)
 				hashBudget -= read
 				_ = f.Close()
 			}

@@ -18,6 +18,7 @@ const (
 	junitSuiteTag        = "testsuite"
 	junitSuitesTag       = "testsuites"
 	junitSkippedTag      = "skipped"
+	junitStatusAttr      = "status"
 )
 
 type VerificationFailure struct {
@@ -58,10 +59,12 @@ type junitSuite struct {
 	attributes []xml.Attr
 	depth      int
 	name       string
+	plain      bool
 }
 type junitCase struct {
-	name, class                        string
-	failed, errored, skipped, disabled bool
+	name, class                                string
+	failed, errored, skipped, disabled, notrun bool
+	ctestNotrun, ctestSkip                     bool
 }
 
 // Verification preserves the original JUnit-only manager entry point.
@@ -309,7 +312,7 @@ func (p *junitParser) start(token xml.StartElement) bool {
 				p.warn("unsupported_disabled_tests")
 			}
 		}
-		p.suites = append(p.suites, junitSuite{before: p.counts, attributes: token.Attr, depth: p.depth, name: token.Name.Local})
+		p.suites = append(p.suites, junitSuite{before: p.counts, attributes: token.Attr, depth: p.depth, name: token.Name.Local, plain: token.Name.Space == ""})
 	case "testcase":
 		// MEASURED against Node.js v24.22.2: its built-in JUnit reporter writes
 		// top-level testcases directly under the root testsuites element.
@@ -317,10 +320,13 @@ func (p *junitParser) start(token xml.StartElement) bool {
 		if p.current != nil || len(p.suites) == 0 || (!rootCases && p.suites[len(p.suites)-1].name != junitSuiteTag) || p.depth != p.suites[len(p.suites)-1].depth+1 {
 			p.warn("invalid_testcase_nesting")
 		}
+		disabled, notrun, ctestNotrun := p.testcaseExecution(token)
 		p.current = &junitCase{
-			name:     xmlAttribute(token.Attr, "name"),
-			class:    xmlAttribute(token.Attr, "classname"),
-			disabled: p.disabledCase(token.Attr),
+			name:        xmlAttribute(token.Attr, "name"),
+			class:       xmlAttribute(token.Attr, "classname"),
+			disabled:    disabled,
+			notrun:      notrun,
+			ctestNotrun: ctestNotrun && p.ctestSuite(),
 		}
 	case "failure", agentOutcomeError, junitSkippedTag:
 		if p.current == nil {
@@ -328,7 +334,7 @@ func (p *junitParser) start(token xml.StartElement) bool {
 			return true
 		}
 		if token.Name.Local == junitSkippedTag {
-			p.current.skipped = true
+			p.markSkipped(token)
 			return true
 		}
 		return p.failure(token)
@@ -342,28 +348,66 @@ func (p *junitParser) start(token xml.StartElement) bool {
 	return true
 }
 
+func (p *junitParser) markSkipped(token xml.StartElement) {
+	if p.current.notrun {
+		p.current.ctestSkip = p.current.ctestNotrun && token.Name.Space == "" && !p.current.skipped && ctestExplicitSkip(token.Attr)
+	}
+	p.current.skipped = true
+}
+
+// CTest emits testcases directly under an unqualified testsuite root.
+func (p *junitParser) ctestSuite() bool {
+	return p.depth == 2 && len(p.suites) == 1 && p.suites[0].plain && p.suites[0].name == junitSuiteTag
+}
+
 // GoogleTest v1.16.0 emits notrun/suppressed for disabled cases. Read every
 // execution attribute: encoding/xml does not reject duplicate attributes.
-func (p *junitParser) disabledCase(attrs []xml.Attr) bool {
+func (p *junitParser) testcaseExecution(token xml.StartElement) (disabled, notrun, ctestNotrun bool) {
 	seen := make(map[string]bool)
-	disabled := false
-	for _, attr := range attrs {
+	var plainNotrun bool
+	for _, attr := range token.Attr {
 		name := attr.Name.Local
-		if name != "status" && name != "result" {
+		if name != junitStatusAttr && name != "result" {
 			continue
 		}
 		if seen[name] {
 			p.warn("duplicate_testcase_execution_attribute")
 		}
 		seen[name] = true
-		if (name == "status" && attr.Value == "notrun") || (name == "result" && attr.Value == "suppressed") {
+		if name == junitStatusAttr && attr.Value == "notrun" {
+			notrun = true
+			plainNotrun = attr.Name.Space == ""
+		}
+		if (name == junitStatusAttr && attr.Value == "disabled") || (name == "result" && attr.Value == "suppressed") {
 			disabled = true
 		}
 	}
-	if disabled {
-		p.warn("unsupported_disabled_tests")
+	return disabled, notrun, token.Name.Space == "" && plainNotrun && !seen["result"]
+}
+
+// CTest 3.28.3 reports both requested skips and setup failures as notrun
+// with a skipped element. Recognize only the measured explicit skip reasons.
+func ctestExplicitSkip(attrs []xml.Attr) bool {
+	var message string
+	seen := false
+	for _, attr := range attrs {
+		if attr.Name.Local != "message" {
+			continue
+		}
+		if seen || attr.Name.Space != "" {
+			return false
+		}
+		seen, message = true, attr.Value
 	}
-	return disabled
+	if message == "SKIP_REGULAR_EXPRESSION_MATCHED" {
+		return true
+	}
+	raw, ok := strings.CutPrefix(message, "SKIP_RETURN_CODE=")
+	if !ok {
+		return false
+	}
+	code, err := strconv.ParseUint(raw, 10, 8)
+	return err == nil && strconv.FormatUint(code, 10) == raw
 }
 
 func (p *junitParser) failure(token xml.StartElement) bool {
@@ -406,6 +450,11 @@ func (p *junitParser) end(token xml.EndElement) {
 			p.warn("invalid_testcase_nesting")
 		} else {
 			p.counts.tests++
+			if p.current.disabled || (p.current.notrun && !p.current.skipped) {
+				p.warn("unsupported_disabled_tests")
+			} else if p.current.notrun && !p.current.ctestSkip {
+				p.warn("unsupported_notrun_testcase")
+			}
 			switch {
 			case p.current.errored:
 				p.counts.errors++
@@ -413,7 +462,7 @@ func (p *junitParser) end(token xml.EndElement) {
 				p.counts.failed++
 			case p.current.skipped:
 				p.counts.skipped++
-			case p.current.disabled:
+			case p.current.disabled || p.current.notrun:
 			default:
 				p.counts.passed++
 			}

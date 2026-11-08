@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tphakala/agy-mcp/v2/internal/config"
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
@@ -92,6 +93,72 @@ func TestListArtifactsHappyPath(t *testing.T) {
 	}
 	if !foundReceipt {
 		t.Error("receipt.json not found in entries")
+	}
+}
+
+func TestListArtifactHashChecksDiscoveryIdentity(t *testing.T) {
+	stableTime := time.Unix(1770000000, 0)
+	for _, tc := range []struct {
+		name        string
+		replacement string
+		newInode    bool
+		mtime       time.Time
+	}{
+		{name: "stable", replacement: "old", mtime: stableTime},
+		{name: "different inode with same metadata", replacement: "new", newInode: true, mtime: stableTime},
+		{name: "changed size on same inode", replacement: "larger", mtime: stableTime},
+		{name: "changed mtime on same inode", replacement: "new", mtime: stableTime.Add(time.Second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "artifact")
+			if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, stableTime, stableTime); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = root.Close() }()
+			discovered, err := root.Lstat("artifact")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name != "stable" {
+				updatedPath := path
+				if tc.newInode {
+					updatedPath = filepath.Join(dir, "replacement")
+				}
+				if err := os.WriteFile(updatedPath, []byte(tc.replacement), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(updatedPath, tc.mtime, tc.mtime); err != nil {
+					t.Fatal(err)
+				}
+				if tc.newInode {
+					if err := os.Rename(updatedPath, path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = f.Close() }()
+			digest, read := listArtifactHash(t.Context(), f, discovered, 1024)
+			if tc.name == "stable" {
+				want := sha256.Sum256([]byte("old"))
+				if digest != hex.EncodeToString(want[:]) || read != 3 {
+					t.Fatalf("unchanged digest/read = %q/%d", digest, read)
+				}
+			} else if digest != "" || read != 0 {
+				t.Fatalf("stale discovery metadata acquired a hash or spent budget: %q/%d", digest, read)
+			}
+		})
 	}
 }
 
