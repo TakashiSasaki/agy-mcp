@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -124,6 +126,40 @@ func TestRequestLoggingRejectsUntrustedIdentifiers(t *testing.T) {
 	}
 }
 
+func TestRequestLoggingStartErrorMetadata(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		tool, code, wantCode string
+		jobStarted           *bool
+	}{
+		{toolAgyRun, "start_indeterminate", "start_indeterminate", nil},
+		{toolAgyRunSync, "wait_interrupted", "wait_interrupted", new(true)},
+		{toolAgyRun, "secret-code", "", new(false)},
+		{toolAgyStatus, "wait_interrupted", "", new(true)},
+	} {
+		payload, err := json.Marshal(startErrorOutput{
+			StartErrorCode: tc.code, JobID: requestLogTestJobID,
+			JobStarted: tc.jobStarted, Message: "secret-message",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := requestLogEntry{Tool: tc.tool}
+		entry.addResult(&mcp.CallToolResult{IsError: true, StructuredContent: json.RawMessage(payload)})
+		if entry.Outcome != "tool_error" || entry.StartErrorCode != tc.wantCode {
+			t.Fatalf("unexpected error metadata: %+v", entry)
+		}
+		if tc.wantCode == "" {
+			if entry.JobID != "" || entry.JobStarted != nil {
+				t.Fatalf("unrecognized response entered the log: %+v", entry)
+			}
+		} else if entry.JobID != requestLogTestJobID || (entry.JobStarted == nil) != (tc.jobStarted == nil) ||
+			(entry.JobStarted != nil && *entry.JobStarted != *tc.jobStarted) {
+			t.Fatalf("missing or incorrect job metadata: %+v", entry)
+		}
+	}
+}
+
 func TestRequestLoggingCatalogFingerprint(t *testing.T) {
 	t.Parallel()
 	a := &mcp.Tool{Name: "a", InputSchema: map[string]any{"type": "object"}}
@@ -235,12 +271,23 @@ func TestRequestLoggingPanicPropagates(t *testing.T) {
 // timeout without launching agy or a background supervisor.
 func TestRequestLoggingRealServer(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir, reports := t.TempDir(), t.TempDir()
 	store := jobstore.New(stateDir)
-	if _, err := store.Create(jobstore.Meta{ID: requestLogTestJobID, StartedAt: time.Now(), Timeout: time.Second}); err != nil {
+	dir, err := store.Create(jobstore.Meta{
+		ID: requestLogTestJobID, StartedAt: time.Now(), Timeout: time.Second,
+		ArtifactDirs: []string{reports},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jobstore.OutPath(dir), []byte("secret-result"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WriteExitCode(requestLogTestJobID, jobstore.ExitTimeout); err != nil {
+		t.Fatal(err)
+	}
+	const report = "secret-report.xml"
+	if err := os.WriteFile(filepath.Join(reports, report), []byte(`<testsuite tests="1" failures="1"><testcase name="secret-test"><failure/></testcase></testsuite>`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	mgr := manager.New(config.Config{StateDir: stateDir, DefaultTimeout: time.Minute, MaxConcurrency: 4})
@@ -265,19 +312,66 @@ func TestRequestLoggingRealServer(t *testing.T) {
 	if err != nil || result.IsError || stateOf(t, result.StructuredContent) != manager.StateFailed {
 		t.Fatalf("timeout status not returned successfully: result=%+v err=%v", result, err)
 	}
+	call := func(tool string, args map[string]any, wantError bool) map[string]any {
+		t.Helper()
+		result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: args})
+		if err != nil || result.IsError != wantError {
+			t.Fatalf("%s: result=%+v err=%v", tool, result, err)
+		}
+		return structMap(t, result.StructuredContent)
+	}
+	// Cover both a typed handler refusal and SDK validation before the handler.
+	for tool, args := range map[string]map[string]any{
+		toolAgyRun:     {"prompt": "secret-prompt", "timeout": "secret-duration"},
+		toolAgyRunSync: {"unexpected": "secret-value"},
+	} {
+		if out := call(tool, args, true); out["start_error_code"] != startInvalidArgument || out["job_started"] != false {
+			t.Fatalf("%s lost the validation response: %+v", tool, out)
+		}
+	}
+	page := call(toolAgyGetResult, map[string]any{"job_id": requestLogTestJobID, "max_bytes": 4}, false)
+	call(toolAgyGetResult, map[string]any{"job_id": requestLogTestJobID, "cursor": page["next_cursor"]}, false)
+	call(toolAgyVerification, map[string]any{"job_id": requestLogTestJobID, "path": report}, false)
+
+	assertRequestLoggingCompletions(t, &buf, len(listed.Tools))
+}
+
+func assertRequestLoggingCompletions(t *testing.T, buf *bytes.Buffer, toolCount int) {
+	t.Helper()
 	foundCatalog, foundStatus := false, false
-	for _, entry := range readRequestLogs(t, &buf) {
+	startErrors := make(map[string]bool)
+	var pages []bool
+	foundVerification := false
+	entries := readRequestLogs(t, buf)
+	for i := range entries {
+		entry := &entries[i]
 		if entry.Phase != "completed" {
 			continue
 		}
 		if entry.Method == "tools/list" {
-			foundCatalog = entry.ToolCount != nil && *entry.ToolCount == len(listed.Tools) && entry.CatalogSHA256 != ""
+			foundCatalog = entry.ToolCount != nil && *entry.ToolCount == toolCount && entry.CatalogSHA256 != ""
 		}
 		if entry.Tool == toolAgyStatus {
 			foundStatus = entry.Outcome == "ok" && entry.JobID == requestLogTestJobID && entry.JobState == manager.StateFailed && entry.FailureReason == manager.ReasonTimeout
 		}
+		switch entry.Tool {
+		case toolAgyRun, toolAgyRunSync:
+			startErrors[entry.Tool] = entry.Outcome == "tool_error" && entry.StartErrorCode == startInvalidArgument && entry.JobStarted != nil && !*entry.JobStarted
+		case toolAgyGetResult:
+			if entry.Outcome == "ok" && entry.JobID == requestLogTestJobID && entry.ResultComplete != nil {
+				pages = append(pages, *entry.ResultComplete)
+			}
+		case toolAgyVerification:
+			foundVerification = entry.Outcome == "ok" && entry.JobID == requestLogTestJobID && entry.VerificationOutcome == "failed"
+		}
 	}
 	if !foundCatalog || !foundStatus {
-		t.Fatalf("missing real-server catalog/failed-job diagnostics: %s", &buf)
+		t.Fatalf("missing real-server catalog/failed-job diagnostics: %s", buf)
+	}
+	if !startErrors[toolAgyRun] || !startErrors[toolAgyRunSync] || !slices.Equal(pages, []bool{false, true}) || !foundVerification {
+		t.Fatalf("missing start, pagination or verification diagnostics: %s", buf)
+	}
+	if strings.Contains(buf.String(), "secret-") {
+		t.Fatalf("request log leaked private payload: %s", buf)
 	}
 }

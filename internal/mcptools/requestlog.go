@@ -20,26 +20,32 @@ import (
 
 var requestLogSequence atomic.Uint64
 
+const verificationOutcomeUnknown = "unknown"
+
 // Log only server-generated job IDs, never arbitrary client input rejected by
 // a handler. The store creates a nanosecond timestamp and 12 random hex bytes.
 var loggedJobID = regexp.MustCompile(`^\d{1,20}-[0-9a-f]{24}$`)
 
 type requestLogEntry struct {
-	Event           string `json:"event"`
-	Phase           string `json:"phase"`
-	PID             int    `json:"pid"`
-	CallID          uint64 `json:"call_id"`
-	Method          string `json:"method"`
-	Tool            string `json:"tool,omitempty"`
-	ElapsedMS       *int64 `json:"elapsed_ms,omitempty"`
-	Outcome         string `json:"outcome,omitempty"`
-	JobID           string `json:"job_id,omitempty"`
-	JobState        string `json:"job_state,omitempty"`
-	FailureReason   string `json:"failure_reason,omitempty"`
-	Partial         bool   `json:"partial,omitempty"`
-	ToolCount       *int   `json:"tool_count,omitempty"`
-	CatalogSHA256   string `json:"catalog_sha256,omitempty"`
-	CatalogComplete *bool  `json:"catalog_complete,omitempty"`
+	Event               string `json:"event"`
+	Phase               string `json:"phase"`
+	PID                 int    `json:"pid"`
+	CallID              uint64 `json:"call_id"`
+	Method              string `json:"method"`
+	Tool                string `json:"tool,omitempty"`
+	ElapsedMS           *int64 `json:"elapsed_ms,omitempty"`
+	Outcome             string `json:"outcome,omitempty"`
+	JobID               string `json:"job_id,omitempty"`
+	JobState            string `json:"job_state,omitempty"`
+	FailureReason       string `json:"failure_reason,omitempty"`
+	Partial             bool   `json:"partial,omitempty"`
+	StartErrorCode      string `json:"start_error_code,omitempty"`
+	JobStarted          *bool  `json:"job_started,omitempty"`
+	ResultComplete      *bool  `json:"result_complete,omitempty"`
+	VerificationOutcome string `json:"verification_outcome,omitempty"`
+	ToolCount           *int   `json:"tool_count,omitempty"`
+	CatalogSHA256       string `json:"catalog_sha256,omitempty"`
+	CatalogComplete     *bool  `json:"catalog_complete,omitempty"`
 }
 
 // requestLoggingMiddleware records handler progress, not transport delivery.
@@ -127,15 +133,20 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 		}
 		if result.IsError {
 			entry.Outcome = "tool_error"
+			if entry.Tool == toolAgyRun || entry.Tool == toolAgyRunSync {
+				entry.addStartError(result.StructuredContent)
+			}
 			return
 		}
 		// go-sdk v1.8.0's typed tool adapter stores structured output as raw JSON.
 		// Decode only metadata; ignored result strings do not need a second copy.
 		var output struct {
-			JobID         string `json:"job_id"`
-			State         string `json:"state"`
-			FailureReason string `json:"failure_reason"`
-			Partial       bool   `json:"partial"`
+			JobID               string `json:"job_id"`
+			State               string `json:"state"`
+			FailureReason       string `json:"failure_reason"`
+			Partial             bool   `json:"partial"`
+			Complete            *bool  `json:"complete"`
+			VerificationOutcome string `json:"verification_outcome"`
 		}
 		data, ok := result.StructuredContent.(json.RawMessage)
 		if !ok || json.Unmarshal(data, &output) != nil {
@@ -157,6 +168,15 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 				entry.FailureReason = manager.ReasonUnknown
 			}
 		}
+		switch entry.Tool {
+		case toolAgyGetResult:
+			entry.ResultComplete = output.Complete
+		case toolAgyVerification:
+			switch output.VerificationOutcome {
+			case "passed", "failed", verificationOutcomeUnknown:
+				entry.VerificationOutcome = output.VerificationOutcome
+			}
+		}
 	case *mcp.ListToolsResult:
 		if result == nil {
 			return
@@ -164,6 +184,29 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 		count, complete := len(result.Tools), result.NextCursor == ""
 		entry.ToolCount, entry.CatalogComplete = &count, &complete
 		entry.CatalogSHA256 = catalogDigest(result.Tools)
+	}
+}
+
+func (entry *requestLogEntry) addStartError(structured any) {
+	var output struct {
+		Code       string `json:"start_error_code"`
+		JobID      string `json:"job_id"`
+		JobStarted *bool  `json:"job_started"`
+	}
+	data, ok := structured.(json.RawMessage)
+	if !ok || json.Unmarshal(data, &output) != nil {
+		return
+	}
+	switch output.Code {
+	case startInvalidArgument, "workspace_unavailable", "workspace_mismatch",
+		"conversation_busy", "conversation_cache_unavailable", "capacity_exceeded",
+		"idempotency_conflict", "idempotency_in_progress", "agy_unavailable",
+		"quota_low", "quota_mapping_unknown", "unsupported_platform",
+		"start_failed", "start_indeterminate", "wait_interrupted":
+		entry.StartErrorCode, entry.JobStarted = output.Code, output.JobStarted
+		if loggedJobID.MatchString(output.JobID) {
+			entry.JobID = output.JobID
+		}
 	}
 }
 
