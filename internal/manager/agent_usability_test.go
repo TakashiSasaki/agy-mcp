@@ -165,6 +165,28 @@ func TestAgentJobRecovery(t *testing.T) {
 	})
 }
 
+// Mutation guard: an exact-key lookup can recover its readable match even
+// when an unrelated record could not be scanned.
+func TestAgentJobRecoveryWithUnreadableNeighbor(t *testing.T) {
+	m, _, _ := stageRecoveryJobs(t)
+	dir, err := m.store.Create(jobstore.Meta{ID: "unreadable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jobstore.MetaPath(dir), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	page, err := m.ListJobs(JobQuery{IdempotencyKey: "PRIVATE-KEY"})
+	if err != nil || page.TotalCount != 2 || len(page.Jobs) != 2 || page.Jobs[0].JobID != "b" {
+		t.Fatalf("known key lost despite readable matches: %+v, %v", page, err)
+	}
+	for _, q := range []JobQuery{{IdempotencyKey: "missing"}, {}} {
+		if _, err := m.ListJobs(q); err == nil {
+			t.Fatalf("incomplete lookup returned a definitive listing for %+v", q)
+		}
+	}
+}
+
 // Mutation guards: ListJobs' query bounds and Status' progress projection.
 func TestAgentJobRecoveryBoundsAndProgress(t *testing.T) {
 	m, _, started := stageRecoveryJobs(t)

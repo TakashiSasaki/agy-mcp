@@ -67,6 +67,7 @@ func (m *Manager) ListJobs(q JobQuery) (JobPage, error) {
 		return out, err
 	}
 	var matches []jobstore.Meta
+	var scanErr error
 	label := strings.ToLower(q.TaskLabel)
 	for _, id := range ids {
 		meta, err := m.store.Load(id)
@@ -74,7 +75,11 @@ func (m *Manager) ListJobs(q JobQuery) (JobPage, error) {
 			continue
 		}
 		if err != nil {
-			return out, fmt.Errorf("read job %s during listing: %w", id, err)
+			if q.IdempotencyKey == "" {
+				return out, fmt.Errorf("read job %s during listing: %w", id, err)
+			}
+			scanErr = fmt.Errorf("read job %s during listing: %w", id, err)
+			continue
 		}
 		if (cwd != "" && meta.Cwd != cwd) || (label != "" && !strings.Contains(strings.ToLower(meta.TaskLabel), label)) || (q.IdempotencyKey != "" && meta.IdempotencyKey != q.IdempotencyKey) {
 			continue
@@ -110,6 +115,11 @@ func (m *Manager) ListJobs(q JobQuery) (JobPage, error) {
 			State: st.State, FailureReason: st.FailureReason,
 			StartedAt: jobTime(meta.StartedAt), ProgressUpdatedAt: jobTime(st.ProgressUpdatedAt),
 		})
+	}
+	// A readable exact-key hit can recover a lost handle. A failed scan
+	// cannot establish the absence of that handle.
+	if out.TotalCount == 0 && scanErr != nil {
+		return out, scanErr
 	}
 	if q.Offset < out.TotalCount && len(out.Jobs) < out.TotalCount-q.Offset {
 		out.NextOffset = new(q.Offset + len(out.Jobs))
