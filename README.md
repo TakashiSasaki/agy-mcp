@@ -465,21 +465,18 @@ to 90s and is silently clamped to that same ceiling. That 90s default is kept be
 the caller inline instead of being lost to a client-synthesized timeout (set `AGY_MCP_SYNC_WAIT_CAP`
 to a Go duration to raise or lower the ceiling for a client with a different per-call limit), and it
 bounds only the inline wait, never the job itself.
+If other calls on a shared connection arrive after a long wait, use a shorter
+`wait` or a single `agy_status` snapshot with the same job ID.
 `agy_cancel` is asynchronous, so it usually returns `running` and the job settles to `cancelled`
 a moment later. A `prompt` is sent to agy literally: a leading slash-command or skill name
 (a prompt beginning with `/`) is treated as text rather than expanded, so caller input means
 exactly what it says regardless of the installed agy version.
 
-A fresh `agy_run` (no `conversation_id`, no `continue_latest`) reports the conversation agy
-created for it. agy names the conversation in the `init` event of its stream, which arrives
-about a second after the process starts, so `agy_run` waits briefly (up to 2s) for it and
-returns a real `conversation_id`. If the wait expires the field comes back empty and
-`agy_status` supplies it moments later; either way the thread can be continued.
-`agy_run_sync` does not pay that wait: it takes its `conversation_id` from the status it
-is already polling. That is also what makes its `wait` cap honest, because the
-conversation-id wait used to run before the inline wait's deadline was set, so a short
-`wait` could be overrun by up to the 2s budget. The trade is that a `wait` shorter than
-agy's init latency now returns an empty `conversation_id`, which `agy_status` supplies.
+A fresh `agy_run` waits after admission for agy's `init` event, within the
+`AGY_MCP_CONVERSATION_ID_WAIT` budget (default 5s). If the wait expires first,
+the response still includes the `job_id`. Use that handle with `agy_status` to
+learn the `conversation_id` once available. `agy_run_sync` gets the conversation
+ID from the status it already polls, within its own inline wait.
 
 **Fresh runs are not serialized.** Any number of them can run in one directory at the same
 time, bounded only by the global concurrency cap. Earlier versions refused a second fresh run
@@ -520,9 +517,13 @@ The CLI supplies `groups` and any plan wording in `description`. A reading can r
 
 Use `list_models` to discover CLI model IDs and pass them to `agy_usage(models=...)` for mapping against one snapshot. Listing and quota metadata provide no execution check.
 
-Each group has a `level` from its tightest window (usually the 5h or the weekly limit): `exhausted` at 0, `critical` below 5 percent remaining, `low` below 25 percent, otherwise `ok`. The server assumes a full window after the CLI-reported `reset_time`. The bucket retains its observed `remaining_fraction`, and `refilled` identifies the assumption. `remaining_percent` rounds down the effective value. `checked_at` records when the probe was requested. Thresholds are set with `AGY_MCP_USAGE_LOW` and `AGY_MCP_USAGE_CRITICAL`.
+Each group has a `level` from its tightest window (usually the 5h or the weekly limit): `exhausted` at 0, `critical` below 5 percent remaining, `low` below 25 percent, otherwise `ok`. The server assumes a full window after the CLI-reported `reset_time`. The bucket retains its observed `remaining_fraction`, and `refilled` identifies the assumption. `remaining_percent` rounds down the effective value. `checked_at` records when the server recorded the successful reading. Thresholds are set with `AGY_MCP_USAGE_LOW` and `AGY_MCP_USAGE_CRITICAL`.
 
 Readings are cached in memory per server process (60 seconds by default; `max_age` sets how old a reading may be, from 10 seconds up, and a younger reading is reused), concurrent callers share one probe, and a failed probe is remembered for 30 seconds. With `AGY_MCP_USAGE_INTERVAL` above zero (5 minutes by default) the server also refreshes the reading in the background and skips refresh ticks while it tracks running jobs. An explicit `agy_usage` can request a fresher reading. `agy_run`, `agy_run_sync`, `agy_status` and `agy_wait` results carry a compact `quota` field read from that cache; it never waits on agy and is absent when there is no reading younger than twice the interval (at least 10 minutes). Several servers (one per client session) each probe on their own.
+
+For capacity planning that tolerates a reading up to ten minutes old, use
+`max_age: "10m"` and check `checked_at`. A cache hit avoids starting the CLI,
+while end-to-end latency also depends on the MCP connection.
 
 `priority: optional` on `agy_run` or `agy_run_sync` marks work that may be skipped, such as a peer review or a second opinion. When a trusted reading is present and the run's model maps to a group at `low`, `critical` or `exhausted`, the run is refused before any job starts, as a tool error naming the group, level, remaining percent and reset time. When a trusted reading is present but the model's quota group mapping cannot be established (an omitted model with no `AGY_MCP_DEFAULT_MODEL`, an unknown model, or an ambiguous/missing group in `/usage`), an `optional` run is also refused/deferred clearly without claiming quota is exhausted. The refusal creates no job, so `failure_reason` is unchanged; report the skip instead of retrying. When there is no trusted reading yet (no reading, a reading that is too old, or a failed probe with no trusted earlier reading), the guard fails open (an earlier reading inside that window still applies), and `priority: normal` (the default) always runs. `priority` is not part of the `idempotency_key` match: a retry whose key already names a job returns that job whatever its priority and the current quota.
 
@@ -604,7 +605,7 @@ v2 requires agy 1.1.15 and drives it through `--output-format stream-json`. The 
 - A v1 fresh run may report no `conversation_id`. v1 recovered it by diffing agy's conversation cache, and v2 has no such path. Recover the thread with `list_sessions` if you need it.
 - Cancelled and interrupted v1 jobs behave as before; only the id is affected.
 
-**Behaviour changes to check your client against:** `agy_run` now blocks up to 2s waiting for agy to name the conversation, instead of returning instantly; fresh runs in the same directory no longer conflict, so anything that relied on that conflict error as a mutex now gets real concurrency (and agy runs with `--dangerously-skip-permissions`, so concurrent runs edit one working tree); and `list_models` is now refused on an agy older than 1.1.15, even though `agy models` itself would work there.
+**Behaviour changes to check your client against.** `agy_run` waits within the configured conversation ID budget after admission. Fresh runs in the same directory can run concurrently and edit one working tree under `--dangerously-skip-permissions`. `list_models` requires agy 1.1.15 or later.
 
 ## Configuration
 

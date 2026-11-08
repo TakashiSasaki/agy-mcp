@@ -246,7 +246,7 @@ func parsePositiveDuration(name, s, example string) (time.Duration, error) {
 
 type runOutput struct {
 	JobID          string              `json:"job_id" jsonschema:"handle for this run; pass it to agy_wait, agy_status or agy_cancel"`
-	ConversationID string              `json:"conversation_id,omitempty" jsonschema:"conversation this run belongs to; pass it back as conversation_id to continue the thread. Rarely empty on a fresh run, when agy had not yet named the conversation; agy_status reports it moments later"`
+	ConversationID string              `json:"conversation_id,omitempty" jsonschema:"conversation this run belongs to; pass it back as conversation_id to continue the thread. A fresh run may omit it if agy has yet to emit its init event within the conversation ID wait budget (default 5s after admission). agy_status reports the ID once available"`
 	State          string              `json:"state" jsonschema:"running for a newly-created job; when idempotency_key replays an existing job, its current running, done, failed or cancelled state. Use agy_wait or agy_status when you need the full terminal result"`
 	Quota          *quotaSummaryOutput `json:"quota,omitempty" jsonschema:"agy quota per group as the server last read it (see agy_usage). Absent when the server has no recent reading; it never waits on agy to produce one"`
 }
@@ -287,7 +287,7 @@ type statusOutput struct {
 	// stderr when it fails a request (issue #183); see manager.Status.Retryable.
 	Retryable      *bool  `json:"retryable,omitempty" jsonschema:"agy's own verdict on whether this failure is worth retrying, read from the structured error line agy writes to stderr. Present only on a failed job whose stderr carried one; absent means agy gave no verdict, not that the failure is permanent. false means the same request fails the same way (for example a model that is not available in the account's region): change the request instead of re-running it or continuing its conversation. A quota_exhausted failure keeps its wait-for-reset advice and a sign-in failure its sign-in advice even then; see recovery"`
 	ErrorID        string `json:"error_id,omitempty" jsonschema:"agy's identifier for this failure, from the same stderr line as retryable; quote it when reporting the failure. Present only when agy gave one"`
-	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation this run belongs to; pass it back as conversation_id to continue the thread. Empty until agy names a fresh run's conversation, which takes about a second, so agy_status, agy_wait and agy_run_sync all report none when asked inside that window; ask again once the run is under way"`
+	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation this run belongs to; pass it back as conversation_id to continue the thread. A fresh run reports it once agy emits its init event; CLI startup can take several seconds"`
 	// Model echoes the legacy requested/normalized CLI --model argument; see
 	// manager.Status.Model.
 	Model string `json:"model,omitempty" jsonschema:"legacy alias for requested_model: the model id agy-mcp resolved for this run and passed to agy via --model (the model you set, or AGY_MCP_DEFAULT_MODEL, reduced to the id column). Absent when the server pinned no model and agy ran on its own default. Reflects only the CLI flag passed to agy, not post-generation proof of which backend model executed"`
@@ -664,10 +664,10 @@ agy delegates a prompt to a background coding agent and manages the run as a res
 
 Choosing a tool:
 - agy_run_sync starts a run and waits inline (bounded by the wait argument). Use it when you need the answer before your next step and the task is bounded enough to finish within that wait.
-- agy_run returns a job_id in under a couple of seconds (it waits briefly for agy to name the conversation); block on it with agy_wait or poll it with agy_status. Use these for long runs, for open-ended work that routinely outlives an inline wait (web research, a large review), or to fan several tasks out in parallel.
+- agy_run returns a job_id and waits up to the configured conversation ID budget (default 5s after admission) for a fresh run's init event. Use it for long runs or parallel work. If other requests are delayed behind a long agy_wait on a shared connection, use agy_status or an explicit shorter wait with the same job_id.
 - Outliving the inline wait is not a failure: the job keeps running under its own supervisor and the returned job_id still resolves to its outcome. Wait on it or poll it; do not re-send the prompt.
 - When a transport failure could make it ambiguous whether a run started, supply idempotency_key and reuse that same key on the retry. The same normalized request returns the existing job; a different request with that key is refused.
-- agy_usage reports quota left; pass priority optional on skippable runs, and report a refusal instead of retrying.
+- agy_usage reports quota left. For planning that tolerates a reading up to ten minutes old, set max_age to 10m and check checked_at. Pass priority optional on skippable runs, and report a refusal instead of retrying.
 - list_models enumerates models and list_agents enumerates agents; call them only if you want to override the default model or pick a specific agent. list_sessions lists known conversations.
 
 Notes:

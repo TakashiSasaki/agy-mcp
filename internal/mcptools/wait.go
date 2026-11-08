@@ -28,7 +28,8 @@ func registerWait(s *toolServer, mgr *manager.Manager) {
 			"Accepts any job_id, whether it came from agy_run or from an agy_run_sync that " +
 			"outlived its inline wait. Prefer one agy_wait over repeated agy_status polling " +
 			"when the next step depends on the job's result; use agy_status instead for a " +
-			"single non-blocking check. Streams progress notifications while waiting when the " +
+			"single non-blocking check. If the connection delays other calls behind a long wait, " +
+			"use agy_status or pass a shorter wait for the same job. Streams progress notifications while waiting when the " +
 			"client asks for them. Outliving the wait cap is not a failure: the job keeps " +
 			"running under its own timeout, so call agy_wait again. include_result false omits terminal text and leaves it uncollected for agy_get_result." + inlineWaitGuide,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in waitInput) (*mcp.CallToolResult, runSyncOutput, error) {

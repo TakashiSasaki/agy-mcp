@@ -10,7 +10,7 @@ import (
 )
 
 type quotaInput struct {
-	MaxAge string   `json:"max_age,omitempty" jsonschema:"how old a cached reading may be (Go duration, e.g. 10m); default 60s; it must be positive, and a value under 10s is raised to 10s. Use a long value (10m) to read the background snapshot instantly; use 10s to accept only a reading under 10 seconds old; a new reading takes a few seconds because it runs agy"`
+	MaxAge string   `json:"max_age,omitempty" jsonschema:"maximum age of a cached reading (positive Go duration; default 60s, minimum 10s). Use 10m for planning when that age is acceptable and check checked_at. A sufficiently recent cached reading skips the CLI probe; otherwise the tool requests a fresh reading"`
 	Models []string `json:"models,omitempty" jsonschema:"optional model IDs to map against this same quota snapshot, at most 128; e.g. gemini-3.8-flash-medium and gemini-4-argon. No extra model-list call or model turn is made. Omit for no mappings; model_groups returns explicit exact, unknown, ambiguous or unpinned outcomes rather than guessing"`
 }
 
@@ -40,7 +40,7 @@ type quotaGroupOutput struct {
 }
 
 type quotaOutput struct {
-	CheckedAt   string             `json:"checked_at" jsonschema:"when agy was asked for this reading, RFC3339 UTC"`
+	CheckedAt   string             `json:"checked_at" jsonschema:"when the server recorded the successful quota reading, RFC3339 UTC"`
 	Groups      []quotaGroupOutput `json:"groups" jsonschema:"one entry per quota group; empty when agy reported none"`
 	ModelGroups []modelQuotaOutput `json:"model_groups" jsonschema:"requested models mapped against groups from this exact snapshot using the server's admission classifier; empty when no models were requested. Inference from model-family and CLI group metadata, not a provider guarantee"`
 }
@@ -55,7 +55,7 @@ type modelQuotaOutput struct {
 // read from the server's in-memory snapshot, never by running agy, so it can be
 // absent.
 type quotaSummaryOutput struct {
-	CheckedAt string              `json:"checked_at" jsonschema:"when agy was asked for this reading, RFC3339 UTC"`
+	CheckedAt string              `json:"checked_at" jsonschema:"when the server recorded the successful quota reading, RFC3339 UTC"`
 	Groups    []quotaGroupSummary `json:"groups" jsonschema:"one entry per quota group, with the level the server computed now"`
 }
 
