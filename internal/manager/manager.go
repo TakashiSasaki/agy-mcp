@@ -944,6 +944,7 @@ func (m *Manager) RestoreAndCollect() (removed []string, err error) {
 	gcEnabled := m.cfg.JobTTL > 0
 	var cutoff time.Time
 	if gcEnabled {
+		m.cleanupRetired()
 		cutoff = time.Now().Add(-m.cfg.JobTTL)
 	}
 	for _, id := range ids {
@@ -966,6 +967,7 @@ func (m *Manager) GarbageCollect() ([]string, error) {
 	if m.cfg.JobTTL <= 0 {
 		return nil, nil
 	}
+	m.cleanupRetired()
 	ids, err := m.store.List()
 	if err != nil {
 		return nil, err
@@ -1040,11 +1042,17 @@ func (m *Manager) gcEvaluate(l loadedJob, cutoff time.Time) bool {
 	if !retainedFrom.Before(cutoff) {
 		return false
 	}
-	if err := m.store.Remove(l.id); err != nil {
+	if err := m.store.Retire(l.id); err != nil {
 		log.Printf("GC: remove expired job %s: %v", l.id, err)
 		return false
 	}
 	return true
+}
+
+func (m *Manager) cleanupRetired() {
+	if err := m.store.CleanupRetired(); err != nil {
+		log.Printf("GC: cleanup of retired jobs deferred: %v", err)
+	}
 }
 
 // orphanExpired reports whether the job dir for id, whose meta.json is missing,

@@ -2,6 +2,8 @@ package manager
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +31,37 @@ func (r *reReadExitStore) ExitCode(id string) (int, bool) {
 		return 0, true
 	}
 	return r.jobStore.ExitCode(id)
+}
+
+type collectAfterExitStore struct {
+	jobStore
+	t *testing.T
+}
+
+func (s collectAfterExitStore) ExitCode(id string) (int, bool) {
+	code, terminal := s.jobStore.ExitCode(id)
+	if terminal {
+		if err := s.Remove(id); err != nil {
+			s.t.Fatal(err)
+		}
+	}
+	return code, terminal
+}
+
+func TestStatusRejectsCollectionAfterReadingTerminalMarker(t *testing.T) {
+	m := newManager(t, managerOpts{})
+	const id = "collected-during-read"
+	dir := createJob(t, m, id)
+	if err := jobstore.WriteResultDir(dir, []byte(`{"status":"SUCCESS","response":"expected terminal result"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.WriteExitCode(id, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.store = collectAfterExitStore{jobStore: m.store, t: t}
+	if st, err := m.Status(id); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("collected job returned a status instead of absence: %+v, %v", st, err)
+	}
 }
 
 func stageExpiredTerminal(t *testing.T, m *Manager, id string) {

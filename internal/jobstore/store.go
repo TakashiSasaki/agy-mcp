@@ -518,12 +518,88 @@ func writeMetaAtomic(dir string, m Meta) error {
 	return writeFileAtomicDurable(dir, MetaFile, b)
 }
 
-// Remove deletes a job's directory and everything in it.
+// Remove deletes an abandoned creation or orphan directory.
 func (s *Store) Remove(id string) error {
 	if !validJobID(id) {
 		return ErrInvalidID
 	}
 	return os.RemoveAll(s.jobDir(id))
+}
+
+const retiredJobsDir = ".agy-retired-jobs"
+
+// Retire atomically detaches a collected job from the live store before
+// deleting evidence. A failed deletion leaves only a detached directory.
+func (s *Store) Retire(id string) error {
+	if !validJobID(id) {
+		return ErrInvalidID
+	}
+	root, err := os.OpenRoot(filepath.Dir(s.root))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.Mkdir(retiredJobsDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	info, err := root.Lstat(retiredJobsDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("retired jobs path is not a directory")
+	}
+	source := filepath.Join(filepath.Base(s.root), id)
+	destination := filepath.Join(retiredJobsDir, id)
+	if err := retryContended(func() error { return root.Rename(source, destination) }); err != nil {
+		return err
+	}
+	if err := root.RemoveAll(destination); err != nil {
+		log.Printf("jobstore: retired job %s awaits disk cleanup: %v", id, err)
+	}
+	return nil
+}
+
+// CleanupRetired retries deletion of directories already detached from jobs.
+func (s *Store) CleanupRetired() error {
+	parent, err := os.OpenRoot(filepath.Dir(s.root))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = parent.Close() }()
+	info, err := parent.Lstat(retiredJobsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("retired jobs path is not a directory")
+	}
+	root, err := parent.OpenRoot(retiredJobsDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	opened, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return fmt.Errorf("retired jobs directory changed before cleanup")
+	}
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		err = errors.Join(err, root.RemoveAll(entry.Name()))
+	}
+	return err
 }
 
 // Dir returns the on-disk directory for a job (out, err, exit_code live here).

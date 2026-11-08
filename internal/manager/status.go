@@ -252,7 +252,7 @@ func (m *Manager) Status(id string) (Status, error) {
 	}
 
 	if code, ok := m.store.ExitCode(id); ok {
-		return m.statusFromExitCode(dir, meta, st, terminalExit(dir, code), true), nil
+		return retainedStatus(dir, m.statusFromExitCode(dir, meta, st, terminalExit(dir, code), true))
 	}
 
 	// No sentinel: decide running vs interrupted.
@@ -264,18 +264,27 @@ func (m *Manager) Status(id string) (Status, error) {
 	// checks above; re-read once so a job that just finished normally is not
 	// misreported as interrupted.
 	if code, ok := m.store.ExitCode(id); ok {
-		return m.statusFromExitCode(dir, meta, st, terminalExit(dir, code), true), nil
+		return retainedStatus(dir, m.statusFromExitCode(dir, meta, st, terminalExit(dir, code), true))
 	}
 	// The supervisor may have published its process outcome before failing to
 	// write the sentinel. Use the same classification as a normal completion.
 	if completion, ok := jobstore.ReadProcessCompletion(dir); ok {
-		return m.statusFromExitCode(dir, meta, st, completion, false), nil
+		return retainedStatus(dir, m.statusFromExitCode(dir, meta, st, completion, false))
 	}
 	// Process is gone without a sentinel. The job is terminal (no supervisor is
 	// left to write one), so freeze elapsed at the best available end time before
 	// classifying the outcome, so a recovered job's elapsed does not keep growing.
 	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, false)
-	return recoverInterrupted(dir, meta, st), nil
+	return retainedStatus(dir, recoverInterrupted(dir, meta, st))
+}
+
+// A collector may detach the job after Status loaded its metadata. The live
+// path disappears before evidence is deleted, so this rejects a mixed snapshot.
+func retainedStatus(dir string, st Status) (Status, error) {
+	if _, err := os.Lstat(jobstore.MetaPath(dir)); err != nil {
+		return Status{}, fmt.Errorf("job %s no longer available: %w", st.JobID, err)
+	}
+	return st, nil
 }
 
 // terminalExit keeps the existing marker authoritative. For overloaded codes a

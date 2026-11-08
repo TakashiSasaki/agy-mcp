@@ -20,6 +20,8 @@ type jobStore interface {
 	Load(id string) (jobstore.Meta, error)
 	UpdateMeta(m jobstore.Meta) error
 	Remove(id string) error
+	Retire(id string) error
+	CleanupRetired() error
 	Dir(id string) (string, error)
 	WriteExitCode(id string, code int) error
 	ExitCode(id string) (int, bool)
