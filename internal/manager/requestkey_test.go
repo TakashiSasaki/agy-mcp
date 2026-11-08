@@ -60,6 +60,46 @@ func TestFindIdempotentJobWithUnreadableEarlierRecord(t *testing.T) {
 	})
 }
 
+func TestPreparedJobRecovery(t *testing.T) {
+	m := newManager(t, managerOpts{})
+	req := StartRequest{Prompt: "real task", Cwd: t.TempDir(), IdempotencyKey: "original", Timeout: time.Minute}
+	for _, meta := range []jobstore.Meta{
+		{ID: "a-prepared", IdempotencyKey: req.IdempotencyKey, RequestKey: "never-published"},
+		{ID: "b-admitted", IdempotencyKey: req.IdempotencyKey, RequestKey: requestKey(req), PID: 1},
+		{ID: "c-prepared", IdempotencyKey: "unused", RequestKey: "never-published"},
+		{ID: "d-legacy", IdempotencyKey: "legacy", RequestKey: requestKey(req)},
+	} {
+		meta.Cwd = req.Cwd
+		if _, err := m.store.Create(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.store.WriteExitCode("d-legacy", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ key, job string }{
+		{"original", "b-admitted"}, {"unused", ""}, {"legacy", "d-legacy"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			retry := req
+			retry.IdempotencyKey = tc.key
+			job, found, err := m.findIdempotentJob(retry, buildAgyArgs(retry))
+			if err != nil || found != (tc.job != "") || job.ID != tc.job {
+				t.Errorf("replay = %+v, %t, %v; want %q", job, found, err, tc.job)
+			}
+			page, err := m.ListJobs(JobQuery{IdempotencyKey: tc.key})
+			if err != nil || (tc.job == "" && page.TotalCount != 0) ||
+				(tc.job != "" && (page.TotalCount != 1 || len(page.Jobs) != 1 || page.Jobs[0].JobID != tc.job)) {
+				t.Errorf("exact lookup = %+v, %v; want only %q", page, err, tc.job)
+			}
+		})
+	}
+	page, err := m.ListJobs(JobQuery{})
+	if err != nil || page.TotalCount != 4 {
+		t.Fatalf("diagnostic list lost records: %+v, %v", page, err)
+	}
+}
+
 // TestRequestKeyCoversEveryRequestField walks StartRequest by reflection, so a
 // field added later that requestKey forgets to hash fails here instead of
 // letting a retry that differs only in that field replay the wrong job.

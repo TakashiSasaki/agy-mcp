@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -40,6 +42,33 @@ func jobTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// preparedOnly identifies a metadata record written before supervisor PID
+// publication. Older supervisors could execute before that publication, so
+// keep any binding with evidence of execution or an indeterminate file check.
+func (m *Manager) preparedOnly(meta jobstore.Meta) bool {
+	if meta.PID != 0 {
+		return false
+	}
+	dir, err := m.store.Dir(meta.ID)
+	if err != nil {
+		return false
+	}
+	for _, name := range []string{jobstore.OutFile, jobstore.ErrFile, jobstore.ProgressFile, jobstore.ProcessFile,
+		jobstore.ResultFile, jobstore.ExitCodeFile, jobstore.EventsFile, jobstore.CaptureFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) matchesJobQuery(meta jobstore.Meta, cwd, label, key string) bool {
+	if (cwd != "" && meta.Cwd != cwd) || (label != "" && !strings.Contains(strings.ToLower(meta.TaskLabel), label)) {
+		return false
+	}
+	return key == "" || (meta.IdempotencyKey == key && !m.preparedOnly(meta))
 }
 
 // ListJobs never collects or cancels a job. State is derived by Status so failed
@@ -81,10 +110,9 @@ func (m *Manager) ListJobs(q JobQuery) (JobPage, error) {
 			scanErr = fmt.Errorf("read job %s during listing: %w", id, err)
 			continue
 		}
-		if (cwd != "" && meta.Cwd != cwd) || (label != "" && !strings.Contains(strings.ToLower(meta.TaskLabel), label)) || (q.IdempotencyKey != "" && meta.IdempotencyKey != q.IdempotencyKey) {
-			continue
+		if m.matchesJobQuery(meta, cwd, label, q.IdempotencyKey) {
+			matches = append(matches, meta)
 		}
-		matches = append(matches, meta)
 	}
 	slices.SortFunc(matches, func(a, b jobstore.Meta) int {
 		if cmp := b.StartedAt.Compare(a.StartedAt); cmp != 0 {

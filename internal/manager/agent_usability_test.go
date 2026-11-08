@@ -83,7 +83,7 @@ func TestAgentStartErrorDecisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.store.Create(jobstore.Meta{ID: "existing", Cwd: req.Cwd, IdempotencyKey: req.IdempotencyKey, RequestKey: requestKey(req)}); err != nil {
+	if _, err := m.store.Create(jobstore.Meta{ID: "existing", PID: 1, Cwd: req.Cwd, IdempotencyKey: req.IdempotencyKey, RequestKey: requestKey(req)}); err != nil {
 		t.Fatal(err)
 	}
 	req.Prompt = "changed"
