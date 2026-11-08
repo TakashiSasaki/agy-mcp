@@ -11,4 +11,4 @@ import "os/exec"
 // a cancel/timeout sentinel: a timeout or cancel is already applied by
 // the supervisor's termination overrides before this is consulted, so reaching here means a
 // genuine abnormal exit that must be reported as a failure, not a clean cancel.
-func signalExitCode(_ *exec.ExitError) int { return 1 }
+func signalExitCode(_ *exec.ExitError) (int, bool) { return 1, false }

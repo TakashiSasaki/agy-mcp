@@ -35,13 +35,14 @@ const ProcessOutcomeSource = "supervisor"
 
 // ProcessOutcome describes agy, never a shell command launched by the model.
 type ProcessOutcome struct {
-	Source    string     `json:"source" jsonschema:"supervisor; observes the agy CLI process, not individual model tool commands"`
-	PID       int        `json:"pid,omitempty" jsonschema:"agy process ID when it was started"`
-	StartedAt *time.Time `json:"started_at,omitempty" jsonschema:"time the supervisor started agy; absent when spawning failed"`
-	EndedAt   time.Time  `json:"ended_at" jsonschema:"time the supervisor reaped agy or observed spawn failure"`
-	ExitCode  *int       `json:"exit_code" jsonschema:"observed agy exit status with shell-style signal codes; null if spawning failed"`
-	TimedOut  bool       `json:"timed_out" jsonschema:"the supervisor deadline caused process termination"`
-	Cancelled bool       `json:"cancelled" jsonschema:"the supervisor cancellation caused process termination"`
+	Source            string     `json:"source" jsonschema:"supervisor; observes the agy CLI process, not individual model tool commands"`
+	PID               int        `json:"pid,omitempty" jsonschema:"agy process ID when it was started"`
+	StartedAt         *time.Time `json:"started_at,omitempty" jsonschema:"time the supervisor started agy; absent when spawning failed"`
+	EndedAt           time.Time  `json:"ended_at" jsonschema:"time the supervisor reaped agy or observed spawn failure"`
+	ExitCode          *int       `json:"exit_code" jsonschema:"observed agy exit status with shell-style signal codes; null if spawning failed"`
+	SignalTermination *bool      `json:"signal_termination,omitempty" jsonschema:"whether AGY was terminated by a signal according to the OS wait status; absent on old receipts or when spawning failed"`
+	TimedOut          bool       `json:"timed_out" jsonschema:"the supervisor deadline caused process termination"`
+	Cancelled         bool       `json:"cancelled" jsonschema:"the supervisor cancellation caused process termination"`
 }
 
 // ExitSentinel maps the observed process exit to the job completion code.
@@ -57,17 +58,25 @@ func ExitSentinel(raw int, timedOut, cancelled bool) int {
 	}
 }
 
+// ProcessCompletion holds the compatible sentinel and the provenance needed to
+// distinguish an ordinary CLI exit from a supervisor action or a signal.
+type ProcessCompletion struct {
+	Code         int
+	OrdinaryExit bool
+	RecordedAt   time.Time
+}
+
 // ReadProcessCompletion recovers the completion code and receipt file timestamp
 // when the ordinary completion marker could not be published. The supervisor
 // writes the receipt after cleanup, while EndedAt describes the CLI process.
-func ReadProcessCompletion(dir string) (int, time.Time, bool) {
+func ReadProcessCompletion(dir string) (ProcessCompletion, bool) {
 	// A supervisor receipt is a small regular file. Ignore other shapes so a
 	// damaged store cannot stall status on a named pipe or a large file.
 	const maxReceiptBytes = 4096
 	path := filepath.Join(dir, ProcessFile)
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReceiptBytes {
-		return 0, time.Time{}, false
+		return ProcessCompletion{}, false
 	}
 	// Keep the raw field so an explicit null (spawn failure) is distinguishable
 	// from an incomplete receipt with no exit_code field.
@@ -77,20 +86,34 @@ func ReadProcessCompletion(dir string) (int, time.Time, bool) {
 	}
 	data, err := readReplaced(path)
 	if err != nil || json.Unmarshal(data, &o) != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() {
-		return 0, time.Time{}, false
+		return ProcessCompletion{}, false
 	}
 	if string(o.ExitCode) == "null" {
-		if o.PID != 0 || o.StartedAt != nil || o.TimedOut || o.Cancelled {
-			return 0, time.Time{}, false
+		if o.PID != 0 || o.StartedAt != nil || o.TimedOut || o.Cancelled || o.SignalTermination != nil {
+			return ProcessCompletion{}, false
 		}
-		return ExitSpawnFail, info.ModTime(), true
+		return ProcessCompletion{Code: ExitSpawnFail, RecordedAt: info.ModTime()}, true
 	}
 	var code int
 	if json.Unmarshal(o.ExitCode, &code) != nil || o.PID <= 0 || o.StartedAt == nil || o.StartedAt.IsZero() || code < 0 ||
-		(o.TimedOut && o.Cancelled) || (code == 0 && (o.TimedOut || o.Cancelled)) {
-		return 0, time.Time{}, false
+		(o.TimedOut && o.Cancelled) || (code == 0 && (o.TimedOut || o.Cancelled)) ||
+		(o.SignalTermination != nil && *o.SignalTermination && code <= 128) {
+		return ProcessCompletion{}, false
 	}
-	return ExitSentinel(code, o.TimedOut, o.Cancelled), info.ModTime(), true
+	return ProcessCompletion{
+		Code: ExitSentinel(code, o.TimedOut, o.Cancelled), OrdinaryExit: o.exitedNormally(code), RecordedAt: info.ModTime(),
+	}, true
+}
+
+func (o ProcessOutcome) exitedNormally(code int) bool {
+	if o.TimedOut || o.Cancelled {
+		return false
+	}
+	if o.SignalTermination != nil {
+		return !*o.SignalTermination
+	}
+	// Legacy receipts cannot distinguish numeric 130/143 from SIGINT/SIGTERM.
+	return code == ExitTimeout || code == ExitSpawnFail
 }
 
 func WriteProcessDir(dir string, outcome ProcessOutcome) error {

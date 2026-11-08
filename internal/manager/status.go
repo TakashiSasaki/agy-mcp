@@ -64,7 +64,7 @@ const (
 const (
 	ReasonQuotaExhausted = "quota_exhausted" // agy hit a provider quota, rate-limit or AI credits wall; transient unless Status.Retryable is false
 	ReasonTimeout        = "timeout"         // the run outlived its timeout: agy-mcp killed it, or agy's own --print-timeout cut the turn short
-	ReasonSpawnFailed    = "spawn_failed"    // the agy binary could not be started, or agy itself exited 127 (one exit sentinel covers both)
+	ReasonSpawnFailed    = "spawn_failed"    // agy could not be started, or a legacy 127 marker has no matching process receipt
 	ReasonAgyError       = "agy_error"       // agy itself reported an error, exited non-zero, or returned an indeterminate result
 	ReasonInterrupted    = "interrupted"     // the job process vanished without writing a result
 	// ReasonBackgroundAborted: agy ended the run itself (a clean exit, with a
@@ -252,7 +252,7 @@ func (m *Manager) Status(id string) (Status, error) {
 	}
 
 	if code, ok := m.store.ExitCode(id); ok {
-		return m.statusFromExitCode(dir, meta, st, code, true), nil
+		return m.statusFromExitCode(dir, meta, st, terminalExit(dir, code), true), nil
 	}
 
 	// No sentinel: decide running vs interrupted.
@@ -264,18 +264,30 @@ func (m *Manager) Status(id string) (Status, error) {
 	// checks above; re-read once so a job that just finished normally is not
 	// misreported as interrupted.
 	if code, ok := m.store.ExitCode(id); ok {
-		return m.statusFromExitCode(dir, meta, st, code, true), nil
+		return m.statusFromExitCode(dir, meta, st, terminalExit(dir, code), true), nil
 	}
 	// The supervisor may have published its process outcome before failing to
 	// write the sentinel. Use the same classification as a normal completion.
-	if code, _, ok := jobstore.ReadProcessCompletion(dir); ok {
-		return m.statusFromExitCode(dir, meta, st, code, false), nil
+	if completion, ok := jobstore.ReadProcessCompletion(dir); ok {
+		return m.statusFromExitCode(dir, meta, st, completion, false), nil
 	}
 	// Process is gone without a sentinel. The job is terminal (no supervisor is
 	// left to write one), so freeze elapsed at the best available end time before
 	// classifying the outcome, so a recovered job's elapsed does not keep growing.
 	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, false)
 	return recoverInterrupted(dir, meta, st), nil
+}
+
+// terminalExit keeps the existing marker authoritative. For overloaded codes a
+// matching process receipt distinguishes a normal nonzero exit from a stop.
+func terminalExit(dir string, code int) jobstore.ProcessCompletion {
+	switch code {
+	case jobstore.ExitSIGTERM, jobstore.ExitSIGINT, jobstore.ExitTimeout, jobstore.ExitSpawnFail:
+		if completion, ok := jobstore.ReadProcessCompletion(dir); ok && completion.Code == code {
+			return completion
+		}
+	}
+	return jobstore.ProcessCompletion{Code: code}
 }
 
 // recoverInterrupted classifies a dead job without a usable exit-code sentinel
@@ -334,13 +346,14 @@ func recoverInterrupted(dir string, meta jobstore.Meta, st Status) Status {
 // happens to the answer and the accounting afterwards is the same for all of
 // them, and this file has regressed three times because that was not true and a
 // fix applied to one branch left the identical case open in its sibling.
-func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, code int, hasExitMarker bool) Status {
+func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, exit jobstore.ProcessCompletion, hasExitMarker bool) Status {
 	// The job is terminal, so freeze Elapsed at the completion time rather than
 	// letting it grow forever as time.Since(StartedAt).
 	st.Elapsed = m.frozenElapsed(meta, st.Elapsed, hasExitMarker)
 	res, hasResult := readResultPayload(dir)
-	switch code {
-	case 0:
+	code := exit.Code
+	switch {
+	case code == 0:
 		var done Status
 		if !hasResult {
 			done = cleanExitWithoutPayload(dir, meta, st)
@@ -348,16 +361,14 @@ func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, 
 			done = applyResult(dir, meta, st, res)
 		}
 		return applyCleanExitNotices(dir, meta, done, res, hasResult)
-	case jobstore.ExitSIGTERM, jobstore.ExitSIGINT:
+	case stateForExit(exit) == StateCancelled:
 		st.State = StateCancelled
-	case jobstore.ExitTimeout:
+	case !exit.OrdinaryExit && code == jobstore.ExitTimeout:
 		st.State = StateFailed
 		st.Error = "job exceeded its timeout and was terminated"
 		st.FailureReason = ReasonTimeout
-	case jobstore.ExitSpawnFail:
-		// 127 is written both when the supervisor could not exec agy and when agy
-		// itself exits 127, so name both causes rather than asserting one, and keep
-		// any stderr (a true spawn failure has none; a genuine agy 127 does).
+	case !exit.OrdinaryExit && code == jobstore.ExitSpawnFail:
+		// Without a matching receipt the legacy marker remains ambiguous.
 		st.State = StateFailed
 		st.Error = spawnFailMessage(dir)
 		st.FailureReason = ReasonSpawnFailed
@@ -400,7 +411,7 @@ func (m *Manager) statusFromExitCode(dir string, meta jobstore.Meta, st Status, 
 	// write a SUCCESS payload for the unfinished turn before the hard kill lands.
 	// carryText treats that response as authoritative, so the notice flags it
 	// partial. stderr is read only when the flag would change.
-	if code == jobstore.ExitTimeout && st.Result != "" && !st.Partial && readStderrNotices(dir).printTimeout {
+	if !exit.OrdinaryExit && code == jobstore.ExitTimeout && st.Result != "" && !st.Partial && readStderrNotices(dir).printTimeout {
 		st.Partial = true
 	}
 	// A cancelled or timed-out run still has a conversation worth continuing, so
@@ -870,18 +881,23 @@ func readResultPayload(dir string) (streamjson.Result, bool) {
 // large) out file when the state can be decided from the exit-code sentinel
 // alone. agy_cancel uses it: every actual cancel leaves a non-zero sentinel
 // (SIGTERM/SIGINT, or a timeout/spawn-fail kill), so the common path reads no
-// out/err at all. State never disagrees with Status: the one terminal case
+// out/err at all. A matching process receipt disambiguates reused codes.
+// State never disagrees with Status: the one terminal case
 // whose done-vs-failed split depends on reading the job's files (a clean exit,
 // code 0, whose out readability and stderr notices both matter) is not
 // fast-pathed but deferred to Status, as is the running/recovery path.
 func (m *Manager) State(id string) (string, error) {
 	// Fast path: a terminal sentinel other than a clean exit decides the state
-	// from the code alone. A clean exit (0) is excluded because Status downgrades
+	// without reading output. A clean exit (0) is excluded because Status downgrades
 	// a successful-but-unreadable out, or one whose stderr shows agy ended the run
 	// early, to failed, distinctions that require the reads State is trying to
 	// avoid.
 	if code, ok := m.store.ExitCode(id); ok && code != 0 {
-		return stateForCode(code), nil
+		dir, err := m.store.Dir(id)
+		if err != nil {
+			return "", err
+		}
+		return stateForExit(terminalExit(dir, code)), nil
 	}
 	// Clean exit, or no sentinel yet: defer to Status, which reads the out file
 	// and stderr to tell a clean/recovered result (done) from an unreadable or
@@ -895,20 +911,12 @@ func (m *Manager) State(id string) (string, error) {
 	return st.State, nil
 }
 
-// stateForCode maps a terminal exit-code sentinel to a job state. It is the
-// shared source of truth for the code->state mapping; State uses it for the
-// non-zero terminal codes (a clean exit's done-vs-failed split also depends on
-// out readability and stderr notices, so State handles 0 via Status rather than
-// this mapping).
-func stateForCode(code int) string {
-	switch code {
-	case 0:
-		return StateDone
-	case jobstore.ExitSIGTERM, jobstore.ExitSIGINT:
+// stateForExit maps a nonzero terminal code to the state used by Status.
+func stateForExit(exit jobstore.ProcessCompletion) string {
+	if !exit.OrdinaryExit && (exit.Code == jobstore.ExitSIGTERM || exit.Code == jobstore.ExitSIGINT) {
 		return StateCancelled
-	default: // timeout, spawn-fail, or any other nonzero code
-		return StateFailed
 	}
+	return StateFailed
 }
 
 // frozenElapsed uses terminal receipt times, or the durable first observed death

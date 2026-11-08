@@ -15,17 +15,17 @@ import (
 // maps to 128+signal so Status reports a failure rather than a clean cancel. A
 // wait status that is not a signal death falls back to the cancel sentinel,
 // preserving the prior behavior for that unreachable case.
-func signalExitCode(ee *exec.ExitError) int {
+func signalExitCode(ee *exec.ExitError) (int, bool) {
 	ws, ok := ee.Sys().(syscall.WaitStatus)
 	if !ok || !ws.Signaled() {
-		return jobstore.ExitSIGTERM
+		return jobstore.ExitSIGTERM, false
 	}
 	switch ws.Signal() {
 	case syscall.SIGTERM:
-		return jobstore.ExitSIGTERM
+		return jobstore.ExitSIGTERM, true
 	case syscall.SIGINT:
-		return jobstore.ExitSIGINT
+		return jobstore.ExitSIGINT, true
 	default:
-		return 128 + int(ws.Signal())
+		return 128 + int(ws.Signal()), true
 	}
 }

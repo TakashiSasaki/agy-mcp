@@ -11,4 +11,4 @@ import (
 // signalExitCode stub so the package builds on platforms without a supervision
 // implementation (e.g. FreeBSD). Run refuses early there (proc.Supported is false),
 // so this is never reached at runtime.
-func signalExitCode(_ *exec.ExitError) int { return jobstore.ExitSIGTERM }
+func signalExitCode(_ *exec.ExitError) (int, bool) { return jobstore.ExitSIGTERM, false }

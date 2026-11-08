@@ -394,14 +394,14 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 		outcome = <-drained
 	}
 
-	code := 0
+	code, signalTermination := 0, false
 	if waitErr != nil {
 		if ee, ok := errors.AsType[*exec.ExitError](waitErr); ok {
 			code = ee.ExitCode()
 			if code < 0 {
 				// Killed by a signal. Classify by which signal so an OOM kill or a
 				// crash is reported as a failure, not mistaken for a user cancel.
-				code = signalExitCode(ee)
+				code, signalTermination = signalExitCode(ee)
 			}
 		} else {
 			code = 1
@@ -414,7 +414,8 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 	// the timer fired (a natural success has waitErr == nil) from being mislabeled.
 	receipt := jobstore.ProcessOutcome{
 		Source: jobstore.ProcessOutcomeSource, PID: cmd.Process.Pid, StartedAt: new(startedAt), EndedAt: endedAt, ExitCode: new(code),
-		TimedOut: waitErr != nil && closed(timedOut), Cancelled: waitErr != nil && closed(cancelled) && !closed(timedOut),
+		SignalTermination: new(signalTermination),
+		TimedOut:          waitErr != nil && closed(timedOut), Cancelled: waitErr != nil && closed(cancelled) && !closed(timedOut),
 	}
 	// Publish the process outcome before any terminal result. If the supervisor
 	// stops before writing exit_code, recovery can still classify the job.

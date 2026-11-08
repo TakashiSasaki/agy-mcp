@@ -37,8 +37,8 @@ func TestSignalExitCode(t *testing.T) {
 			if !ok {
 				t.Fatal("run did not return an *exec.ExitError")
 			}
-			if got := signalExitCode(ee); got != tc.want {
-				t.Errorf("signalExitCode = %d, want %d", got, tc.want)
+			if got, signaled := signalExitCode(ee); got != tc.want || !signaled {
+				t.Errorf("signalExitCode = (%d, %t), want (%d, true)", got, signaled, tc.want)
 			}
 		})
 	}

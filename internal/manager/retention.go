@@ -29,8 +29,8 @@ func (m *Manager) retentionStart(meta jobstore.Meta, hasExitMarker, observe bool
 	if resultErr == nil {
 		return stamp, nil
 	}
-	if _, stamp, ok := jobstore.ReadProcessCompletion(dir); ok {
-		return stamp, nil
+	if completion, ok := jobstore.ReadProcessCompletion(dir); ok {
+		return completion.RecordedAt, nil
 	}
 	if !errors.Is(resultErr, fs.ErrNotExist) {
 		return time.Time{}, resultErr

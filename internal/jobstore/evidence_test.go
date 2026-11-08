@@ -35,11 +35,27 @@ func TestReadProcessCompletionSpawnFailure(t *testing.T) {
 			if err := os.Chtimes(path, stamp, stamp); err != nil {
 				t.Fatal(err)
 			}
-			code, got, ok := ReadProcessCompletion(dir)
-			if ok != tc.valid || (ok && (code != ExitSpawnFail || !got.Equal(stamp))) {
-				t.Fatalf("completion = (%d, %v, %t), want valid=%t with spawn failure and receipt mtime", code, got, ok, tc.valid)
+			got, ok := ReadProcessCompletion(dir)
+			if ok != tc.valid || (ok && (got.Code != ExitSpawnFail || got.OrdinaryExit || !got.RecordedAt.Equal(stamp))) {
+				t.Fatalf("completion = (%+v, %t), want valid=%t with spawn failure and receipt mtime", got, ok, tc.valid)
 			}
 		})
+	}
+}
+
+func TestReadProcessCompletionRejectsImpossibleSignalStatus(t *testing.T) {
+	for _, code := range []int{0, 124, 127, 128} {
+		dir := t.TempDir()
+		start := time.Now().Add(-time.Second)
+		if err := WriteProcessDir(dir, ProcessOutcome{
+			Source: ProcessOutcomeSource, PID: 42, StartedAt: &start, EndedAt: time.Now(),
+			ExitCode: &code, SignalTermination: new(true),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if completion, ok := ReadProcessCompletion(dir); ok {
+			t.Fatalf("code %d cannot describe a signal: %+v", code, completion)
+		}
 	}
 }
 
