@@ -65,101 +65,8 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 		dataDir = "/data"
 	}
 
-	type projectKey struct{ id, name, root string }
-	projects := make(map[projectKey]*ProjectInfo)
-	registeredRoots := make(map[string]bool)
-
-	// 1. Scan Antigravity project config files
-	if projDir != "" {
-		entries, err := os.ReadDir(projDir)
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-					continue
-				}
-				pPath := filepath.Join(projDir, entry.Name())
-				data, err := os.ReadFile(pPath)
-				if err != nil {
-					continue
-				}
-				var pDef struct {
-					ID               string `json:"id"`
-					Name             string `json:"name"`
-					ProjectResources struct {
-						Resources []struct {
-							FolderURI string `json:"folderUri"`
-							GitFolder struct {
-								FolderURI     string `json:"folderUri"`
-								DefaultBranch string `json:"defaultBranch"`
-							} `json:"gitFolder"`
-						} `json:"resources"`
-					} `json:"projectResources"`
-				}
-				if err := json.Unmarshal(data, &pDef); err != nil {
-					continue
-				}
-				if pDef.ID == "" && pDef.Name == "" {
-					continue
-				}
-				for _, r := range pDef.ProjectResources.Resources {
-					uri := r.GitFolder.FolderURI
-					if uri == "" {
-						uri = r.FolderURI
-					}
-					cleanRoot, ok := projectResourcePath(uri)
-					if !ok {
-						continue
-					}
-					id, name := pDef.ID, pDef.Name
-					if id == "" {
-						id = filepath.Base(cleanRoot)
-					}
-					if name == "" {
-						name = filepath.Base(cleanRoot)
-					}
-					// Keep every resource and every registration identity. A project
-					// ID alone must not silently choose the last of several roots.
-					key := projectKey{id, name, cleanRoot}
-					projects[key] = &ProjectInfo{ID: id, Name: name, Root: cleanRoot,
-						DefaultBranch: r.GitFolder.DefaultBranch}
-					registeredRoots[cleanRoot] = true
-				}
-			}
-		}
-	}
-
-	// 2. Scan /data directories for git repositories
-	if fi, err := os.Stat(dataDir); err == nil && fi.IsDir() {
-		entries, err := os.ReadDir(dataDir)
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				subPath := filepath.Join(dataDir, entry.Name())
-				cleanSub := filepath.Clean(subPath)
-				bareDir := filepath.Join(cleanSub, ".bare")
-				gitDir := filepath.Join(cleanSub, ".git")
-
-				isGit := false
-				if s, err := os.Stat(bareDir); err == nil && s.IsDir() {
-					isGit = true
-				} else if _, err := os.Stat(gitDir); err == nil {
-					isGit = true
-				}
-
-				if isGit {
-					if !registeredRoots[cleanSub] {
-						projects[projectKey{entry.Name(), entry.Name(), cleanSub}] = &ProjectInfo{
-							ID:   entry.Name(),
-							Name: entry.Name(),
-							Root: cleanSub,
-						}
-					}
-				}
-			}
-		}
-	}
+	projects, registeredRoots := discoverRegisteredProjects(projDir)
+	discoverDataProjects(dataDir, projects, registeredRoots)
 
 	// 3. Inspect Git remotes and worktrees for each project
 	var out []ProjectInfo
@@ -211,6 +118,97 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 	return out, nil
 }
 
+type projectKey struct{ id, name, root string }
+
+type projectRegistration struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	ProjectResources struct {
+		Resources []struct {
+			FolderURI string `json:"folderUri"`
+			GitFolder struct {
+				FolderURI     string `json:"folderUri"`
+				DefaultBranch string `json:"defaultBranch"`
+			} `json:"gitFolder"`
+		} `json:"resources"`
+	} `json:"projectResources"`
+}
+
+func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInfo, roots map[string]bool) {
+	projects = make(map[projectKey]*ProjectInfo)
+	roots = make(map[string]bool)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return projects, roots
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var registration projectRegistration
+		if err := json.Unmarshal(data, &registration); err != nil || (registration.ID == "" && registration.Name == "") {
+			continue
+		}
+		for _, resource := range registration.ProjectResources.Resources {
+			uri := resource.GitFolder.FolderURI
+			if uri == "" {
+				uri = resource.FolderURI
+			}
+			root, ok := projectResourcePath(uri)
+			if !ok {
+				continue
+			}
+			id, name := registration.ID, registration.Name
+			if id == "" {
+				id = filepath.Base(root)
+			}
+			if name == "" {
+				name = filepath.Base(root)
+			}
+			// Keep each resource and registration identity for ambiguity checks.
+			key := projectKey{id, name, root}
+			projects[key] = &ProjectInfo{ID: id, Name: name, Root: root,
+				DefaultBranch: resource.GitFolder.DefaultBranch}
+			roots[root] = true
+		}
+	}
+	return projects, roots
+}
+
+func discoverDataProjects(dir string, projects map[projectKey]*ProjectInfo, registeredRoots map[string]bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		root := filepath.Join(dir, entry.Name())
+		if registeredRoots[root] || projectGitDir(root) == "" {
+			continue
+		}
+		name := entry.Name()
+		projects[projectKey{name, name, root}] = &ProjectInfo{ID: name, Name: name, Root: root}
+	}
+}
+
+func projectGitDir(root string) string {
+	bareDir := filepath.Join(root, ".bare")
+	if info, err := os.Stat(bareDir); err == nil && info.IsDir() {
+		return bareDir
+	}
+	gitDir := filepath.Join(root, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
+		return gitDir
+	}
+	return ""
+}
+
 // projectResourcePath accepts absolute local paths and local file URIs only.
 // URL.Path decodes percent escapes once, preserving literal percent sequences.
 func projectResourcePath(resource string) (string, bool) {
@@ -236,16 +234,7 @@ func inspectProjectGit(root string) (remoteURL, defBranch string, worktrees []Pr
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	bareDir := filepath.Join(root, ".bare")
-	gitDir := filepath.Join(root, ".git")
-
-	targetGitDir := ""
-	if s, err := os.Stat(bareDir); err == nil && s.IsDir() {
-		targetGitDir = bareDir
-	} else if _, err := os.Stat(gitDir); err == nil {
-		targetGitDir = gitDir
-	}
-
+	targetGitDir := projectGitDir(root)
 	if targetGitDir == "" {
 		return "", "", nil
 	}
@@ -269,7 +258,7 @@ func inspectProjectGit(root string) (remoteURL, defBranch string, worktrees []Pr
 	// Both ordinary and shared-bare repositories can own linked worktrees.
 	cmdWt := probeCmd(ctx, "git", "--git-dir="+targetGitDir, "worktree", "list", "--porcelain", "-z")
 	if out, err := cmdWt.Output(); err == nil {
-		worktrees = parseWorktreeList(string(out), targetGitDir, "\x00")
+		worktrees = parseWorktreeList(string(out), targetGitDir)
 	}
 
 	// Find default branch
@@ -288,7 +277,7 @@ func inspectProjectGit(root string) (remoteURL, defBranch string, worktrees []Pr
 
 func parseGitRemotes(output string) map[string]string {
 	remotes := make(map[string]string)
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.Lines(output) {
 		parts := strings.Fields(line)
 		if len(parts) >= 3 && parts[2] == "(fetch)" {
 			remotes[parts[0]] = parts[1]
@@ -297,13 +286,8 @@ func parseGitRemotes(output string) map[string]string {
 	return remotes
 }
 
-func parseWorktreeListPorcelain(output, bareDir string) []ProjectWorktree {
-	return parseWorktreeList(output, bareDir, "\n")
-}
-
-func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
+func parseWorktreeList(output, bareDir string) []ProjectWorktree {
 	var worktrees []ProjectWorktree
-	lines := strings.Split(output, separator)
 	var curPath, curHead, curBranch string
 	var isBare bool
 
@@ -318,10 +302,7 @@ func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
 					cancel()
 					isClean = dirty != nil && !*dirty
 				}
-				branch := curBranch
-				if strings.HasPrefix(branch, "refs/heads/") {
-					branch = strings.TrimPrefix(branch, "refs/heads/")
-				}
+				branch := strings.TrimPrefix(curBranch, "refs/heads/")
 				head := curHead
 				fullHead := curHead
 				if !validExpectedGitHead(fullHead) {
@@ -343,7 +324,7 @@ func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
 		isBare = false
 	}
 
-	for _, line := range lines {
+	for line := range strings.SplitSeq(output, "\x00") {
 		if line == "" {
 			flush()
 			continue
@@ -352,12 +333,17 @@ func parseWorktreeList(output, bareDir, separator string) []ProjectWorktree {
 			isBare = true
 			continue
 		}
-		if strings.HasPrefix(line, "worktree ") {
-			curPath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "HEAD ") {
-			curHead = strings.TrimPrefix(line, "HEAD ")
-		} else if strings.HasPrefix(line, "branch ") {
-			curBranch = strings.TrimPrefix(line, "branch ")
+		field, value, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		switch field {
+		case "worktree":
+			curPath = value
+		case "HEAD":
+			curHead = value
+		case "branch":
+			curBranch = value
 		}
 	}
 	flush()

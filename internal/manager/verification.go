@@ -113,11 +113,12 @@ func (m *Manager) VerificationReport(jobID, path, format string) (VerificationRe
 		return VerificationResult{}, err
 	}
 	var out VerificationResult
-	if format == "go_test_json" {
+	switch format {
+	case "go_test_json":
 		out = parseGoTestJSON(data)
-	} else if format == "tap" {
+	case "tap":
 		out = parseFlatTAP(data)
-	} else {
+	default:
 		out = parseJUnit(data)
 	}
 	out.JobID, out.JobState, out.Scope, out.Path = jobID, st.State, artifactScope(meta), path

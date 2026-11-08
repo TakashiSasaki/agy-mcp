@@ -132,6 +132,8 @@ func (e *QuotaRefusalError) Error() string {
 	case QuotaMatchAmbiguous:
 		return fmt.Sprintf("optional run skipped (deferred), no job was started: quota group mapping for model %q is ambiguous across reported /usage groups (cannot verify quota headroom). "+
 			"Pass a model that maps to a single quota group, or pass priority normal only if this run is required.", e.Model)
+	default:
+		// Use the quota-level message for exact matches and legacy callers.
 	}
 	detail := fmt.Sprintf("%s%d%% left", e.bucketPrefix(), e.Percent)
 	if !e.ResetTime.IsZero() {
@@ -411,78 +413,35 @@ func classifyQuotaGroup(g QuotaGroup) groupTraits {
 	nameToks := tokenizeQuotaText(g.Name)
 	descToks := tokenizeQuotaText(g.Description)
 
-	var (
-		bucketHasArgon  bool
-		bucketHasFlash  bool
-		bucketHasPro    bool
-		bucketHasGemini bool
-		bucketHas3P     bool
-		bucketHasClaude bool
-		bucketHasGPT    bool
-	)
-	for _, b := range g.Buckets {
-		id := strings.ToLower(strings.TrimSpace(b.ID))
-		switch {
-		case id == "gemini-argon-wtu-weekly" || strings.HasPrefix(id, "gemini-argon"):
-			bucketHasArgon = true
-			bucketHasGemini = true
-		case id == "gemini-weekly" || id == "gemini-5h" || strings.HasPrefix(id, "gemini-"):
-			bucketHasGemini = true
-		case id == "3p-weekly" || id == "3p-5h" || strings.HasPrefix(id, "3p-"):
-			bucketHas3P = true
-		}
-		idToks := tokenizeQuotaText(b.ID)
-		btoks := append(idToks, tokenizeQuotaText(b.Name)...)
-		if slices.Contains(btoks, "argon") {
-			bucketHasArgon = true
-			bucketHasGemini = true
-		}
-		if slices.Contains(btoks, "flash") {
-			bucketHasFlash = true
-			bucketHasGemini = true
-		}
-		if slices.Contains(idToks, "pro") || hasGeminiModelToken(btoks, "pro") {
-			bucketHasPro = true
-			bucketHasGemini = true
-		}
-		if slices.Contains(btoks, "gemini") {
-			bucketHasGemini = true
-		}
-		if slices.Contains(btoks, "claude") {
-			bucketHasClaude = true
-		}
-		if slices.Contains(btoks, "gpt") {
-			bucketHasGPT = true
-		}
-	}
+	bucket, thirdParty := classifyQuotaBuckets(g.Buckets)
 
-	isArgon := bucketHasArgon ||
+	isArgon := bucket.isArgon ||
 		slices.Contains(nameToks, "argon") ||
 		hasGeminiModelToken(descToks, "argon")
 
-	hasFlash := bucketHasFlash ||
+	hasFlash := bucket.hasFlash ||
 		slices.Contains(nameToks, "flash") ||
 		hasGeminiModelToken(descToks, "flash")
 
-	hasPro := bucketHasPro ||
+	hasPro := bucket.hasPro ||
 		hasGeminiModelToken(nameToks, "pro") ||
 		(slices.Contains(nameToks, "gemini") && slices.Contains(nameToks, "pro")) ||
 		hasGeminiModelToken(descToks, "pro")
 
-	hasGemini := bucketHasGemini ||
+	hasGemini := bucket.hasGemini ||
 		slices.Contains(nameToks, "gemini") ||
 		isArgon || hasFlash || hasPro
 
-	explicitClaude := bucketHasClaude ||
+	explicitClaude := bucket.hasClaude ||
 		slices.Contains(nameToks, "claude") ||
 		slices.Contains(descToks, "claude")
 
-	explicitGPT := bucketHasGPT ||
+	explicitGPT := bucket.hasGPT ||
 		slices.Contains(nameToks, "gpt") ||
 		slices.Contains(descToks, "gpt")
 
-	hasClaude := explicitClaude || (bucketHas3P && !explicitGPT)
-	hasGPT := explicitGPT || (bucketHas3P && !explicitClaude)
+	hasClaude := explicitClaude || (thirdParty && !explicitGPT)
+	hasGPT := explicitGPT || (thirdParty && !explicitClaude)
 
 	return groupTraits{
 		isArgon:   isArgon,
@@ -492,6 +451,45 @@ func classifyQuotaGroup(g QuotaGroup) groupTraits {
 		hasClaude: hasClaude,
 		hasGPT:    hasGPT,
 	}
+}
+
+func classifyQuotaBuckets(buckets []QuotaBucket) (traits groupTraits, thirdParty bool) {
+	for _, b := range buckets {
+		id := strings.ToLower(strings.TrimSpace(b.ID))
+		switch {
+		case id == "gemini-argon-wtu-weekly" || strings.HasPrefix(id, "gemini-argon"):
+			traits.isArgon = true
+			traits.hasGemini = true
+		case id == "gemini-weekly" || id == "gemini-5h" || strings.HasPrefix(id, "gemini-"):
+			traits.hasGemini = true
+		case id == "3p-weekly" || id == "3p-5h" || strings.HasPrefix(id, "3p-"):
+			thirdParty = true
+		}
+		idToks := tokenizeQuotaText(b.ID)
+		btoks := slices.Concat(idToks, tokenizeQuotaText(b.Name))
+		if slices.Contains(btoks, "argon") {
+			traits.isArgon = true
+			traits.hasGemini = true
+		}
+		if slices.Contains(btoks, "flash") {
+			traits.hasFlash = true
+			traits.hasGemini = true
+		}
+		if slices.Contains(idToks, "pro") || hasGeminiModelToken(btoks, "pro") {
+			traits.hasPro = true
+			traits.hasGemini = true
+		}
+		if slices.Contains(btoks, "gemini") {
+			traits.hasGemini = true
+		}
+		if slices.Contains(btoks, "claude") {
+			traits.hasClaude = true
+		}
+		if slices.Contains(btoks, "gpt") {
+			traits.hasGPT = true
+		}
+	}
+	return traits, thirdParty
 }
 
 func resolveCandidateIndices(family modelFamily, candidates []int) QuotaGroupMatch {
@@ -520,10 +518,10 @@ func MatchQuotaGroup(groups []QuotaGroup, model string) QuotaGroupMatch {
 // Flash/Pro when agy reports a unified Gemini pool.
 func matchQuotaGroup(groups []QuotaGroup, model string) QuotaGroupMatch {
 	family := classifyModelFamily(model)
-	switch family {
-	case modelFamilyNone:
+	if family == modelFamilyNone {
 		return QuotaGroupMatch{Status: QuotaMatchUnpinned, Family: family}
-	case modelFamilyUnknown:
+	}
+	if family == modelFamilyUnknown {
 		return QuotaGroupMatch{Status: QuotaMatchUnknown, Family: family}
 	}
 
@@ -552,29 +550,8 @@ func matchQuotaGroup(groups []QuotaGroup, model string) QuotaGroupMatch {
 		}
 		return resolveCandidateIndices(family, argon)
 
-	case modelFamilyGeminiFlash:
-		var flash []int
-		for i, t := range traits {
-			if t.hasGemini && !t.isArgon && t.hasFlash {
-				flash = append(flash, i)
-			}
-		}
-		if len(flash) > 0 || anyScopedNonArgonGemini {
-			return resolveCandidateIndices(family, flash)
-		}
-		return resolveCandidateIndices(family, unscopedGemini)
-
-	case modelFamilyGeminiPro:
-		var pro []int
-		for i, t := range traits {
-			if t.hasGemini && !t.isArgon && t.hasPro {
-				pro = append(pro, i)
-			}
-		}
-		if len(pro) > 0 || anyScopedNonArgonGemini {
-			return resolveCandidateIndices(family, pro)
-		}
-		return resolveCandidateIndices(family, unscopedGemini)
+	case modelFamilyGeminiFlash, modelFamilyGeminiPro:
+		return matchGeminiQuotaGroup(family, traits, unscopedGemini, anyScopedNonArgonGemini)
 
 	case modelFamilyClaude:
 		var claude []int
@@ -597,6 +574,23 @@ func matchQuotaGroup(groups []QuotaGroup, model string) QuotaGroupMatch {
 	default:
 		return QuotaGroupMatch{Status: QuotaMatchUnknown, Family: family}
 	}
+}
+
+func matchGeminiQuotaGroup(family modelFamily, traits []groupTraits, unscoped []int, anyScoped bool) QuotaGroupMatch {
+	var scoped []int
+	for i, group := range traits {
+		hasFamily := group.hasFlash
+		if family == modelFamilyGeminiPro {
+			hasFamily = group.hasPro
+		}
+		if group.hasGemini && !group.isArgon && hasFamily {
+			scoped = append(scoped, i)
+		}
+	}
+	if len(scoped) > 0 || anyScoped {
+		return resolveCandidateIndices(family, scoped)
+	}
+	return resolveCandidateIndices(family, unscoped)
 }
 
 // groupForModel returns the index of the quota group model draws from, its

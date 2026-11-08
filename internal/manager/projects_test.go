@@ -106,49 +106,7 @@ func TestListProjectsAndResolveWorkspace(t *testing.T) {
 		dataDir:     testDataDir,
 	}
 
-	// Test ListProjects with no query
-	projs, err := m.ListProjects("")
-	if err != nil {
-		t.Fatalf("ListProjects failed: %v", err)
-	}
-	if len(projs) != 2 {
-		t.Fatalf("got %d projects, want 2. Projects: %+v", len(projs), projs)
-	}
-
-	// Verify project fields
-	var extProj, testRepoProj *ProjectInfo
-	for i := range projs {
-		if projs[i].Name == "External App" {
-			extProj = &projs[i]
-		} else if projs[i].Name == "test-repo" {
-			testRepoProj = &projs[i]
-		}
-	}
-	if extProj == nil {
-		t.Fatalf("External App project not found in list")
-	}
-	if extProj.RepositoryURL != "https://github.com/example/external-app.git" {
-		t.Errorf("External App repo URL = %q, want https://github.com/example/external-app.git", extProj.RepositoryURL)
-	}
-	if len(extProj.Worktrees) != 1 {
-		t.Errorf("External App worktrees count = %d, want 1", len(extProj.Worktrees))
-	}
-
-	if testRepoProj == nil {
-		t.Fatalf("test-repo project not found in list")
-	}
-	if testRepoProj.RepositoryURL != "https://github.com/example/test-repo.git" {
-		t.Errorf("test-repo repo URL = %q, want https://github.com/example/test-repo.git", testRepoProj.RepositoryURL)
-	}
-
-	// Test ListProjects query filter
-	filtered, err := m.ListProjects("external")
-	if err != nil {
-		t.Fatalf("ListProjects filter failed: %v", err)
-	}
-	if len(filtered) != 1 || filtered[0].Name != "External App" {
-		t.Errorf("ListProjects filter = %+v, want 1 project [External App]", filtered)
-	}
+	assertProjectDiscovery(t, m)
 
 	// Test ResolveWorkspace with direct path
 	resDirect, err := m.ResolveWorkspace(repoDir, "")
@@ -193,6 +151,54 @@ func TestListProjectsAndResolveWorkspace(t *testing.T) {
 	}
 	if resEmpty.Resolved || resEmpty.Error == "" {
 		t.Errorf("resEmpty should fail with error message: %+v", resEmpty)
+	}
+}
+
+func assertProjectDiscovery(t *testing.T, m *Manager) {
+	t.Helper()
+	// Test ListProjects with no query
+	projs, err := m.ListProjects("")
+	if err != nil {
+		t.Fatalf("ListProjects failed: %v", err)
+	}
+	if len(projs) != 2 {
+		t.Fatalf("got %d projects, want 2. Projects: %+v", len(projs), projs)
+	}
+
+	// Verify project fields
+	var extProj, testRepoProj *ProjectInfo
+	for i := range projs {
+		switch projs[i].Name {
+		case "External App":
+			extProj = &projs[i]
+		case "test-repo":
+			testRepoProj = &projs[i]
+		}
+	}
+	if extProj == nil {
+		t.Fatalf("External App project not found in list")
+	}
+	if extProj.RepositoryURL != "https://github.com/example/external-app.git" {
+		t.Errorf("External App repo URL = %q, want https://github.com/example/external-app.git", extProj.RepositoryURL)
+	}
+	if len(extProj.Worktrees) != 1 {
+		t.Errorf("External App worktrees count = %d, want 1", len(extProj.Worktrees))
+	}
+
+	if testRepoProj == nil {
+		t.Fatalf("test-repo project not found in list")
+	}
+	if testRepoProj.RepositoryURL != "https://github.com/example/test-repo.git" {
+		t.Errorf("test-repo repo URL = %q, want https://github.com/example/test-repo.git", testRepoProj.RepositoryURL)
+	}
+
+	// Test ListProjects query filter
+	filtered, err := m.ListProjects("external")
+	if err != nil {
+		t.Fatalf("ListProjects filter failed: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Name != "External App" {
+		t.Errorf("ListProjects filter = %+v, want 1 project [External App]", filtered)
 	}
 }
 

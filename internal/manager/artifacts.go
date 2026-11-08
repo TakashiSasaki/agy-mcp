@@ -136,31 +136,28 @@ func resolveAllowedRoots(meta jobstore.Meta, jobDir string) []string {
 		addRoot(meta.Cwd)
 		for i := 0; i < len(meta.Args); i++ {
 			arg := meta.Args[i]
-			var d string
 			if arg == "--add-dir" && i+1 < len(meta.Args) {
-				d = meta.Args[i+1]
+				addRoot(meta.Args[i+1])
 				i++
-			} else if strings.HasPrefix(arg, "--add-dir=") {
-				d = strings.TrimPrefix(arg, "--add-dir=")
+			} else if dir, ok := strings.CutPrefix(arg, "--add-dir="); ok {
+				addRoot(dir)
 			}
-			addRoot(d)
 		}
 	}
 	addRoot(jobDir)
 	return roots
 }
 
-func (m *Manager) resolveJobAndRoots(jobID string) (jobstore.Meta, string, []string, error) {
-	meta, err := m.store.Load(jobID)
+func (m *Manager) resolveJobAndRoots(jobID string) (meta jobstore.Meta, jobDir string, roots []string, err error) {
+	meta, err = m.store.Load(jobID)
 	if err != nil {
 		return jobstore.Meta{}, "", nil, fmt.Errorf("load job %s: %w", jobID, err)
 	}
-	jobDir, err := m.store.Dir(jobID)
+	jobDir, err = m.store.Dir(jobID)
 	if err != nil {
 		return jobstore.Meta{}, "", nil, fmt.Errorf("job dir %s: %w", jobID, err)
 	}
-	roots := resolveAllowedRoots(meta, jobDir)
-	return meta, jobDir, roots, nil
+	return meta, jobDir, resolveAllowedRoots(meta, jobDir), nil
 }
 
 type artifactHashReader struct {
@@ -214,14 +211,15 @@ func (m *Manager) ListArtifactsContext(ctx context.Context, req ListArtifactsReq
 	}
 
 	var baseDir string
-	if req.Subpath == "" {
+	switch {
+	case req.Subpath == "":
 		baseDir = artifactBase(meta, jobDir)
-	} else if filepath.IsAbs(req.Subpath) {
+	case filepath.IsAbs(req.Subpath):
 		baseDir = filepath.Clean(req.Subpath)
-	} else if strings.HasPrefix(req.Subpath, "job/") || strings.HasPrefix(req.Subpath, ".job/") {
+	case strings.HasPrefix(req.Subpath, "job/"), strings.HasPrefix(req.Subpath, ".job/"):
 		trimmed := strings.TrimPrefix(strings.TrimPrefix(req.Subpath, "job/"), ".job/")
 		baseDir = filepath.Join(jobDir, trimmed)
-	} else {
+	default:
 		baseDir = filepath.Join(artifactBase(meta, jobDir), req.Subpath)
 	}
 
@@ -253,8 +251,9 @@ func (m *Manager) ListArtifactsContext(ctx context.Context, req ListArtifactsReq
 			return nil
 		}
 		if req.Pattern != "" {
-			matched, mErr := filepath.Match(req.Pattern, d.Name())
-			if mErr != nil || !matched {
+			// filepath.Match returns false for a malformed pattern.
+			matched, _ := filepath.Match(req.Pattern, d.Name())
+			if !matched {
 				return nil
 			}
 		}

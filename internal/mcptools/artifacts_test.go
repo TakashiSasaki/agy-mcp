@@ -16,8 +16,6 @@ func TestArtifactToolsOverMCP(t *testing.T) {
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
 
-	mgr := manager.New(config.Config{StateDir: stateDir})
-
 	// Create test file
 	reportDir := filepath.Join(workspace, "reports")
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
@@ -38,7 +36,7 @@ func TestArtifactToolsOverMCP(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	mgr = manager.New(config.Config{StateDir: stateDir})
+	mgr := manager.New(config.Config{StateDir: stateDir})
 
 	cs := connect(t, mgr, nil)
 

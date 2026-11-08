@@ -15,12 +15,12 @@ import (
 	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
 )
 
-func setupTestJobWithFiles(t *testing.T) (*Manager, string, string) {
+func setupTestJobWithFiles(t *testing.T) (mgr *Manager, jobID, workspace string) {
 	t.Helper()
-	workspace := t.TempDir()
+	workspace = t.TempDir()
 	stateDir := t.TempDir()
 
-	mgr := New(config.Config{StateDir: stateDir})
+	mgr = New(config.Config{StateDir: stateDir})
 
 	// Create test artifact files in workspace
 	artDir := filepath.Join(workspace, "artifacts")
@@ -48,7 +48,7 @@ func setupTestJobWithFiles(t *testing.T) (*Manager, string, string) {
 		t.Fatal(err)
 	}
 
-	jobID := "test-job-artifact-01"
+	jobID = "test-job-artifact-01"
 	dir, err := mgr.store.Create(jobstore.Meta{
 		ID:  jobID,
 		Cwd: workspace,
