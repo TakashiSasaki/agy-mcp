@@ -104,3 +104,25 @@ func TestWorkspaceResolutionExposesFullHeadForPreconditions(t *testing.T) {
 		t.Fatalf("unresolved selection leaked full head: %+v", denied)
 	}
 }
+
+func TestGitPreconditionUsesBranchNameWhenTagSharesName(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	createTestGitRepo(t, repo)
+	workspaceGit(t, repo, "tag", "main")
+	workspaceGit(t, repo, "commit", "--allow-empty", "-m", "advance branch beyond tag")
+	head, err := readGitHead(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := resolveWorkspaceDirectory(repo, "main")
+	if !resolved.Resolved || resolved.Branch != "main" || resolved.HeadFull != head {
+		t.Fatalf("resolve branch sharing tag name: %+v", resolved)
+	}
+	if err := checkGitPreconditions(StartRequest{Cwd: resolved.Path, ExpectedGitBranch: resolved.Branch, ExpectedGitHead: resolved.HeadFull}); err != nil {
+		t.Fatalf("preflight rejected the selected branch: %v", err)
+	}
+	branch, short, _ := DetectGitMetadata(repo)
+	if branch != "main" || short == "" || !strings.HasPrefix(head, short) {
+		t.Fatalf("unexpected execution branch/head: %q %q", branch, short)
+	}
+}

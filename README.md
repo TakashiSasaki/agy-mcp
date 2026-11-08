@@ -335,7 +335,7 @@ For example, a job may be `done`, have `agent_outcome: "success"` and CLI `proce
 
 If the supervisor has stopped and its completion marker is unavailable, the server uses a valid process receipt to recover the job outcome, including a recorded spawn failure. A CLI launch error is available through the job's stderr log. A saved answer is still available for inspection. Jobs with only a saved response keep the legacy recovery behavior.
 
-The supervisor appends timestamped CLI events while the job runs and records its process outcome before the completion sentinel. These files survive ordinary timeout/cancellation with the job's existing retention. The journal cap is 64 MiB per job. `capture.truncated`, `capture.dropped_events`, `capture.malformed_lines`, `skipped_records` and `incomplete_record` expose lost evidence. `capture.closed` describes capture closure, not task success. Incomplete live records are withheld at the same cursor; a terminal incomplete record is counted as lost and skipped. Cursors bind job, stream, file identity, generation and nearby preceding content, and reject replaced/truncated streams rather than silently rewind. None of these reads marks the final model answer collected. Older jobs can have `available: false` and no process receipt; their missing history is not reconstructed by another model turn.
+The supervisor appends timestamped CLI events while the job runs and records its process outcome before the completion sentinel. These files survive ordinary timeout/cancellation with the job's existing retention. The journal cap is 64 MiB per job. `capture.truncated`, `capture.dropped_events`, `capture.malformed_lines`, `skipped_records` and `incomplete_record` expose lost evidence. `capture.closed` describes capture closure, not task success. Incomplete live records are withheld at the same cursor; a terminal incomplete record is counted as lost and skipped. A complete record above the structured reader limit, or one whose metadata alone exceeds the page budget, increments `skipped_records`. Later records remain readable. The budget covers the JSON events array. Inline payloads that exceed it can be omitted while retaining metadata. Use `agy_logs` to read the original bytes. Cursors bind job, stream, file identity, generation and nearby preceding content, and reject replaced/truncated streams rather than silently rewind. None of these reads marks the final model answer collected. Older jobs can have `available: false` and no process receipt; their missing history is not reconstructed by another model turn.
 
 ### Planned execution controls
 
@@ -383,9 +383,12 @@ Omitting `include_result` preserves the full-result `agy_status`, `agy_wait` and
 
 For new jobs, `expected_git_branch` can require an exact branch name and
 `expected_git_head` can require a full 40- or 64-character hexadecimal commit ID.
+Use the branch name as stored under `refs/heads/` even when a tag shares it.
 Use `head_full` from `agy_resolve_workspace` (or `git rev-parse HEAD`); the
 existing short `head` display remains unchanged and is not a valid full-ID
-precondition. `head_full` is omitted for unavailable or uncommitted Git state. Hex case is normalized. The manager checks these
+precondition. An unborn branch can resolve by name without either HEAD field.
+`head_full` is omitted when the commit cannot be resolved. Hex case is
+normalized. The manager checks these
 expectations before creating a fresh job and refuses mismatches or unverifiable
 Git state with `workspace_mismatch` and `job_started: false`. Both expectations
 are included in idempotency identity and retained in job metadata. Same-key
@@ -424,6 +427,7 @@ or `head`. The resolver never implicitly picks main or the default branch.
 Specify a full branch name or an absolute candidate directory and resolve again;
 candidate display strings themselves are not paths to pass as cwd. Missing
 branches/directories return both flags false and an error, with no fallback path.
+If a selected worktree changes branch or HEAD during discovery, resolve it again.
 The `ambiguous` boolean is always present.
 
 Exact case-sensitive Git branch names take precedence over convenience aliases.

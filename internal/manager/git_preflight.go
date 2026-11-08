@@ -25,11 +25,11 @@ func checkGitPreconditions(req StartRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if req.ExpectedGitBranch != "" {
-		out, err := probeCmd(ctx, "git", "-C", req.Cwd, "symbolic-ref", "--short", "-q", "HEAD").Output()
+		actual, err := readGitBranch(ctx, req.Cwd)
 		if err != nil {
 			return refusedStart("workspace_mismatch", "change_request", false, fmt.Errorf("cannot verify expected Git branch %q in %q: %w", req.ExpectedGitBranch, req.Cwd, err))
 		}
-		if actual := strings.TrimSpace(string(out)); actual != req.ExpectedGitBranch {
+		if actual != req.ExpectedGitBranch {
 			return refusedStart("workspace_mismatch", "change_request", false, fmt.Errorf("git branch in %q is %q, expected %q", req.Cwd, actual, req.ExpectedGitBranch))
 		}
 	}
@@ -43,6 +43,20 @@ func checkGitPreconditions(req StartRequest) error {
 		}
 	}
 	return nil
+}
+
+// readGitBranch returns the exact branch name. Git's short symbolic ref
+// can include "heads/" when a tag shares the same name.
+func readGitBranch(ctx context.Context, cwd string) (string, error) {
+	out, err := probeCmd(ctx, "git", "-C", cwd, "symbolic-ref", "-q", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	branch, ok := strings.CutPrefix(strings.TrimSpace(string(out)), "refs/heads/")
+	if !ok || branch == "" {
+		return "", fmt.Errorf("git returned an invalid branch ref")
+	}
+	return branch, nil
 }
 
 // readGitHead returns an unabridged commit object ID without a model turn.

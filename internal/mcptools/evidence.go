@@ -19,7 +19,7 @@ type eventsInput struct {
 	JobID    string `json:"job_id" jsonschema:"job whose live or retained CLI events to retrieve"`
 	Cursor   string `json:"cursor,omitempty" jsonschema:"next_cursor from the same journal generation; omit to start at the beginning"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"maximum records scanned per page; default 50, maximum 200"`
-	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"event JSON byte budget excluding response metadata; default 65536, minimum 1024, maximum 262144; oversized payloads are omitted with an explicit flag"`
+	MaxBytes int    `json:"max_bytes,omitempty" jsonschema:"byte budget for the events JSON array; response metadata is additional; default 65536, minimum 1024, maximum 262144; oversized payloads are omitted with an explicit flag"`
 }
 
 type logsInput struct {
@@ -80,7 +80,7 @@ func addEvidenceTool[In, Out any](s *toolServer, tool *mcp.Tool, handler mcp.Too
 func registerEvidence(s *toolServer, mgr *manager.Manager) {
 	addEvidenceTool(s, &mcp.Tool{
 		Name: toolAgyEvents, Title: "Read live agy events", Annotations: annReadLocal,
-		Description: "Read durable, timestamped CLI events during a job or after timeout/cancellation without another model turn. Use agy_status for a compact snapshot and agy_logs for the original journal bytes or CLI stderr. Retain next_cursor at EOF to follow appends; partial records are withheld, and dropped/omitted evidence is explicit. The journal is bounded to 64 MiB per job and expires with the job. Existing jobs may have no capture. process describes agy itself; payload contains only fields emitted by the CLI. Tool command arguments, exit codes and shell stdout are unknown unless the CLI emits them; a tool step marked DONE is not a successful test verdict. Use agy_verification to parse a selected test report and agy_list_artifacts to locate it.",
+		Description: "Read durable, timestamped CLI events during a job or after timeout/cancellation without another model turn. Use agy_status for a compact snapshot and agy_logs for the original journal bytes or CLI stderr. Retain next_cursor at EOF to follow appends; partial records are withheld, and dropped/omitted evidence is explicit. Complete records over the structured reader limit or whose metadata alone exceeds the page budget count as skipped and later records remain readable. Use agy_logs for raw bytes. The journal is bounded to 64 MiB per job and expires with the job. Existing jobs may have no capture. process describes agy itself; payload contains only fields emitted by the CLI. Tool command arguments, exit codes and shell stdout are unknown unless the CLI emits them; a tool step marked DONE is not a successful test verdict. Use agy_verification to parse a selected test report and agy_list_artifacts to locate it.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in eventsInput) (*mcp.CallToolResult, manager.EventsPage, error) {
 		out, err := mgr.Events(manager.EventsRequest{JobID: in.JobID, Cursor: in.Cursor, Limit: in.Limit, MaxBytes: in.MaxBytes})
 		return nil, out, err

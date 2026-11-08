@@ -86,3 +86,29 @@ func TestJournalBoundsAndCompleteness(t *testing.T) {
 		t.Fatalf("new generation or decode loss was hidden: %+v %v", state, err)
 	}
 }
+
+// Mutation guard: HTML escaping inflates an ordinary CLI payload beyond the
+// capture budget even though the JSON file can preserve its literal text.
+func TestJournalDoesNotExpandHTMLCharacters(t *testing.T) {
+	dir := t.TempDir()
+	journal, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.state.MaxBytes = 512
+	raw := []byte(`{"event":"step_update","detail":"` + strings.Repeat("&<>", 64) + `"}`)
+	journal.Append(raw)
+	journal.Close()
+	capture, err := ReadCaptureDir(dir)
+	if err != nil || capture == nil || capture.Truncated || capture.DroppedEvents != 0 {
+		t.Fatalf("literal payload did not fit: %+v, %v", capture, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, EventsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record JournalRecord
+	if err := json.Unmarshal(data, &record); err != nil || !bytes.Equal(record.Event, raw) {
+		t.Fatalf("payload changed: %s, %v", record.Event, err)
+	}
+}

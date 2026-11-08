@@ -1,6 +1,7 @@
 package jobstore
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -169,15 +170,18 @@ func (j *Journal) Append(raw []byte) {
 		j.state.DroppedEvents++
 		return
 	}
-	data, err := json.Marshal(JournalRecord{ObservedAt: time.Now().UTC(), Event: json.RawMessage(raw)})
-	if err == nil && j.bytes+int64(len(data)+1) > j.state.MaxBytes {
+	var line bytes.Buffer
+	encoder := json.NewEncoder(&line)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(JournalRecord{ObservedAt: time.Now().UTC(), Event: json.RawMessage(raw)})
+	if err == nil && j.bytes+int64(line.Len()) > j.state.MaxBytes {
 		err = io.ErrShortBuffer
 	}
 	if err == nil {
 		var n int
-		n, err = j.file.Write(append(data, '\n'))
+		n, err = j.file.Write(line.Bytes())
 		j.bytes += int64(n)
-		if err == nil && n != len(data)+1 {
+		if err == nil && n != line.Len() {
 			err = io.ErrShortWrite
 		}
 	}

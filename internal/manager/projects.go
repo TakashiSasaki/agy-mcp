@@ -295,22 +295,16 @@ func parseWorktreeList(output, bareDir string) []ProjectWorktree {
 		if curPath != "" && !isBare && curPath != bareDir {
 			cleanPath := filepath.Clean(curPath)
 			if fi, err := os.Stat(cleanPath); err == nil && fi.IsDir() {
+				var head, fullHead string
 				isClean := false
 				if validExpectedGitHead(curHead) && strings.Trim(curHead, "0") != "" {
+					head, fullHead = curHead[:7], curHead
 					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 					dirty := gitDirty(ctx, cleanPath)
 					cancel()
 					isClean = dirty != nil && !*dirty
 				}
 				branch := strings.TrimPrefix(curBranch, "refs/heads/")
-				head := curHead
-				fullHead := curHead
-				if !validExpectedGitHead(fullHead) {
-					fullHead = ""
-				}
-				if len(head) > 7 {
-					head = head[:7]
-				}
 				worktrees = append(worktrees, ProjectWorktree{
 					Path:     cleanPath,
 					HeadFull: fullHead,
@@ -432,13 +426,20 @@ func resolveWorkspaceDirectory(path, branchQuery string) ResolveWorkspaceResult 
 	if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
 		return ResolveWorkspaceResult{Error: fmt.Sprintf("workspace directory %q does not exist or is unavailable", path)}
 	}
-	branch, head, _ := DetectGitMetadata(path)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// An unborn branch has a symbolic ref before it has a commit.
+	branch, _ := readGitBranch(ctx, path)
+	var head string
 	if branchQuery != "" && !strings.EqualFold(branch, branchQuery) && !strings.EqualFold(filepath.Base(path), branchQuery) {
 		return ResolveWorkspaceResult{Error: fmt.Sprintf("branch %q does not match directory %q (branch %q)", branchQuery, path, branch)}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
 	fullHead, _ := readGitHead(ctx, path)
+	if fullHead != "" {
+		if out, err := probeCmd(ctx, "git", "-C", path, "rev-parse", "--short", fullHead).Output(); err == nil {
+			head = strings.TrimSpace(string(out))
+		}
+	}
 	return ResolveWorkspaceResult{Resolved: true, Path: path, Branch: branch, Head: head, HeadFull: fullHead}
 }
 
@@ -478,10 +479,12 @@ func resolveProjectWorktree(proj ProjectInfo, branchQuery string) ResolveWorkspa
 			Error: fmt.Sprintf("branch %q not found in project %q; choose an available branch or path", branchQuery, proj.Name)}
 	case 1:
 		wt := matches[0]
-		// Recheck existence instead of returning a path that vanished since discovery.
 		out := resolveWorkspaceDirectory(wt.Path, "")
 		if out.Resolved {
-			out.Branch, out.Head, out.HeadFull = wt.Branch, wt.Head, wt.HeadFull
+			if out.Branch != wt.Branch || out.HeadFull != wt.HeadFull {
+				return ResolveWorkspaceResult{Error: fmt.Sprintf("workspace %q changed branch or HEAD during discovery; resolve it again", wt.Path)}
+			}
+			out.Head = wt.Head
 		}
 		return out
 	default:

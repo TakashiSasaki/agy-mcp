@@ -17,11 +17,8 @@ func DetectGitMetadata(cwd string) (branch, head string, dirty *bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	// 1. Resolve branch name (symbolic-ref); on detached HEAD or shallow clones it fails silently
-	cmdBranch := probeCmd(ctx, "git", "-C", cwd, "symbolic-ref", "--short", "-q", "HEAD")
-	if out, err := cmdBranch.Output(); err == nil {
-		branch = strings.TrimSpace(string(out))
-	}
+	// 1. Resolve the branch name, which is absent on detached HEAD.
+	branch, _ = readGitBranch(ctx, cwd)
 
 	// 2. Resolve short commit SHA (rev-parse)
 	cmdHead := probeCmd(ctx, "git", "-C", cwd, "rev-parse", "--short", "HEAD")

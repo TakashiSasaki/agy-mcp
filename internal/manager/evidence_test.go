@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -344,5 +345,159 @@ func TestEvidenceBoundsAndMissingHistory(t *testing.T) {
 	ids, err := store.List()
 	if err != nil || len(ids) != 1 || m.Collected(id) {
 		t.Fatalf("read-only boundary changed job store: %v %v", ids, err)
+	}
+}
+
+// Journal encoding can expand a valid CLI line beyond the reader's record cap.
+func TestEvidenceOversizedJournalContinuesPastRecord(t *testing.T) {
+	m, _, id, dir := stageEvidenceJob(t, false)
+	var legacy bytes.Buffer
+	encoder := json.NewEncoder(&legacy) // Legacy journals used HTML escaping.
+	for _, raw := range []string{`{"event":"init"}`,
+		`{"event":"step_update","detail":"` + strings.Repeat("&", 2<<20) + `"}`,
+		`{"event":"result"}`} {
+		if err := encoder.Encode(jobstore.JournalRecord{ObservedAt: time.Now(), Event: json.RawMessage(raw)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, jobstore.EventsFile), legacy.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := m.Events(EventsRequest{JobID: id, MaxBytes: 1024, Limit: 1})
+	if err != nil || len(page.Events) != 1 || page.Events[0].Kind != "init" || !page.HasMore {
+		t.Fatalf("initial page = %+v, err = %v", page, err)
+	}
+	cursor := page.NextCursor
+	page, err = m.Events(EventsRequest{JobID: id, Cursor: cursor, MaxBytes: 1024})
+	if err != nil || page.SkippedRecords != 1 || page.NextCursor == cursor || !page.HasMore ||
+		page.IncompleteRecord || page.PendingRecord || len(page.Events) != 0 {
+		t.Fatalf("oversized page = %+v, err = %v", page, err)
+	}
+	page, err = m.Events(EventsRequest{JobID: id, Cursor: page.NextCursor, MaxBytes: 1024})
+	if err != nil || len(page.Events) != 1 || page.Events[0].Kind != "result" ||
+		page.HasMore || page.SkippedRecords != 0 {
+		t.Fatalf("terminal page = %+v, err = %v", page, err)
+	}
+}
+
+func TestEvidenceOmitsPayloadThatExpandsOnWire(t *testing.T) {
+	m, _, id, dir := stageEvidenceJob(t, false)
+	journal, err := jobstore.OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.Append([]byte(`{"event":"step_update","detail":"` + strings.Repeat("&", 300) + `"}`))
+	journal.Append([]byte(`{"event":"result"}`))
+	journal.Close()
+
+	page, err := m.Events(EventsRequest{JobID: id, MaxBytes: 1024})
+	if err != nil || len(page.Events) != 2 || !page.Events[0].PayloadOmitted ||
+		page.Events[0].Payload != nil || page.Events[1].Kind != "result" || page.HasMore {
+		t.Fatalf("wire expansion blocked the page: %+v, %v", page, err)
+	}
+}
+
+func TestEvidenceSkipsMetadataLargerThanPage(t *testing.T) {
+	m, _, id, dir := stageEvidenceJob(t, false)
+	journal, err := jobstore.OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.Append([]byte(`{"event":"step_update","step_update":{"step_type":"` + strings.Repeat("x", 1024) + `"}}`))
+	journal.Append([]byte(`{"event":"result"}`))
+	journal.Close()
+
+	page, err := m.Events(EventsRequest{JobID: id, MaxBytes: 1024})
+	if err != nil || page.SkippedRecords != 1 || len(page.Events) != 1 ||
+		page.Events[0].Kind != "result" || page.HasMore {
+		t.Fatalf("oversized metadata blocked the result event: %+v, %v", page, err)
+	}
+}
+
+func TestEvidenceBudgetIncludesEventArray(t *testing.T) {
+	m, _, id, dir := stageEvidenceJob(t, false)
+	journal, err := jobstore.OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"event":"step_update","detail":"` + strings.Repeat("x", maxInlineEvent) + `"}`)
+	for range 12 {
+		journal.Append(payload)
+	}
+	journal.Close()
+	full, err := m.Events(EventsRequest{JobID: id})
+	if err != nil || len(full.Events) != 12 {
+		t.Fatalf("full page: %d events, %v", len(full.Events), err)
+	}
+	// Reserve exactly one byte less than all entries as metadata. This
+	// distinguishes a budget that includes JSON array punctuation.
+	encoded, err := json.Marshal(full.Events)
+	if err != nil || len(encoded) <= 1024 {
+		t.Fatalf("invalid budget fixture: %d bytes, %v", len(encoded), err)
+	}
+	limit := len(encoded) - 1
+	page, err := m.Events(EventsRequest{JobID: id, MaxBytes: limit})
+	if err != nil || !page.HasMore || page.SkippedRecords != 0 {
+		t.Fatalf("expected pagination within %d bytes: %+v, %v", limit, page, err)
+	}
+	pageData, err := json.Marshal(page.Events)
+	if err != nil || len(pageData) > limit {
+		t.Fatalf("event array exceeded %d bytes: %d, %v", limit, len(pageData), err)
+	}
+}
+
+func TestEvidenceOversizedJournalKeepsIncompleteLiveCursor(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		name := "append"
+		if terminal {
+			name = "terminal"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, store, id, dir := stageEvidenceJob(t, true)
+			journal, err := jobstore.OpenJournal(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			journal.Append([]byte(`{"event":"init"}`))
+			first, err := m.Events(EventsRequest{JobID: id})
+			if err != nil || len(first.Events) != 1 {
+				t.Fatalf("initial page = %+v, err = %v", first, err)
+			}
+			f, err := os.OpenFile(filepath.Join(dir, jobstore.EventsFile), os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = f.Close() }()
+			if _, err := f.WriteString(`{"observed_at":"2026-11-03T00:00:00Z","event":{"event":"step_update","detail":"` +
+				strings.Repeat("x", maxJournalRecord)); err != nil {
+				t.Fatal(err)
+			}
+
+			request := EventsRequest{JobID: id, Cursor: first.NextCursor, MaxBytes: 1024}
+			pending, err := m.Events(request)
+			if err != nil || pending.NextCursor != request.Cursor || pending.HasMore ||
+				!pending.IncompleteRecord || !pending.PendingRecord || pending.SkippedRecords != 0 {
+				t.Fatalf("live oversized suffix = %+v, err = %v", pending, err)
+			}
+			if terminal {
+				if err := store.WriteExitCode(id, 0); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := f.WriteString("\"}}\n"); err != nil {
+				t.Fatal(err)
+			}
+
+			page, err := m.Events(request)
+			if err != nil || page.NextCursor == request.Cursor || page.HasMore ||
+				page.PendingRecord || page.SkippedRecords != 1 || page.IncompleteRecord != terminal {
+				t.Fatalf("resolved oversized suffix = %+v, err = %v", page, err)
+			}
+			end, err := m.Events(EventsRequest{JobID: id, Cursor: page.NextCursor})
+			if err != nil || end.HasMore || end.SkippedRecords != 0 || end.IncompleteRecord {
+				t.Fatalf("suffix was counted again: %+v, err = %v", end, err)
+			}
+		})
 	}
 }

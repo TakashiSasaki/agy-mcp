@@ -375,6 +375,9 @@ func (m *Manager) Events(req EventsRequest) (EventsPage, error) {
 	if err != nil {
 		return out, err
 	}
+	if size > jobstore.MaxEventJournalBytes {
+		return out, fmt.Errorf("event journal exceeds %d bytes", jobstore.MaxEventJournalBytes)
+	}
 	out.Available = true
 	reader := bufio.NewReader(io.NewSectionReader(f, c.Offset, size-c.Offset))
 	if err := scanEventRecords(reader, &c, size, budget, limit, &out); err != nil {
@@ -385,16 +388,19 @@ func (m *Manager) Events(req EventsRequest) (EventsPage, error) {
 	return out, err
 }
 
-func readJournalLine(r *bufio.Reader) ([]byte, error) {
-	var line []byte
+// An oversized line still consumes its full byte range. Drain it without
+// retaining payload bytes past the record limit so later events stay readable.
+func readJournalLine(r *bufio.Reader) (line []byte, size int64, readErr error) {
 	for {
 		part, err := r.ReadSlice('\n')
-		if len(line)+len(part) > maxJournalRecord {
-			return nil, fmt.Errorf("journal record exceeds %d bytes", maxJournalRecord)
+		size += int64(len(part))
+		if size <= maxJournalRecord {
+			line = append(line, part...)
+		} else {
+			line = nil
 		}
-		line = append(line, part...)
 		if !errors.Is(err, bufio.ErrBufferFull) {
-			return line, err
+			return line, size, err
 		}
 	}
 }
@@ -420,18 +426,18 @@ func readEvidenceOutcomes(dir string) (*jobstore.ProcessOutcome, string, error) 
 }
 
 func scanEventRecords(reader *bufio.Reader, c *evidenceCursor, size int64, budget, limit int, out *EventsPage) error {
-	readBytes := 0
-	used := 0
+	var readBytes int64
+	used := 1 // Array brackets and separators add one byte per entry plus one.
 	for scanned := 0; scanned < limit && c.Offset < size && readBytes < maxJournalRecord; scanned++ {
-		line, readErr := readJournalLine(reader)
-		readBytes += len(line)
+		line, recordBytes, readErr := readJournalLine(reader)
+		readBytes += recordBytes
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return readErr
 		}
-		if len(line) == 0 {
+		if recordBytes == 0 {
 			break
 		}
-		if line[len(line)-1] != '\n' {
+		if errors.Is(readErr, io.EOF) {
 			out.IncompleteRecord = true
 			out.PendingRecord = out.State == StateRunning && (out.Capture == nil || !out.Capture.Closed)
 			if !out.PendingRecord {
@@ -440,21 +446,32 @@ func scanEventRecords(reader *bufio.Reader, c *evidenceCursor, size int64, budge
 			}
 			break
 		}
-		entry, decodeErr := decodeJournalEntry(line, c.Offset, budget-used)
+		if recordBytes > maxJournalRecord {
+			out.SkippedRecords++
+			c.Offset += recordBytes
+			continue
+		}
+		entry, decodeErr := decodeJournalEntry(line, c.Offset, budget-used-1)
 		if decodeErr != nil {
 			out.SkippedRecords++
 			c.Offset += int64(len(line))
 			continue
 		}
 		encoded, _ := json.Marshal(entry)
-		if used+len(encoded) > budget && len(out.Events) > 0 {
+		if len(encoded) >= budget-used && !entry.PayloadOmitted {
+			entry.Payload, entry.PayloadOmitted = nil, true
+			encoded, _ = json.Marshal(entry)
+		}
+		if len(encoded)+2 > budget {
+			out.SkippedRecords++
+			c.Offset += recordBytes
+			continue
+		}
+		if used+len(encoded)+1 > budget {
 			break
 		}
-		if used+len(encoded) > budget {
-			return fmt.Errorf("max_bytes too small for event metadata")
-		}
 		out.Events = append(out.Events, entry)
-		used += len(encoded)
+		used += len(encoded) + 1
 		c.Offset += int64(len(line))
 	}
 	return nil

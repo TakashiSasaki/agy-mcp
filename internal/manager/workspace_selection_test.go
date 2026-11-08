@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -74,18 +73,23 @@ func TestResolveWorkspaceRequiresUniqueWorktree(t *testing.T) {
 // Mutation guard: full Git branch matches must precede case/folder aliases,
 // and a single vanished worktree must not be reported resolved.
 func TestWorkspaceExactBranchPrecedesAliases(t *testing.T) {
-	root := t.TempDir()
-	paths := []string{filepath.Join(root, "literal"), filepath.Join(root, "feature", "review"), filepath.Join(root, "hotfix", "review")}
-	for _, path := range paths {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	project := ProjectInfo{Name: "aliases", Worktrees: []ProjectWorktree{
-		{Path: paths[1], Branch: "feature/review"},
-		{Path: paths[0], Branch: "review"},
-		{Path: paths[2], Branch: "hotfix/review"},
-	}}
+	paths := []string{filepath.Join(root, "literal"), filepath.Join(root, "feature", "review"), filepath.Join(root, "hotfix", "review")}
+	branches := []string{"review", "feature/review", "hotfix/review"}
+	project := ProjectInfo{Name: "aliases"}
+	for _, i := range []int{1, 0, 2} {
+		path := paths[i]
+		createTestGitRepo(t, path)
+		workspaceGit(t, path, "switch", "-c", branches[i])
+		_, _, trees := inspectProjectGit(path)
+		if len(trees) != 1 {
+			t.Fatalf("invalid worktree fixture for %q: %+v", path, trees)
+		}
+		project.Worktrees = append(project.Worktrees, trees[0])
+	}
 	out := resolveProjectWorktree(project, "review")
 	if !out.Resolved || out.Ambiguous || out.Path != paths[0] || out.Branch != "review" {
 		t.Fatalf("exact branch did not outrank earlier aliases: %+v", out)
@@ -98,5 +102,75 @@ func TestWorkspaceExactBranchPrecedesAliases(t *testing.T) {
 	out = resolveProjectWorktree(project, "")
 	if out.Resolved || out.Ambiguous || out.Path != "" || out.Error == "" {
 		t.Fatalf("vanished directory was resolved: %+v", out)
+	}
+}
+
+// Mutation guard: Git emits a zero HEAD in porcelain output for an unborn
+// branch. The branch is selectable, but it has no commit to pin.
+func TestResolveWorkspaceUnbornBranchHasNoHead(t *testing.T) {
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceGit(t, path, "init", "-b", "main")
+	projects := t.TempDir()
+	writeProjectResources(t, projects, "unborn.json", "unborn", "Unborn", path)
+	m := &Manager{projectsDir: projects, dataDir: t.TempDir()}
+	projs, err := m.ListProjects("")
+	if err != nil || len(projs) != 1 || len(projs[0].Worktrees) != 1 {
+		t.Fatalf("unborn project listing: %+v, %v", projs, err)
+	}
+	if wt := projs[0].Worktrees[0]; wt.Branch != "main" || wt.Head != "" || wt.HeadFull != "" {
+		t.Errorf("unborn branch advertised a commit: %+v", wt)
+	}
+	for _, query := range []string{"unborn", path} {
+		got, err := m.ResolveWorkspace(query, "main")
+		if err != nil || !got.Resolved || got.Ambiguous || got.Path != path || got.Branch != "main" || got.Head != "" || got.HeadFull != "" {
+			t.Errorf("unborn branch %q: %+v, %v", query, got, err)
+		}
+	}
+	plain := t.TempDir()
+	got, err := m.ResolveWorkspace(plain, "")
+	if err != nil || !got.Resolved || got.Ambiguous || got.Path != plain || got.Branch != "" || got.Head != "" || got.HeadFull != "" {
+		t.Fatalf("plain directory: %+v, %v", got, err)
+	}
+}
+
+// Mutation guard: resolution must revalidate the selected worktree's Git
+// identity, including branch-only and commit-only changes after discovery.
+func TestResolveWorkspaceRefusesStaleGitSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"branch", []string{"switch", "-c", "moved"}},
+		{"commit", []string{"commit", "--allow-empty", "-m", "moved"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "checkout")
+			createTestGitRepo(t, path)
+			_, _, trees := inspectProjectGit(path)
+			if len(trees) != 1 || trees[0].Branch != "main" || trees[0].HeadFull == "" {
+				t.Fatalf("invalid discovery fixture: %+v", trees)
+			}
+			proj := ProjectInfo{Name: "test project", Worktrees: trees}
+			if got := resolveProjectWorktree(proj, "main"); !got.Resolved || got.HeadFull != trees[0].HeadFull {
+				t.Fatalf("stable snapshot did not resolve: %+v", got)
+			}
+			workspaceGit(t, path, tc.args...)
+			got := resolveProjectWorktree(proj, "main")
+			if got.Resolved || got.Ambiguous || got.Path != "" || got.Branch != "" || got.Head != "" || got.HeadFull != "" || got.Error == "" {
+				t.Fatalf("stale %s was presented as resolved: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
+func workspaceGit(t *testing.T, path string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = path
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
 }
