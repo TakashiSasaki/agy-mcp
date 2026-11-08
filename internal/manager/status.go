@@ -950,7 +950,7 @@ func (m *Manager) frozenElapsed(meta jobstore.Meta, running time.Duration, termi
 // is truncated, not read whole), and the buffer still grows on its own if the
 // file changed since the Stat.
 func readFile(p string) (string, error) {
-	f, err := os.Open(p)
+	f, info, err := jobstore.OpenRegularFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
@@ -967,10 +967,8 @@ func readFile(p string) (string, error) {
 	// LimitReader can ever deliver; reserving exactly maxReadBytes instead buys
 	// back those 512 bytes and pays a 32 MiB copy to discover EOF (measured on a
 	// file over the cap: 100.7 MB allocated per read against 33.6 MB, and 3.5ms
-	// against 2.4ms). A Stat failure costs only the pre-sizing, so it is not
-	// reported; a zero or negative size skips it (Grow panics on a negative
-	// argument).
-	if info, serr := f.Stat(); serr == nil && info.Size() > 0 {
+	// against 2.4ms). A zero or negative size skips pre-sizing.
+	if info.Size() > 0 {
 		buf.Grow(int(min(info.Size(), maxReadBytes) + bytes.MinRead))
 	}
 	if _, err := buf.ReadFrom(io.LimitReader(f, maxReadBytes)); err != nil {
@@ -984,7 +982,7 @@ func readFile(p string) (string, error) {
 // tail is the real end of the stream even when the file is far larger than n.
 // A missing file yields "" with no error.
 func tailFile(path string, n int64) (string, error) {
-	f, err := os.Open(path)
+	f, info, err := jobstore.OpenRegularFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
@@ -992,10 +990,6 @@ func tailFile(path string, n int64) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
 	start := int64(0)
 	if size := info.Size(); size > n {
 		start = size - n

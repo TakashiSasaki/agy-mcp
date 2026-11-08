@@ -33,6 +33,8 @@ type JournalRecord struct {
 // ProcessOutcomeSource identifies receipts written by the supervisor.
 const ProcessOutcomeSource = "supervisor"
 
+const maxProcessReceiptBytes = 4096
+
 // ProcessOutcome describes agy, never a shell command launched by the model.
 type ProcessOutcome struct {
 	Source            string     `json:"source" jsonschema:"supervisor; observes the agy CLI process, not individual model tool commands"`
@@ -70,12 +72,8 @@ type ProcessCompletion struct {
 // when the ordinary completion marker could not be published. The supervisor
 // writes the receipt after cleanup, while EndedAt describes the CLI process.
 func ReadProcessCompletion(dir string) (ProcessCompletion, bool) {
-	// A supervisor receipt is a small regular file. Ignore other shapes so a
-	// damaged store cannot stall status on a named pipe or a large file.
-	const maxReceiptBytes = 4096
-	path := filepath.Join(dir, ProcessFile)
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxReceiptBytes {
+	data, info, err := readReplacedFile(filepath.Join(dir, ProcessFile), maxProcessReceiptBytes)
+	if err != nil {
 		return ProcessCompletion{}, false
 	}
 	// Keep the raw field so an explicit null (spawn failure) is distinguishable
@@ -84,8 +82,7 @@ func ReadProcessCompletion(dir string) (ProcessCompletion, bool) {
 		ProcessOutcome
 		ExitCode json.RawMessage `json:"exit_code"`
 	}
-	data, err := readReplaced(path)
-	if err != nil || json.Unmarshal(data, &o) != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() {
+	if json.Unmarshal(data, &o) != nil || o.Source != ProcessOutcomeSource || o.EndedAt.IsZero() {
 		return ProcessCompletion{}, false
 	}
 	if string(o.ExitCode) == "null" {
@@ -125,7 +122,7 @@ func WriteProcessDir(dir string, outcome ProcessOutcome) error {
 }
 
 func ReadProcessDir(dir string) (*ProcessOutcome, error) {
-	data, err := readReplaced(filepath.Join(dir, ProcessFile))
+	data, _, err := readReplacedFile(filepath.Join(dir, ProcessFile), maxProcessReceiptBytes)
 	if err != nil {
 		return nil, err
 	}

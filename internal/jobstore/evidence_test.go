@@ -59,6 +59,21 @@ func TestReadProcessCompletionRejectsImpossibleSignalStatus(t *testing.T) {
 	}
 }
 
+func TestProcessEvidenceRejectsOversizedReceipt(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{"source":"supervisor","ended_at":"2026-11-07T01:02:03Z","exit_code":null}`)
+	data = append(data, strings.Repeat(" ", maxProcessReceiptBytes)...)
+	if err := os.WriteFile(filepath.Join(dir, ProcessFile), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadProcessDir(dir); err == nil {
+		t.Fatal("read of an oversized process receipt succeeded")
+	}
+	if _, ok := ReadProcessCompletion(dir); ok {
+		t.Fatal("accepted an oversized process receipt for recovery")
+	}
+}
+
 // Mutation guards: journal byte cap, generation publication and malformed-line
 // marker. A full spool does not erase earlier evidence or accept partial data.
 func TestJournalBoundsAndCompleteness(t *testing.T) {

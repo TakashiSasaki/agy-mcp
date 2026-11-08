@@ -1,6 +1,10 @@
 package jobstore
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"math"
 	"os"
 	"time"
 )
@@ -92,13 +96,40 @@ func renameReplace(src, dst string) error {
 // when the sentinel is absent by definition, so retrying absence would spend
 // the whole budget on the hot path of every poll.
 func readReplaced(path string) ([]byte, error) {
-	var b []byte
-	err := retryContended(func() error {
-		var rerr error
-		b, rerr = os.ReadFile(path)
-		return rerr
-	})
+	b, _, err := readReplacedFile(path, 0)
 	return b, err
+}
+
+// readReplacedFile returns data and metadata from the same opened descriptor.
+// A positive limit also covers growth after the initial stat.
+func readReplacedFile(path string, limit int64) (b []byte, info os.FileInfo, err error) {
+	err = retryContended(func() error {
+		f, opened, err := OpenRegularFile(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		var reader io.Reader = f
+		if limit > 0 {
+			if opened.Size() > limit {
+				return fmt.Errorf("%s exceeds the %d-byte read limit", path, limit)
+			}
+			reader = io.LimitReader(f, limit+1)
+		}
+		var contents bytes.Buffer
+		if size := opened.Size(); size > 0 && size < int64(math.MaxInt)-bytes.MinRead {
+			contents.Grow(int(size) + bytes.MinRead)
+		}
+		if _, err = contents.ReadFrom(reader); err != nil {
+			return err
+		}
+		if limit > 0 && int64(contents.Len()) > limit {
+			return fmt.Errorf("%s exceeds the %d-byte read limit", path, limit)
+		}
+		b, info = contents.Bytes(), opened
+		return nil
+	})
+	return b, info, err
 }
 
 // retryWhile is retryContended's loop with its three environment dependencies
