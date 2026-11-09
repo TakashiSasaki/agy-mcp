@@ -67,11 +67,12 @@ func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInp
 }
 
 type adoptionRecord struct {
-	project string
-	title   string
-	preview string
-	raw     []byte
-	active  bool
+	project  string
+	title    string
+	preview  string
+	raw      []byte
+	active   bool
+	revision conversationRevision
 }
 
 func (m *Manager) persistAdoption(ctx context.Context, dbPath string, in AdoptConversationInput) (*AdoptConversationResult, error) {
@@ -132,6 +133,7 @@ func (m *Manager) persistAdoption(ctx context.Context, dbPath string, in AdoptCo
 		MetadataUpdated:       summaryUpdated,
 		TrajectoryBlobUpdated: trajectoryUpdated,
 		AnnotationsUpdated:    annotationUpdated,
+		revision:              record.revision,
 	}, nil
 }
 
@@ -163,15 +165,19 @@ func readAdoptionRecord(ctx context.Context, tx *sql.Tx, id string) (adoptionRec
 		rawColumn = "raw_summary"
 	}
 	query := `SELECT COALESCE(project_id, ''), COALESCE(title, ''), COALESCE(preview, ''),
-		COALESCE(not_fully_idle != 0 OR status IN ('CASCADE_RUN_STATUS_RUNNING', 'RUNNING'), 0), ` + rawColumn +
+		COALESCE(not_fully_idle != 0 OR status IN ('CASCADE_RUN_STATUS_RUNNING', 'RUNNING'), 0),
+		step_count, last_modified_time, ` + rawColumn +
 		" FROM conversation_summaries WHERE conversation_id = ?"
-	err = tx.QueryRowContext(ctx, query, id).Scan(&record.project, &record.title, &record.preview, &record.active, &record.raw)
+	var modified sql.NullString
+	err = tx.QueryRowContext(ctx, query, id).Scan(
+		&record.project, &record.title, &record.preview, &record.active, &record.revision.steps, &modified, &record.raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return record, fmt.Errorf("conversation %q not found", id)
 	}
 	if err != nil {
 		return record, fmt.Errorf("read conversation summary: %w", err)
 	}
+	record.revision.modified, _ = parseSQLiteTimestamp(modified.String)
 	return record, nil
 }
 
@@ -375,9 +381,12 @@ func (m *Manager) resolveProjectTarget(query, current string) (*ProjectInfo, err
 
 func (m *Manager) refreshAdoption(ctx context.Context, dbPath string, in AdoptConversationInput, res *AdoptConversationResult) {
 	summaries, _ := readDaemonConversations(dbPath)
-	res.CloudSyncState = daemonConversationState(summaries, in.ConversationID, res.ProjectID, res.Title)
 	cliCachePath := filepath.Join(filepath.Dir(dbPath), cliSummariesFile)
-	target := daemonConversation{project: res.ProjectID, title: res.Title}
+	cliSummaries, cliErr := readConversationSummaries(cliCachePath)
+	cli, cliFound := cliSummaries[in.ConversationID]
+	target := daemonConversation{project: res.ProjectID, title: res.Title, revision: res.revision.latest(cli.revision)}
+	res.CloudSyncState = daemonConversationState(summaries, in.ConversationID, target)
+	cliStale := (cliFound && !cli.matches(target)) || (cliErr != nil && !errors.Is(cliErr, os.ErrNotExist))
 
 	// A title-only RPC is safe once the daemon already has the target project.
 	// A daemon holding the previous project needs the complete local record.
@@ -385,15 +394,15 @@ func (m *Manager) refreshAdoption(ctx context.Context, dbPath string, in AdoptCo
 		res.RPCNotified = notifyLanguageServerAnnotationUpdate(ctx, in.ConversationID, res.Title)
 		if res.RPCNotified {
 			summaries, _ = readDaemonConversations(dbPath)
-			res.CloudSyncState = daemonConversationState(summaries, in.ConversationID, res.ProjectID, res.Title)
+			res.CloudSyncState = daemonConversationState(summaries, in.ConversationID, target)
 		}
 	}
 	switch {
 	case in.RestartDaemon == nil || !*in.RestartDaemon:
 		res.DaemonRestartReason = "restart not requested"
 		return
-	case res.CloudSyncState == ConversationSyncConfirmed && !in.ForceRestart && !hasStaleCLISummary(cliCachePath, in.ConversationID, target):
-		res.DaemonRestartReason = "daemon already has the adopted project and title"
+	case res.CloudSyncState == ConversationSyncConfirmed && !in.ForceRestart && !cliStale:
+		res.DaemonRestartReason = "daemon already has the adopted conversation revision"
 		return
 	}
 	prepare := func(ctx context.Context) error {
@@ -408,6 +417,7 @@ func (m *Manager) refreshAdoption(ctx context.Context, dbPath string, in AdoptCo
 		res.TrajectoryBlobUpdated = res.TrajectoryBlobUpdated || persisted.TrajectoryBlobUpdated
 		res.AnnotationsUpdated = res.AnnotationsUpdated || persisted.AnnotationsUpdated
 		res.AlreadyConverted = res.AlreadyConverted && persisted.AlreadyConverted
+		target.revision = target.revision.latest(persisted.revision)
 		res.CLICacheInvalidated, err = invalidateCachedConversation(cliCachePath, in.ConversationID, target)
 		if err != nil {
 			return fmt.Errorf("refresh CLI summary: %w", err)
@@ -424,7 +434,7 @@ func (m *Manager) refreshAdoption(ctx context.Context, dbPath string, in AdoptCo
 	if err != nil || !restarted {
 		return
 	}
-	res.CloudSyncState = waitForDaemonConversation(ctx, dbPath, in.ConversationID, res.ProjectID, res.Title)
+	res.CloudSyncState = waitForDaemonConversation(ctx, dbPath, in.ConversationID, target)
 	res.PostRestartVerified = res.CloudSyncState == ConversationSyncConfirmed
 }
 

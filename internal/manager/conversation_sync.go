@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,6 +21,8 @@ const (
 	ConversationSyncLocalOnly   = "local_only"
 
 	summaryAnnotationsField = 15
+	summaryStepCountField   = 2
+	summaryModifiedField    = 3
 	annotationTitleField    = 1
 	summaryTrajectoryField  = 17
 	trajectoryProjectField  = 18
@@ -28,8 +31,32 @@ const (
 )
 
 type daemonConversation struct {
-	project string
-	title   string
+	project  string
+	title    string
+	revision conversationRevision
+}
+
+type conversationRevision struct {
+	modified time.Time
+	steps    int
+}
+
+func (r conversationRevision) latest(other conversationRevision) conversationRevision {
+	if other.modified.After(r.modified) {
+		return other
+	}
+	return r
+}
+
+func (c daemonConversation) matches(target daemonConversation) bool {
+	if c.project != target.project || c.title != target.title {
+		return false
+	}
+	if target.revision.modified.IsZero() {
+		return true
+	}
+	return c.revision.modified.After(target.revision.modified) ||
+		(c.revision.modified.Equal(target.revision.modified) && c.revision.steps == target.revision.steps)
 }
 
 // readDaemonConversations reads the Remote Control daemon's own summary
@@ -94,7 +121,46 @@ func decodeDaemonSummary(field protohelper.Field) (id string, summary daemonConv
 	title, _ := protohelper.GetFieldBytes(annotations, annotationTitleField)
 	metadata, _ := protohelper.GetFieldBytes(data, summaryTrajectoryField)
 	project, _ := protohelper.GetFieldBytes(metadata, trajectoryProjectField)
-	return string(key), daemonConversation{project: string(project), title: string(title)}, nil
+	return string(key), daemonConversation{
+		project: string(project), title: string(title), revision: decodeConversationRevision(data),
+	}, nil
+}
+
+func decodeConversationRevision(summary []byte) conversationRevision {
+	var revision conversationRevision
+	fields, err := protohelper.ParseFields(summary)
+	if err != nil {
+		return revision
+	}
+	for _, field := range fields {
+		switch {
+		case field.FieldNum == summaryStepCountField && field.WireType == 0 && field.VarintVal <= math.MaxInt32:
+			revision.steps = int(field.VarintVal)
+		case field.FieldNum == summaryModifiedField && field.WireType == 2:
+			revision.modified = decodeSummaryTimestamp(field.LengthBytes)
+		}
+	}
+	return revision
+}
+
+func decodeSummaryTimestamp(data []byte) time.Time {
+	fields, err := protohelper.ParseFields(data)
+	if err != nil {
+		return time.Time{}
+	}
+	var seconds, nanos int64
+	for _, field := range fields {
+		switch {
+		case field.FieldNum == 1 && field.WireType == 0:
+			seconds = int64(field.VarintVal)
+		case field.FieldNum == 2 && field.WireType == 0:
+			nanos = int64(field.VarintVal)
+		}
+	}
+	if seconds < -62135596800 || seconds > 253402300799 || nanos < 0 || nanos >= int64(time.Second) {
+		return time.Time{}
+	}
+	return time.Unix(seconds, nanos).UTC()
 }
 
 // invalidateCachedConversation runs while the daemon is stopped. MEASURED
@@ -126,7 +192,7 @@ func invalidateCachedConversation(path, id string, target daemonConversation) (b
 			return false, errors.New("duplicate target conversation in summary snapshot")
 		}
 		seen = true
-		if summary != target {
+		if !summary.matches(target) {
 			remove = i
 		}
 	}
@@ -151,33 +217,24 @@ func invalidateCachedConversation(path, id string, target daemonConversation) (b
 	return err == nil, err
 }
 
-func hasStaleCLISummary(path, id string, target daemonConversation) bool {
-	summaries, err := readConversationSummaries(path)
-	if err != nil {
-		return !errors.Is(err, os.ErrNotExist)
-	}
-	got, found := summaries[id]
-	return found && got != target
-}
-
-func daemonConversationState(conversations map[string]daemonConversation, id, project, title string) string {
+func daemonConversationState(conversations map[string]daemonConversation, id string, target daemonConversation) string {
 	if conversations == nil {
 		return ConversationSyncUnavailable
 	}
-	if got, ok := conversations[id]; ok && got.project == project && got.title == title {
+	if got, ok := conversations[id]; ok && got.matches(target) {
 		return ConversationSyncConfirmed
 	}
 	return ConversationSyncPending
 }
 
-func waitForDaemonConversation(ctx context.Context, dbPath, id, project, title string) string {
+func waitForDaemonConversation(ctx context.Context, dbPath, id string, target daemonConversation) string {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		conversations, _ := readDaemonConversations(dbPath)
-		state := daemonConversationState(conversations, id, project, title)
+		state := daemonConversationState(conversations, id, target)
 		if state == ConversationSyncConfirmed {
 			return state
 		}

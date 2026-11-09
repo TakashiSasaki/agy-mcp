@@ -426,11 +426,13 @@ startup. With the default
 needed. Repeating an already confirmed adoption skips the refresh unless
 `force_restart` is set. `agy_get_conversation` and `agy_list_conversations` report
 `is_cloud_synced: true` when the daemon's persisted summary matches the
-conversation ID, project and title. MEASURED against agy 1.5.3, the daemon
-populates this snapshot during startup reconciliation.
+conversation ID, project and title and covers the latest revision observed in
+SQLite or the CLI snapshot. MEASURED against agy 1.5.3, the daemon populates
+this snapshot during startup reconciliation. Repeat adoption with
+`restart_daemon: true` to refresh the summary after a later CLI turn.
 
 `cloud_sync_state` is `confirmed` when that evidence matches, `pending`
-when a readable snapshot lacks the new binding, and `unavailable` when the
+when a readable snapshot lacks the binding or latest observed revision, and `unavailable` when the
 snapshot cannot be read. Conversation lookups also return `local_only` for
 conversations outside cloud projects or without a title. Adoption
 `success` reports the local change. `post_restart_verified` records that

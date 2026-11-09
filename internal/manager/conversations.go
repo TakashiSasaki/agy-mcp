@@ -28,7 +28,7 @@ type ConversationSummaryItem struct {
 	Title            string   `json:"title" jsonschema:"human-readable title of the conversation"`
 	ProjectID        string   `json:"project_id" jsonschema:"associated project ID"`
 	ProjectName      string   `json:"project_name,omitempty" jsonschema:"human-readable project name"`
-	IsCloudSynced    bool     `json:"is_cloud_synced" jsonschema:"true when the Remote Control daemon summary confirms the conversation's project and title"`
+	IsCloudSynced    bool     `json:"is_cloud_synced" jsonschema:"true when the Remote Control daemon summary confirms the project, title, and latest observed local revision"`
 	CloudSyncState   string   `json:"cloud_sync_state" jsonschema:"confirmed by the Remote Control daemon summary, pending, unavailable, or local_only"`
 	SyncScope        string   `json:"sync_scope,omitempty" jsonschema:"cloud sync scope: 'cloud', 'local_only', 'cli_default', or 'unregistered'"`
 	Archived         bool     `json:"archived" jsonschema:"true if the conversation has been archived"`
@@ -83,6 +83,7 @@ type AdoptConversationResult struct {
 	DaemonRestartReason    string `json:"daemon_restart_reason,omitempty" jsonschema:"explanation of restart outcome"`
 	ActiveSessionsCount    int    `json:"active_sessions_count,omitempty" jsonschema:"number of currently active/running sessions detected if restart was skipped"`
 	PostRestartVerified    bool   `json:"post_restart_verified" jsonschema:"true if this call restarted the daemon and observed its updated summary"`
+	revision               conversationRevision
 }
 
 // DaemonRestartResult carries the output of a standalone graceful sync daemon restart.
@@ -259,6 +260,7 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 
 	var items []ConversationSummaryItem
 	daemonSummaries, _ := readDaemonConversations(dbPath)
+	cliSummaries, _ := readConversationSummaries(filepath.Join(filepath.Dir(dbPath), cliSummariesFile))
 	for rows.Next() {
 		var (
 			cid          string
@@ -282,7 +284,7 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 			wsList = []string{}
 		}
 
-		_, lastModRFC := parseSQLiteTimestamp(lastModRaw.String)
+		modified, lastModRFC := parseSQLiteTimestamp(lastModRaw.String)
 
 		syncState := ConversationSyncLocalOnly
 		syncScope := "unregistered"
@@ -291,7 +293,9 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 			projName = proj.Name
 			syncScope = proj.SyncScope
 			if proj.IsCloudSynced && strings.TrimSpace(title.String) != "" {
-				syncState = daemonConversationState(daemonSummaries, cid, projectID.String, title.String)
+				revision := conversationRevision{modified: modified, steps: stepCount}
+				target := daemonConversation{project: projectID.String, title: title.String, revision: revision.latest(cliSummaries[cid].revision)}
+				syncState = daemonConversationState(daemonSummaries, cid, target)
 			}
 		} else if projectID.String == "default-cli-project" {
 			syncScope = "cli_default"

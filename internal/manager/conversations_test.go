@@ -5,16 +5,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/tphakala/agy-mcp/v2/internal/protohelper"
 	_ "modernc.org/sqlite"
 )
 
-func testDaemonConversation(id, project, title string) []byte {
+func testDaemonConversation(id, project, title string, revision conversationRevision) []byte {
 	annotations := protohelper.MakeLengthDelimited(annotationTitleField, []byte(title))
 	metadata := protohelper.MakeLengthDelimited(trajectoryProjectField, []byte(project))
 	summary := append(protohelper.MakeLengthDelimited(summaryAnnotationsField, annotations),
 		protohelper.MakeLengthDelimited(summaryTrajectoryField, metadata)...)
+	if !revision.modified.IsZero() {
+		stamp := append(protohelper.EncodeVarint(1<<3), protohelper.EncodeVarint(uint64(revision.modified.Unix()))...)
+		stamp = append(stamp, protohelper.EncodeVarint(2<<3)...)
+		stamp = append(stamp, protohelper.EncodeVarint(uint64(revision.modified.Nanosecond()))...)
+		summary = append(summary, protohelper.MakeLengthDelimited(summaryModifiedField, stamp)...)
+		summary = append(summary, protohelper.EncodeVarint(summaryStepCountField<<3)...)
+		summary = append(summary, protohelper.EncodeVarint(uint64(revision.steps))...)
+	}
 	entry := append(protohelper.MakeLengthDelimited(1, []byte(id)),
 		protohelper.MakeLengthDelimited(2, summary)...)
 	return protohelper.MakeLengthDelimited(1, entry)
@@ -84,8 +93,9 @@ func createTestConversationsDB(t *testing.T, dir string) string {
 func TestListConversationsFilteringAndPagination(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := createTestConversationsDB(t, dir)
-	snapshot := append(testDaemonConversation("c1", "proj-uuid-1", "Active Cloud Conversation"),
-		testDaemonConversation("c2", "default-cli-project", "Archived Cloud Conversation")...)
+	initial := conversationRevision{modified: time.Date(2026, 11, 9, 8, 0, 0, 0, time.UTC), steps: 10}
+	snapshot := testDaemonConversation("c1", "proj-uuid-1", "Active Cloud Conversation", initial)
+	snapshot = append(snapshot, testDaemonConversation("c2", "default-cli-project", "Archived Cloud Conversation", conversationRevision{})...)
 	if err := os.WriteFile(filepath.Join(dir, "agyhub_summaries_proto.pb"), snapshot, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +139,18 @@ func TestListConversationsFilteringAndPagination(t *testing.T) {
 	// Check c3 has IsCloudSynced = false
 	if res.Conversations[1].ConversationID != "c3" || res.Conversations[1].IsCloudSynced {
 		t.Errorf("expected c3 to not be cloud synced, got %+v", res.Conversations[1])
+	}
+
+	// SQLite and the daemon can both show an older revision after the
+	// daemon restarts. The newer CLI summary must still prevent confirmation.
+	latest := conversationRevision{modified: initial.modified.Add(time.Minute), steps: 12}
+	cli := testDaemonConversation("c1", "proj-uuid-1", "Active Cloud Conversation", latest)
+	if err := os.WriteFile(filepath.Join(dir, cliSummariesFile), cli, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := mgr.GetConversation("c1")
+	if err != nil || conversation.IsCloudSynced || conversation.CloudSyncState != ConversationSyncPending {
+		t.Fatalf("older daemon history should be pending: %+v, %v", conversation, err)
 	}
 
 	// 2. Include archived: should return all 4

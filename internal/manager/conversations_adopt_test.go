@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tphakala/agy-mcp/v2/internal/protohelper"
 	_ "modernc.org/sqlite"
@@ -104,9 +105,10 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	}
 	cachePath := filepath.Join(dir, daemonSummariesFile)
 	cliCachePath := filepath.Join(dir, cliSummariesFile)
-	neighbor := testDaemonConversation("other-conversation", "different-project", "Keep me")
+	revision := conversationRevision{modified: time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)}
+	neighbor := testDaemonConversation("other-conversation", "different-project", "Keep me", conversationRevision{})
 	neighbor = append(neighbor, protohelper.MakeLengthDelimited(4, []byte("unknown top-level field"))...)
-	snapshot := append(bytes.Clone(neighbor), testDaemonConversation("conv-target-1", "default-cli-project", "Old title")...)
+	snapshot := append(bytes.Clone(neighbor), testDaemonConversation("conv-target-1", "default-cli-project", "Old title", revision)...)
 	if err := os.WriteFile(cachePath, snapshot, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +150,7 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 		if cliCache, err := os.ReadFile(cliCachePath); err != nil || !bytes.Equal(cliCache, neighbor) {
 			t.Errorf("CLI cache should retain only untouched entries during refresh: %v", err)
 		}
-		cache = append(cache, testDaemonConversation("conv-target-1", "proj-uuid-1234", title)...)
+		cache = append(cache, testDaemonConversation("conv-target-1", "proj-uuid-1234", title, revision)...)
 		return os.WriteFile(cachePath, cache, 0o600)
 	})
 

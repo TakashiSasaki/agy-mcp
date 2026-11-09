@@ -25,6 +25,7 @@ func TestAdoptConversationOverMCP(t *testing.T) {
 		conversation_id text PRIMARY KEY,
 		title text NOT NULL DEFAULT "",
 		preview text NOT NULL DEFAULT "",
+		step_count integer NOT NULL DEFAULT 0,
 		workspace_uris text NOT NULL,
 		project_id text NOT NULL DEFAULT "",
 		status text NOT NULL DEFAULT "",
