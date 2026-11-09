@@ -88,3 +88,32 @@ The comparison and targeted snapshot rewrite live in
 [`conversation_sync.go`](../internal/manager/conversation_sync.go).
 Local persistence and refresh sequencing live in
 [`conversation_adoption.go`](../internal/manager/conversation_adoption.go).
+
+## Synchronization through job submission
+
+With the sync worker installed, both run tools require a registered cloud
+`project`. The worker picks up durable job records after execution and
+verifies the project, title and history. A continuation records the preceding
+revision at admission and verifies that the new turn advanced it. The worker
+compares the SQLite and CLI revisions with the actual step count in the
+trajectory before pinning the target in the job's sync receipt.
+
+MEASURED against AGY 1.5.3 through MCP. Passing `--project` on a fresh
+headless run recorded the requested project in the trajectory and CLI
+summary. The running Remote Control daemon still had no entry for that
+conversation. The initial integrated build therefore uses the worker's
+post-execution adoption. It skips a restart when the daemon already covers
+the pinned revision and the CLI snapshot contains no stale entry for it.
+
+On the deployed Linux/systemd build `a3977f5`, two parallel jobs reached
+`confirmed` after one daemon restart. A continuation reused the original ID,
+recalled the first response and advanced its history from two to five steps.
+Both conversations remained confirmed after a later batch. The user verified
+the continued response in the browser. When the worker was killed after a
+simulated stop boundary, systemd restarted it and the worker restored Remote
+Control from the durable marker. Removing a disposable job's confirmation
+receipt after recovery let the worker confirm it again with the same daemon
+PID.
+
+See [deployment and recovery](self-hosting.md#required-cloud-job-sync) for
+the shared store and the watchdog guard.
