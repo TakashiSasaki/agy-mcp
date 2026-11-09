@@ -178,11 +178,15 @@ func TestRunJobCancelViaSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A fake agy that sleeps far longer than the test; with no timeout in meta,
-	// only an external cancel signal can stop it.
-	agy := testutil.WriteFakeAgy(t, testutil.FakeAgy{Stdout: "x", Sleep: 60 * time.Second})
 	jobDir := t.TempDir()
-	meta := jobstore.Meta{ID: filepath.Base(jobDir), AgyPath: agy, Args: []string{"-p", "x"}}
+	// MEASURED against agy 1.5.3: SIGTERM can be handled as an ordinary exit 1.
+	// The supervisor must preserve both that raw code and the cancel verdict.
+	agy := filepath.Join(jobDir, "fake-agy")
+	script := "#!/bin/sh\ntrap 'exit 1' TERM\nprintf 'ready\\n' >&2\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(agy, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := jobstore.Meta{ID: filepath.Base(jobDir), AgyPath: agy, Args: []string{"-p", "x"}, Timeout: 30 * time.Second}
 	b, _ := jsonMarshalForTest(meta)
 	_ = os.WriteFile(jobstore.MetaPath(jobDir), b, 0o644)
 
@@ -191,7 +195,7 @@ func TestRunJobCancelViaSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// On any fatal path below (before the happy-path Wait), tear the supervisor
-	// down so neither it nor its 60s fake agy child leaks. SIGTERM lets the
+	// down so neither it nor its fake agy child leaks. SIGTERM lets the
 	// supervisor forward the signal to agy and reap it, unlike a bare Kill.
 	reaped := false
 	t.Cleanup(func() {
@@ -201,19 +205,11 @@ func TestRunJobCancelViaSignal(t *testing.T) {
 		}
 	})
 
-	// Wait for the supervisor to create the job's out/err files before signalling.
-	// The supervisor installs its SIGTERM handler before it creates these files
-	// (see supervisor.run), so once they exist the handler is guaranteed to be in
-	// place and the SIGTERM cannot land on a handlerless process. Polling for this
-	// instead of sleeping a fixed interval also removes the race where, under CI
-	// load, the supervisor process has not started yet and the signal would hit a
-	// process that is not running (dying without writing the sentinel, leaking the
-	// 60s agy and burning the poll below).
+	// Wait for the child to arm its trap before signalling the supervisor.
 	testutil.WaitFor(t, 5*time.Second, func() bool {
-		_, oerr := os.Stat(jobstore.OutPath(jobDir))
-		_, eerr := os.Stat(jobstore.ErrPath(jobDir))
-		return oerr == nil && eerr == nil
-	}, "supervisor did not create out/err; cannot safely signal it")
+		data, err := os.ReadFile(jobstore.ErrPath(jobDir))
+		return err == nil && strings.Contains(string(data), "ready\n")
+	}, "fake agy did not arm its SIGTERM trap")
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +223,10 @@ func TestRunJobCancelViaSignal(t *testing.T) {
 	code, _ := os.ReadFile(jobstore.ExitCodePath(jobDir))
 	if strings.TrimSpace(string(code)) != strconv.Itoa(jobstore.ExitSIGTERM) {
 		t.Fatalf("exit_code = %q, want %d (SIGTERM cancel)", code, jobstore.ExitSIGTERM)
+	}
+	receipt, err := jobstore.ReadProcessDir(jobDir)
+	if err != nil || receipt == nil || !receipt.Cancelled || receipt.ExitCode == nil || *receipt.ExitCode != 1 {
+		t.Fatalf("process receipt = %+v, err = %v; want cancellation with raw exit 1", receipt, err)
 	}
 }
 
@@ -287,8 +287,8 @@ func TestVersionSubcommandReportsSemVerBuildMetadata(t *testing.T) {
 			t.Fatalf("agy-mcp %s failed: %v\n%s", arg, err, out)
 		}
 		line := strings.TrimSpace(string(out))
-		if !strings.HasPrefix(line, "agy-mcp v2.10.0+local.") {
-			t.Errorf("agy-mcp %s = %q, want prefix \"agy-mcp v2.10.0+local.\"", arg, line)
+		if !strings.HasPrefix(line, "agy-mcp v2.11.0+local.") {
+			t.Errorf("agy-mcp %s = %q, want prefix \"agy-mcp v2.11.0+local.\"", arg, line)
 		}
 	}
 }

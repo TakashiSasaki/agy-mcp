@@ -408,8 +408,9 @@ func runWithCleanup(jobDir string, grace, drainWait time.Duration, cleanup proce
 		}
 	}
 	// Apply the supervisor's termination overrides: a timeout or a cancel keeps its
-	// meaning even when it escalated to SIGKILL (raw 137). timedOut/cancelled are
-	// closed before the kill, so they are observable by the time Wait returns.
+	// meaning after SIGKILL escalation (raw 137) or when agy handles SIGTERM and
+	// exits 1 with finished_reason interrupted (MEASURED against agy 1.5.3).
+	// timedOut/cancelled are closed before signalling, so Wait can observe them.
 	// Guarding on waitErr != nil keeps a job that finished naturally at the instant
 	// the timer fired (a natural success has waitErr == nil) from being mislabeled.
 	receipt := jobstore.ProcessOutcome{
