@@ -19,6 +19,7 @@ const (
 	junitSuitesTag       = "testsuites"
 	junitSkippedTag      = "skipped"
 	junitStatusAttr      = "status"
+	junitResultAttr      = "result"
 )
 
 type VerificationFailure struct {
@@ -392,7 +393,7 @@ func (p *junitParser) testcaseExecution(token xml.StartElement) (disabled, notru
 	var plainNotrun bool
 	for _, attr := range token.Attr {
 		name := attr.Name.Local
-		if name != junitStatusAttr && name != "result" {
+		if name != junitStatusAttr && name != junitResultAttr {
 			continue
 		}
 		if seen[name] {
@@ -403,15 +404,15 @@ func (p *junitParser) testcaseExecution(token xml.StartElement) (disabled, notru
 		case name == junitStatusAttr && attr.Value == "notrun":
 			notrun = true
 			plainNotrun = attr.Name.Space == ""
-		case attr.Name.Space == "" && ((name == junitStatusAttr && attr.Value == "disabled") || (name == "result" && attr.Value == "suppressed")):
+		case attr.Name.Space == "" && ((name == junitStatusAttr && attr.Value == "disabled") || (name == junitResultAttr && attr.Value == "suppressed")):
 			disabled = true
-		case attr.Name.Space == "" && ((name == junitStatusAttr && attr.Value == "run") || (name == "result" && attr.Value == "completed")):
+		case attr.Name.Space == "" && ((name == junitStatusAttr && attr.Value == "run") || (name == junitResultAttr && attr.Value == "completed")):
 		default:
 			unsupported = true
 			p.warn("unsupported_testcase_execution_attribute")
 		}
 	}
-	return disabled, notrun, token.Name.Space == "" && plainNotrun && !seen["result"], unsupported
+	return disabled, notrun, token.Name.Space == "" && plainNotrun && !seen[junitResultAttr], unsupported
 }
 
 // CTest 3.28.3 reports both requested skips and setup failures as notrun
