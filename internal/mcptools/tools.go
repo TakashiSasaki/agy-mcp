@@ -664,26 +664,28 @@ var serverVersion = sync.OnceValue(func() string {
 // that client's own configuration, not in a server shared by everyone.
 const serverInstructions = `agy runs an agent on the server host with permission checks disabled. cwd and dirs are server-side workspaces, not confinement; sandbox and a no-edit prompt do not establish read-only access. agy_info(tool: agy_run, include_instructions: true) returns raw tool_json and full instructions; its default reports host and defaults. partial false describes provenance, not correctness or passing tests.
 
-agy delegates a prompt to a background coding agent and manages the run as a restart-resilient job with output captured to disk. Use it to get an independent perspective or to offload self-contained work while you keep going:
+Read the live schema with agy_info(tool: agy_run). server_version identifies the connected build. A job's git_head identifies its execution worktree revision.
 
-- Continue a prior thread with conversation_id or continue_latest instead of restating context.
-- Fan out freely: fresh runs in the same directory run concurrently, up to the server's concurrency cap. Only two runs continuing the SAME conversation_id conflict, and the second is refused rather than queued.
+- Start a new job with prompt and project. Find a registered cloud project with agy_list_projects(sync_filter: cloud_only) and choose cwd separately. Both run tools schedule cloud sync after execution.
+- Use agy_run for background work. agy_run_sync waits inline for execution and cloud sync within wait. Check state and cloud_sync_state separately. confirmed means the Remote Control daemon holds the job's persisted revision. If either phase is pending, use agy_wait or agy_status with the same job_id.
+- Continue a prior thread with its original conversation_id, cloud project and a new idempotency_key after sync settles. Use agy_adopt_conversation to move or refresh an existing idle conversation outside the job flow.
+- Fan out freely within the concurrency cap while admission is open. Fresh runs can share cwd. Simultaneous runs on the SAME conversation_id are refused.
+- Use agy_list_jobs for retained MCP jobs, agy_list_conversations for Antigravity history, and list_sessions for the latest CLI-cached ID per workspace. Use agy_get_conversation to verify a known conversation's sync status.
+- On a start refusal, read start_error_code, job_started and next_action. workspace_mismatch with job_started false means Git preflight blocked the run. Resolve the intended workspace and revision before submitting again.
+
+Delegation examples
 
 - Peer review: distinguish a conceptual review of assumptions from a repository review. Provide exact files/revision and ask for inspected sources, evidence, unverified claims and counterexamples. Execution context is not proof of inspection; job completion is not a correctness verdict. Verify standards/API syntax independently against the intended version and implementation.
 - Rubber-duck: talk through a decision and get pushback that catches blind spots your own reasoning would skip.
 - Research: fact-check a claim or look into a topic.
 - Background delegation: fire off an independent task and reconcile the result later, so two things run at once.
 
-Choosing a tool:
-- agy_run_sync starts a run and waits inline (bounded by the wait argument). Use it when you need the answer before your next step and the task is bounded enough to finish within that wait.
-- agy_run returns a job_id and waits up to the configured conversation ID budget (default 5s after admission) for a fresh run's init event. Use it for long runs or parallel work. If other requests are delayed behind a long agy_wait on a shared connection, use agy_status or an explicit shorter wait with the same job_id.
-- Outliving the inline wait is not a failure: the job keeps running under its own supervisor and the returned job_id still resolves to its outcome. Wait on it or poll it; do not re-send the prompt.
-- When a transport failure could make it ambiguous whether a run started, supply idempotency_key and reuse that same key on the retry. The same normalized request returns the existing job; a different request with that key is refused.
-- agy_usage reports quota left. For planning that tolerates a reading up to ten minutes old, set max_age to 10m and check checked_at. Pass priority optional on skippable runs, and report a refusal instead of retrying.
-- list_models enumerates models and list_agents enumerates agents; call them only if you want to override the default model or pick a specific agent. list_sessions lists known conversations.
+Job handling
 
-Notes:
-- Record the idempotency key before sending a request. Add task_label for later discovery with agy_list_jobs; search by the original key if the response lost its job_id. Start errors include error_code, job_started and next_action. null job_started means execution is uncertain; inspect before retrying.
+- agy_run waits up to the configured conversation ID budget (default 5s after admission) for a fresh run's init event. If other requests are delayed behind a long agy_wait on a shared connection, use agy_status or a shorter wait with the same job_id.
+- Record the idempotency_key before submitting. Use the original key with agy_list_jobs if a response lost the job_id. Replaying the same normalized request returns the existing job. Add task_label for recovery by label. A null job_started means admission is uncertain, so inspect before retrying.
+- agy_usage reports quota left. For planning that tolerates a reading up to ten minutes old, set max_age to 10m and check checked_at. Pass priority optional on skippable runs, and report a refusal instead of retrying.
+- list_models enumerates models and list_agents enumerates agents. Use them to choose a model override or a specific agent.
 - agy_status with include_result false omits the result body without collecting it. Read terminal text in bounded pages with agy_get_result; its complete flag describes pagination only. Check state, partial and retryable before adopting an answer or continuing work.
 - agy_info reports runtime defaults, the registered tool catalog and enforcement capabilities. check_auth explicitly probes model-list access without an agent turn. Compare its catalog with the caller-visible tools; a mismatch requires refreshing connection metadata.
 - agy_events reads live timestamped CLI events and agy_logs reads bounded log tails or byte pages, including registered artifact files. No new model turn is needed to inspect stored evidence. Set artifact_dirs to associate external output directories without adding execution workspaces. agy_verification parses a selected JUnit report or native Go test JSON (format go_test_json); max_failures 0 returns a compact summary; job done and CLI SUCCESS do not establish that tests passed. Nested shell exit status is unknown unless the provider supplies it.
@@ -715,7 +717,7 @@ func newServerWithJobStarter(mgr *manager.Manager, logger *log.Logger, start fun
 		Name:        toolAgyRun,
 		Title:       "Delegate to agy (async)",
 		Annotations: annDelegate,
-		Description: "Delegate a prompt to a background agy model as an async job (peer review, research, or any self-contained task) and keep working. Returns a job_id; block on it with agy_wait or poll it with agy_status. Prefer this over agy_run_sync for long runs, for open-ended work that routinely outlives an inline wait (web research, a large review), and to fan several tasks out in parallel; use agy_run_sync instead when you need the answer before your next step. If a transport failure could make job creation ambiguous, supply idempotency_key and reuse it on the retry. The delegated agent runs with permission checks disabled: it can edit files under cwd and under any dirs, and may reach the network. Say so in the prompt if the run must not touch the repo. For work that may be skipped (a peer review, a second opinion), check agy_usage and pass priority optional to refuse low quota or unresolved mapping when a trusted reading exists. Missing or stale quota data permits admission.",
+		Description: "Delegate a prompt to a background agy model as an async job (peer review, research, or any self-contained task) and keep working. The job schedules cloud sync to project after execution. Use the returned job_id with agy_wait or agy_status to follow both execution and cloud sync. Prefer this over agy_run_sync for long runs, for open-ended work that routinely outlives an inline wait (web research, a large review), and to fan several tasks out in parallel; use agy_run_sync instead when you need to wait inline. If a transport failure could make job creation ambiguous, supply idempotency_key and reuse it on the retry. The delegated agent runs with permission checks disabled: it can edit files under cwd and under any dirs, and may reach the network. Say so in the prompt if the run must not touch the repo. For work that may be skipped (a peer review, a second opinion), check agy_usage and pass priority optional to refuse low quota or unresolved mapping when a trusted reading exists. Missing or stale quota data permits admission.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in runInput) (*mcp.CallToolResult, runOutput, error) {
 		req, err := in.toStartRequest()
 		if err != nil {

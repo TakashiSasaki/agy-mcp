@@ -26,7 +26,7 @@ Continuation and retries: conversation_id resumes a specific thread while cwd st
 
 const inlineWaitGuide = `
 
-wait is a positive Go duration such as 30s or 1m; omitted or empty uses the effective inline ceiling (built-in 90s, configurable with AGY_MCP_SYNC_WAIT_CAP; see agy_info.max_inline_wait). Larger values clamp to that ceiling. Expiry leaves the job running under timeout; keep its job_id and use agy_wait or agy_status rather than starting it again.`
+wait is a positive Go duration such as 30s or 1m. Omitted or empty uses the effective inline ceiling (built-in 90s, configurable with AGY_MCP_SYNC_WAIT_CAP; see agy_info.max_inline_wait). Larger values clamp to that ceiling. The deadline bounds this call's wait for execution and cloud sync. Follow either pending phase with agy_wait or agy_status on the same job_id.`
 
 // runInputSchema augments inferred descriptions with machine-readable choices
 // and examples. Empty enum values preserve the existing "use the default"

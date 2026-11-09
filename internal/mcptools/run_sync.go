@@ -51,13 +51,13 @@ func maxSyncWait() time.Duration {
 type runSyncInput struct {
 	IncludeResult *bool `json:"include_result,omitempty" jsonschema:"include terminal result body (default true); false returns metadata without collecting the job; retrieve text with agy_get_result"`
 	runInput
-	Wait string `json:"wait,omitempty" jsonschema:"positive Go duration such as 30s or 1m; omitted or empty defaults to the effective inline-wait ceiling (built-in 90s; AGY_MCP_SYNC_WAIT_CAP can change it; see agy_info.max_inline_wait). A larger value silently clamps to that ceiling. Limits only this call, not the job: expiry leaves it running and the returned job_id can be waited on with agy_wait or inspected with agy_status; never re-send the prompt just because wait expired"`
+	Wait string `json:"wait,omitempty" jsonschema:"maximum time this call waits for execution and cloud sync, as a positive Go duration such as 30s or 1m. Omitted or empty uses the effective ceiling (default 90s, see agy_info.max_inline_wait). Larger values clamp to the ceiling. If either phase outlives this call, use agy_wait or agy_status with the returned job_id"`
 }
 
 type runSyncOutput struct {
 	JobID string `json:"job_id" jsonschema:"handle for this run; still valid after the inline wait runs out, for agy_wait, agy_status or agy_cancel"`
 	statusOutput
-	Note string `json:"note,omitempty" jsonschema:"set when the job outlived the inline wait, explaining that it is still running and how to collect it"`
+	Note string `json:"note,omitempty" jsonschema:"set when execution or cloud sync outlives the inline wait; explains how to follow the same job"`
 }
 
 // registerRunSync adds the agy_run_sync tool: start a job, wait inline for it
@@ -71,8 +71,8 @@ func registerRunSync(s *toolServer, mgr *manager.Manager, start func(manager.Sta
 			"Use when the answer is needed before your next step AND the task is bounded enough to finish within the wait: " +
 			"a focused peer review, a second opinion, a rubber-duck question. " +
 			"For open-ended work that routinely runs past the wait cap (web research, a whole-codebase review), " +
-			"and for parallel work, prefer agy_run. If this call outlives its wait the job keeps running: " +
-			"block on the returned job_id with agy_wait, or take a single non-blocking look with agy_status. " +
+			"and for parallel work, prefer agy_run. Both run tools schedule cloud sync after execution. " +
+			"If execution or cloud sync outlives the wait, use agy_wait or agy_status with the returned job_id. " +
 			"If a transport failure could make job creation ambiguous, supply idempotency_key and reuse it on the retry. " +
 			"Streams progress notifications while waiting when the client asks for them. include_result false omits terminal text and leaves it uncollected for agy_get_result. " +
 			"The delegated agent runs with permission checks disabled: it can edit files under cwd and under any " +

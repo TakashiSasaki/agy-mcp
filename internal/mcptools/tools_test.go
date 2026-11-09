@@ -777,16 +777,29 @@ func TestQuotaFieldOmittedWhenNil(t *testing.T) {
 }
 
 // Claude Code keeps only the first 2048 characters of a server's instructions
-// (MEASURED: the agy server's instructions arrive cut at that offset). The
-// continuation and fan-out notes must start inside that window, so a new bullet
-// above them cannot silently push them out of the client's view.
+// (MEASURED: the agy server's instructions arrive cut at that offset). Keep
+// the job, conversation, and refusal choices inside that window.
 func TestServerInstructionsKeepNotesInView(t *testing.T) {
 	t.Parallel()
 	const clientLimit = 2048
-	for _, note := range []string{"- Continue a prior thread", "- Fan out freely"} {
+	for _, note := range []string{
+		"server_version identifies the connected build",
+		"Start a new job with prompt and project",
+		"Both run tools schedule cloud sync after execution",
+		"agy_run_sync waits inline for execution and cloud sync",
+		"use agy_wait or agy_status with the same job_id",
+		"- Continue a prior thread with its original conversation_id",
+		"agy_adopt_conversation to move or refresh an existing idle conversation",
+		"- Fan out freely",
+		"agy_list_jobs for retained MCP jobs",
+		"agy_list_conversations for Antigravity history",
+		"list_sessions for the latest CLI-cached ID per workspace",
+		"read start_error_code, job_started and next_action",
+		"workspace_mismatch with job_started false",
+	} {
 		i := strings.Index(serverInstructions, note)
-		if i < 0 || i >= clientLimit {
-			t.Errorf("note %q starts at %d, want inside the first %d characters", note, i, clientLimit)
+		if i < 0 || i+len(note) > clientLimit {
+			t.Errorf("note %q at %d must fit within the first %d characters", note, i, clientLimit)
 		}
 	}
 }
