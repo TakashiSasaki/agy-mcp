@@ -27,27 +27,29 @@ const verificationOutcomeUnknown = "unknown"
 var loggedJobID = regexp.MustCompile(`^\d{1,20}-[0-9a-f]{24}$`)
 
 type requestLogEntry struct {
-	Event               string `json:"event"`
-	Phase               string `json:"phase"`
-	PID                 int    `json:"pid"`
-	CallID              uint64 `json:"call_id"`
-	Method              string `json:"method"`
-	Tool                string `json:"tool,omitempty"`
-	ElapsedMS           *int64 `json:"elapsed_ms,omitempty"`
-	Outcome             string `json:"outcome,omitempty"`
-	JobID               string `json:"job_id,omitempty"`
-	JobState            string `json:"job_state,omitempty"`
-	FailureReason       string `json:"failure_reason,omitempty"`
-	Partial             bool   `json:"partial,omitempty"`
-	StartErrorCode      string `json:"start_error_code,omitempty"`
-	JobStarted          *bool  `json:"job_started,omitempty"`
-	ResultComplete      *bool  `json:"result_complete,omitempty"`
-	VerificationOutcome string `json:"verification_outcome,omitempty"`
-	CloudSyncState      string `json:"cloud_sync_state,omitempty"`
-	DaemonRestarted     *bool  `json:"daemon_restarted,omitempty"`
-	ToolCount           *int   `json:"tool_count,omitempty"`
-	CatalogSHA256       string `json:"catalog_sha256,omitempty"`
-	CatalogComplete     *bool  `json:"catalog_complete,omitempty"`
+	Event                  string `json:"event"`
+	Phase                  string `json:"phase"`
+	PID                    int    `json:"pid"`
+	CallID                 uint64 `json:"call_id"`
+	Method                 string `json:"method"`
+	Tool                   string `json:"tool,omitempty"`
+	ElapsedMS              *int64 `json:"elapsed_ms,omitempty"`
+	Outcome                string `json:"outcome,omitempty"`
+	JobID                  string `json:"job_id,omitempty"`
+	JobState               string `json:"job_state,omitempty"`
+	FailureReason          string `json:"failure_reason,omitempty"`
+	Partial                bool   `json:"partial,omitempty"`
+	StartErrorCode         string `json:"start_error_code,omitempty"`
+	JobStarted             *bool  `json:"job_started,omitempty"`
+	ResultComplete         *bool  `json:"result_complete,omitempty"`
+	VerificationOutcome    string `json:"verification_outcome,omitempty"`
+	CloudSyncState         string `json:"cloud_sync_state,omitempty"`
+	DaemonCacheInvalidated *bool  `json:"daemon_cache_invalidated,omitempty"`
+	CLICacheInvalidated    *bool  `json:"cli_cache_invalidated,omitempty"`
+	DaemonRestarted        *bool  `json:"daemon_restarted,omitempty"`
+	ToolCount              *int   `json:"tool_count,omitempty"`
+	CatalogSHA256          string `json:"catalog_sha256,omitempty"`
+	CatalogComplete        *bool  `json:"catalog_complete,omitempty"`
 }
 
 // requestLoggingMiddleware records handler progress, not transport delivery.
@@ -144,14 +146,16 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 		// go-sdk v1.8.0's typed tool adapter stores structured output as raw JSON.
 		// Decode only metadata; ignored result strings do not need a second copy.
 		var output struct {
-			JobID               string `json:"job_id"`
-			State               string `json:"state"`
-			FailureReason       string `json:"failure_reason"`
-			Partial             bool   `json:"partial"`
-			Complete            *bool  `json:"complete"`
-			VerificationOutcome string `json:"verification_outcome"`
-			CloudSyncState      string `json:"cloud_sync_state"`
-			DaemonRestarted     *bool  `json:"daemon_restarted"`
+			JobID                  string `json:"job_id"`
+			State                  string `json:"state"`
+			FailureReason          string `json:"failure_reason"`
+			Partial                bool   `json:"partial"`
+			Complete               *bool  `json:"complete"`
+			VerificationOutcome    string `json:"verification_outcome"`
+			CloudSyncState         string `json:"cloud_sync_state"`
+			DaemonCacheInvalidated *bool  `json:"daemon_cache_invalidated"`
+			CLICacheInvalidated    *bool  `json:"cli_cache_invalidated"`
+			DaemonRestarted        *bool  `json:"daemon_restarted"`
 		}
 		data, ok := result.StructuredContent.(json.RawMessage)
 		if !ok || json.Unmarshal(data, &output) != nil {
@@ -187,6 +191,8 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 				entry.CloudSyncState = output.CloudSyncState
 			}
 			entry.DaemonRestarted = output.DaemonRestarted
+			entry.DaemonCacheInvalidated = output.DaemonCacheInvalidated
+			entry.CLICacheInvalidated = output.CLICacheInvalidated
 		case toolAgyRestartSyncDaemon:
 			entry.DaemonRestarted = output.DaemonRestarted
 		}

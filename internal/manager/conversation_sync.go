@@ -2,8 +2,10 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -21,6 +23,8 @@ const (
 	annotationTitleField    = 1
 	summaryTrajectoryField  = 17
 	trajectoryProjectField  = 18
+	daemonSummariesFile     = "agyhub_summaries_proto.pb"
+	cliSummariesFile        = "jetbox_summaries_proto.pb"
 )
 
 type daemonConversation struct {
@@ -34,48 +38,126 @@ type daemonConversation struct {
 // conversation ID and CascadeTrajectorySummary as map entries in field 1.
 // The CLI's jetbox snapshot and SQLite rows can change before this happens.
 func readDaemonConversations(dbPath string) (map[string]daemonConversation, error) {
-	const maxBytes = 32 << 20
-	path := filepath.Join(filepath.Dir(dbPath), "agyhub_summaries_proto.pb")
-	file, info, err := jobstore.OpenRegularFile(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	if info.Size() > maxBytes {
-		return nil, fmt.Errorf("daemon summary snapshot exceeds %d bytes", maxBytes)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxBytes {
-		return nil, fmt.Errorf("daemon summary snapshot exceeds %d bytes", maxBytes)
-	}
-	fields, err := protohelper.ParseFields(data)
+	return readConversationSummaries(filepath.Join(filepath.Dir(dbPath), daemonSummariesFile))
+}
+
+func readConversationSummaries(path string) (map[string]daemonConversation, error) {
+	fields, _, err := readSummarySnapshot(path)
 	if err != nil {
 		return nil, err
 	}
 	conversations := make(map[string]daemonConversation)
 	for _, field := range fields {
-		if field.FieldNum != 1 || field.WireType != 2 {
+		if field.FieldNum != 1 {
 			continue
 		}
-		id, idOK := protohelper.GetFieldBytes(field.LengthBytes, 1)
-		summary, summaryOK := protohelper.GetFieldBytes(field.LengthBytes, 2)
-		if !idOK || len(id) == 0 || !summaryOK {
-			return nil, fmt.Errorf("invalid entry in daemon summary snapshot")
+		id, summary, err := decodeDaemonSummary(field)
+		if err != nil {
+			return nil, err
 		}
-		key := string(id)
-		if _, found := conversations[key]; found {
-			return nil, fmt.Errorf("duplicate conversation in daemon summary snapshot")
+		if _, found := conversations[id]; found {
+			return nil, errors.New("duplicate conversation in daemon summary snapshot")
 		}
-		annotations, _ := protohelper.GetFieldBytes(summary, summaryAnnotationsField)
-		title, _ := protohelper.GetFieldBytes(annotations, annotationTitleField)
-		metadata, _ := protohelper.GetFieldBytes(summary, summaryTrajectoryField)
-		project, _ := protohelper.GetFieldBytes(metadata, trajectoryProjectField)
-		conversations[key] = daemonConversation{project: string(project), title: string(title)}
+		conversations[id] = summary
 	}
 	return conversations, nil
+}
+
+func readSummarySnapshot(path string) ([]protohelper.Field, os.FileInfo, error) {
+	const maxBytes = 32 << 20
+	file, info, err := jobstore.OpenRegularFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = file.Close() }()
+	if info.Size() > maxBytes {
+		return nil, nil, fmt.Errorf("summary snapshot exceeds %d bytes", maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(data) > maxBytes {
+		return nil, nil, fmt.Errorf("summary snapshot exceeds %d bytes", maxBytes)
+	}
+	fields, err := protohelper.ParseFields(data)
+	return fields, info, err
+}
+
+func decodeDaemonSummary(field protohelper.Field) (id string, summary daemonConversation, err error) {
+	key, idOK := protohelper.GetFieldBytes(field.LengthBytes, 1)
+	data, summaryOK := protohelper.GetFieldBytes(field.LengthBytes, 2)
+	if field.WireType != 2 || !idOK || len(key) == 0 || !summaryOK {
+		return "", summary, errors.New("invalid entry in daemon summary snapshot")
+	}
+	annotations, _ := protohelper.GetFieldBytes(data, summaryAnnotationsField)
+	title, _ := protohelper.GetFieldBytes(annotations, annotationTitleField)
+	metadata, _ := protohelper.GetFieldBytes(data, summaryTrajectoryField)
+	project, _ := protohelper.GetFieldBytes(metadata, trajectoryProjectField)
+	return string(key), daemonConversation{project: string(project), title: string(title)}, nil
+}
+
+// invalidateCachedConversation runs while the daemon is stopped. MEASURED
+// against agy 1.5.3: both the daemon and CLI snapshots can restore an old
+// binding at startup. Removing the stale entry lets AGY rebuild it.
+// Preserve all other protobuf fields byte for byte, including unknown fields.
+func invalidateCachedConversation(path, id string, target daemonConversation) (bool, error) {
+	fields, originalInfo, err := readSummarySnapshot(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	remove := -1
+	seen := false
+	for i, field := range fields {
+		if field.FieldNum != 1 {
+			continue
+		}
+		key, summary, err := decodeDaemonSummary(field)
+		if err != nil {
+			return false, err
+		}
+		if key != id {
+			continue
+		}
+		if seen {
+			return false, errors.New("duplicate target conversation in summary snapshot")
+		}
+		seen = true
+		if summary != target {
+			remove = i
+		}
+	}
+	if remove < 0 {
+		return false, nil
+	}
+	var updated []byte
+	for i, field := range fields {
+		if i != remove {
+			updated = append(updated, field.Raw...)
+		}
+	}
+	currentInfo, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(originalInfo, currentInfo) || originalInfo.Size() != currentInfo.Size() ||
+		!originalInfo.ModTime().Equal(currentInfo.ModTime()) {
+		return false, errors.New("summary snapshot changed during refresh. Retry adoption")
+	}
+	err = jobstore.WritePrivateFileAtomic(filepath.Dir(path), filepath.Base(path), updated)
+	return err == nil, err
+}
+
+func hasStaleCLISummary(path, id string, target daemonConversation) bool {
+	summaries, err := readConversationSummaries(path)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	got, found := summaries[id]
+	return found && got != target
 }
 
 func daemonConversationState(conversations map[string]daemonConversation, id, project, title string) string {

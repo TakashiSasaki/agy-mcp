@@ -412,13 +412,19 @@ implies that an interrupted long-running job took zero seconds.
 
 `agy_adopt_conversation(conversation_id, project, title?, restart_daemon?)` attaches
 an existing local conversation to a registered cloud project. Use a project ID
-from `agy_list_projects(sync_filter: "cloud_only")`. The conversation keeps
-its ID and history. Omit the title to keep it or derive one from the preview.
+from `agy_list_projects(sync_filter: "cloud_only")`. Omit the project to reuse
+the conversation's existing cloud project. The conversation must be idle. It
+keeps its ID, history, and recorded workspace URIs. Omit the title to keep it
+or derive one from the preview.
 
 Pass `restart_daemon: true` to refresh the systemd-managed Remote Control
-daemon when idle and wait briefly for it to pick up the change. With the
-default `false`, call `agy_restart_sync_daemon` separately if a refresh is
-needed. `agy_get_conversation` and `agy_list_conversations` report
+daemon when idle and wait briefly for it to pick up the change. The refresh
+removes only the conversation's stale entries from the CLI and daemon
+summary snapshots while the daemon is stopped. AGY rebuilds these entries on
+startup. With the default
+`false`, repeat the adoption with `restart_daemon: true` when a refresh is
+needed. Repeating an already confirmed adoption skips the refresh unless
+`force_restart` is set. `agy_get_conversation` and `agy_list_conversations` report
 `is_cloud_synced: true` when the daemon's persisted summary matches the
 conversation ID, project and title. MEASURED against agy 1.5.3, the daemon
 populates this snapshot during startup reconciliation.

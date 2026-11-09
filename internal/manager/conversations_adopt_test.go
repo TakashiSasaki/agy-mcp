@@ -1,10 +1,13 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -12,14 +15,48 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func testAdoptionTrajectory(t *testing.T, dir, id string) *sql.DB {
+	t.Helper()
+	trajectoryDir := filepath.Join(dir, "conversations")
+	if err := os.MkdirAll(trajectoryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(trajectoryDir, id+".db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec("CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob)"); err != nil {
+		t.Fatal(err)
+	}
+	data := protohelper.MakeLengthDelimited(trajectoryProjectField, []byte("default-cli-project"))
+	if _, err := db.Exec("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", data); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func assertTrajectoryProject(t *testing.T, db *sql.DB, expected string) {
+	t.Helper()
+	var data []byte
+	if err := db.QueryRow("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").Scan(&data); err != nil {
+		t.Fatal(err)
+	}
+	project, _ := protohelper.GetFieldBytes(data, trajectoryProjectField)
+	if string(project) != expected {
+		t.Errorf("trajectory project = %q, want %q", project, expected)
+	}
+}
+
 func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
+	const title = "Concurrency $2 \"Optimization\"\n日本語"
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "conversation_summaries.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	schema := `
 	CREATE TABLE conversation_summaries (
@@ -42,9 +79,8 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	}
 
 	// Mock raw_summary containing Field 15 (title: "") and Field 17.18 (project_id: "default-cli-project")
-	f15 := protohelper.MakeLengthDelimited(15, protohelper.MakeLengthDelimited(1, []byte("")))
-	f17 := protohelper.MakeLengthDelimited(17, protohelper.MakeLengthDelimited(18, []byte("default-cli-project")))
-	mockRaw := append(f15, f17...)
+	mockRaw := protohelper.MakeLengthDelimited(15, protohelper.MakeLengthDelimited(1, nil))
+	mockRaw = append(mockRaw, protohelper.MakeLengthDelimited(17, protohelper.MakeLengthDelimited(18, []byte("default-cli-project")))...)
 
 	// Insert orphan session without title or project, with existing workspace URI
 	origWorkspace := `["file:///data/existing-ws"]`
@@ -53,6 +89,28 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 		VALUES ('conv-target-1', '', 'How do I optimize this Go codebase for concurrency?', ?, 'default-cli-project', 0, '2026-11-09 10:00:00+00:00', ?)
 	`, origWorkspace, mockRaw)
 	if err != nil {
+		t.Fatal(err)
+	}
+	trajectory := testAdoptionTrajectory(t, dir, "conv-target-1")
+	annotDir := filepath.Join(dir, "annotations")
+	if err := os.Mkdir(annotDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	annotationPath := filepath.Join(annotDir, "conv-target-1.pbtxt")
+	const otherFields = "tags:\"literal title: \\\"keep me\\\"\"\narchived:true\n# title:\"ignore\"\n"
+	const originalAnnotation = otherFields + "title:\"old\"\n"
+	if err := os.WriteFile(annotationPath, []byte(originalAnnotation), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(dir, daemonSummariesFile)
+	cliCachePath := filepath.Join(dir, cliSummariesFile)
+	neighbor := testDaemonConversation("other-conversation", "different-project", "Keep me")
+	neighbor = append(neighbor, protohelper.MakeLengthDelimited(4, []byte("unknown top-level field"))...)
+	snapshot := append(bytes.Clone(neighbor), testDaemonConversation("conv-target-1", "default-cli-project", "Old title")...)
+	if err := os.WriteFile(cachePath, snapshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cliCachePath, snapshot, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,67 +135,120 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 		conversationsDBPath: dbPath,
 	}
 
-	var restartCalls int32
+	var restartCalls atomic.Int32
 	mgr.SetRestartDaemonCmdForTest(func(ctx context.Context) error {
-		atomic.AddInt32(&restartCalls, 1)
-		return os.WriteFile(filepath.Join(dir, "agyhub_summaries_proto.pb"),
-			testDaemonConversation("conv-target-1", "proj-uuid-1234", "Concurrency Optimization"), 0o600)
+		restartCalls.Add(1)
+		cache, err := os.ReadFile(cachePath)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(cache, neighbor) {
+			t.Errorf("daemon cache should retain only untouched entries during refresh")
+		}
+		if cliCache, err := os.ReadFile(cliCachePath); err != nil || !bytes.Equal(cliCache, neighbor) {
+			t.Errorf("CLI cache should retain only untouched entries during refresh: %v", err)
+		}
+		cache = append(cache, testDaemonConversation("conv-target-1", "proj-uuid-1234", title)...)
+		return os.WriteFile(cachePath, cache, 0o600)
 	})
 
 	ctx := t.Context()
 	restartTrue := true
 
-	// 1. First adoption with restart_daemon: true
-	res1, err := mgr.AdoptConversation(ctx, AdoptConversationInput{
+	request := AdoptConversationInput{
 		ConversationID: "conv-target-1",
 		Project:        "Target App", // resolve by name
-		Title:          "Concurrency Optimization",
+		Title:          title,
 		RestartDaemon:  &restartTrue,
-	})
+	}
+	if _, err := db.Exec("CREATE TRIGGER reject_adoption BEFORE UPDATE ON conversation_summaries BEGIN SELECT RAISE(ABORT, 'injected summary failure'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AdoptConversation(ctx, request); err == nil || !strings.Contains(err.Error(), "injected summary failure") {
+		t.Fatalf("expected summary failure, got %v", err)
+	}
+	assertTrajectoryProject(t, trajectory, "default-cli-project")
+	if got, err := os.ReadFile(annotationPath); err != nil || string(got) != originalAnnotation {
+		t.Fatalf("failed adoption changed the annotation: %q, %v", got, err)
+	}
+	if _, err := db.Exec("DROP TRIGGER reject_adoption"); err != nil {
+		t.Fatal(err)
+	}
+
+	res1, err := mgr.AdoptConversation(ctx, request)
 	if err != nil {
 		t.Fatalf("first AdoptConversation: %v", err)
 	}
-	if !res1.Success {
-		t.Errorf("expected success=true")
+	assertInitialAdoption(t, res1, title)
+	if restartCalls.Load() != 1 {
+		t.Errorf("expected 1 restart call, got %d", restartCalls.Load())
 	}
-	if res1.AlreadyConverted {
-		t.Errorf("expected already_converted=false on first run")
+
+	assertAdoptionPersistence(t, db, trajectory, title, origWorkspace, annotationPath, otherFields+"title:"+strconv.Quote(title)+"\n")
+
+	// 2. Second adoption with identical parameters (Idempotent No-op)
+	res2, err := mgr.AdoptConversation(ctx, AdoptConversationInput{
+		ConversationID: "conv-target-1",
+		Project:        "proj-uuid-1234", // resolve by ID
+		Title:          title,
+		RestartDaemon:  &restartTrue,
+	})
+	if err != nil {
+		t.Fatalf("second AdoptConversation: %v", err)
+	}
+	assertAdoptionReplay(t, res2, restartCalls.Load())
+
+	// A previous interrupted or legacy adoption can leave the SQL columns
+	// correct while the authoritative trajectory still has the prior project.
+	old := protohelper.MakeLengthDelimited(trajectoryProjectField, []byte("default-cli-project"))
+	if _, err := trajectory.Exec("UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'", old); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := mgr.AdoptConversation(ctx, request)
+	if err != nil || repaired.AlreadyConverted || !repaired.TrajectoryBlobUpdated || repaired.MetadataUpdated {
+		t.Fatalf("expected only the stale trajectory to be repaired: %+v, %v", repaired, err)
+	}
+}
+
+func assertInitialAdoption(t *testing.T, res1 *AdoptConversationResult, title string) {
+	t.Helper()
+	if !res1.Success || res1.AlreadyConverted || !res1.MetadataUpdated {
+		t.Errorf("expected local metadata to be updated on first adoption, got %+v", res1)
 	}
 	if res1.ProjectID != "proj-uuid-1234" {
 		t.Errorf("expected ProjectID=proj-uuid-1234, got %s", res1.ProjectID)
 	}
-	if res1.Title != "Concurrency Optimization" {
-		t.Errorf("expected Title='Concurrency Optimization', got %s", res1.Title)
+	if res1.Title != title {
+		t.Errorf("title = %q, want %q", res1.Title, title)
 	}
-	if !res1.DaemonRestarted {
-		t.Errorf("expected daemon_restarted=true, got reason: %s", res1.DaemonRestartReason)
+	if !res1.DaemonRestarted || !res1.PostRestartVerified || res1.CloudSyncState != ConversationSyncConfirmed {
+		t.Errorf("expected the restarted daemon to confirm adoption, got %+v", res1)
 	}
-	if !res1.MetadataUpdated {
-		t.Errorf("expected metadata_updated=true")
+	if !res1.DaemonCacheInvalidated || !res1.CLICacheInvalidated {
+		t.Errorf("expected stale entries to be invalidated in both snapshots: %+v", res1)
 	}
-	if !res1.PostRestartVerified {
-		t.Errorf("expected post_restart_verified=true")
-	}
-	if res1.CloudSyncState != ConversationSyncConfirmed {
-		t.Errorf("cloud_sync_state = %q, want confirmed", res1.CloudSyncState)
-	}
-	if atomic.LoadInt32(&restartCalls) != 1 {
-		t.Errorf("expected 1 restart call, got %d", atomic.LoadInt32(&restartCalls))
-	}
+}
 
+func assertAdoptionPersistence(t *testing.T, db, trajectory *sql.DB, title, origWorkspace, annotationPath, expectedAnnotation string) {
+	t.Helper()
 	// Verify DB state and workspace preservation
 	var dbPID, dbTitle, dbURI string
 	var dbRaw []byte
-	_ = db.QueryRow("SELECT project_id, title, workspace_uris, raw_summary FROM conversation_summaries WHERE conversation_id = 'conv-target-1'").Scan(&dbPID, &dbTitle, &dbURI, &dbRaw)
+	if err := db.QueryRow("SELECT project_id, title, workspace_uris, raw_summary FROM conversation_summaries WHERE conversation_id = 'conv-target-1'").Scan(&dbPID, &dbTitle, &dbURI, &dbRaw); err != nil {
+		t.Fatal(err)
+	}
 	if dbPID != "proj-uuid-1234" {
 		t.Errorf("DB project_id = %s, want proj-uuid-1234", dbPID)
 	}
-	if dbTitle != "Concurrency Optimization" {
-		t.Errorf("DB title = %s, want 'Concurrency Optimization'", dbTitle)
+	if dbTitle != title {
+		t.Errorf("DB title = %q, want %q", dbTitle, title)
 	}
-	// Check non-destructive workspace merge: both existing and new target root should be present
-	if dbURI != `["file:///data/existing-ws","file:///data/target-app"]` {
-		t.Errorf("DB workspace_uris = %s, want merged list", dbURI)
+	if dbURI != origWorkspace {
+		t.Errorf("DB workspace_uris = %s, want original workspace", dbURI)
+	}
+	assertTrajectoryProject(t, trajectory, "proj-uuid-1234")
+	if got, err := os.ReadFile(annotationPath); err != nil || string(got) != expectedAnnotation {
+		t.Fatalf("annotation did not preserve the other fields and quote the new title: %q, %v", got, err)
 	}
 	// Check raw_summary updated in DB
 	f17Bytes, ok := protohelper.GetFieldBytes(dbRaw, 17)
@@ -149,25 +260,19 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 		t.Errorf("raw_summary field 17.18 = %q, want 'proj-uuid-1234'", string(subPID))
 	}
 
-	// 2. Second adoption with identical parameters (Idempotent No-op)
-	res2, err := mgr.AdoptConversation(ctx, AdoptConversationInput{
-		ConversationID: "conv-target-1",
-		Project:        "proj-uuid-1234", // resolve by ID
-		Title:          "Concurrency Optimization",
-		RestartDaemon:  &restartTrue,
-	})
-	if err != nil {
-		t.Fatalf("second AdoptConversation: %v", err)
+}
+
+func assertAdoptionReplay(t *testing.T, res2 *AdoptConversationResult, restartCount int32) {
+	t.Helper()
+	if !res2.Success || !res2.AlreadyConverted ||
+		res2.MetadataUpdated || res2.TrajectoryBlobUpdated || res2.AnnotationsUpdated ||
+		res2.DaemonRestarted || res2.PostRestartVerified || res2.DaemonCacheInvalidated || res2.CLICacheInvalidated {
+		t.Errorf("expected no writes or restart on an idempotent run, got %+v", res2)
 	}
-	if !res2.Success {
-		t.Errorf("expected success=true")
+	if restartCount != 1 {
+		t.Errorf("repeat adoption restarted the daemon")
 	}
-	if !res2.AlreadyConverted {
-		t.Errorf("expected already_converted=true on repeated adoption")
-	}
-	if res2.MetadataUpdated {
-		t.Errorf("expected metadata_updated=false on idempotent run")
-	}
+
 }
 
 func TestAdoptConversationTitleDerivationFromPreview(t *testing.T) {
@@ -177,7 +282,7 @@ func TestAdoptConversationTitleDerivationFromPreview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	schema := `
 	CREATE TABLE conversation_summaries (
@@ -206,6 +311,7 @@ func TestAdoptConversationTitleDerivationFromPreview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	testAdoptionTrajectory(t, dir, "conv-preview-derive")
 
 	projDir := filepath.Join(dir, "projects")
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
@@ -294,6 +400,10 @@ func TestRestartSyncDaemonIdleCheck(t *testing.T) {
 	})
 
 	ctx := t.Context()
+
+	if _, err := mgr.AdoptConversation(ctx, AdoptConversationInput{ConversationID: "active-conv-1"}); err == nil || !strings.Contains(err.Error(), "conversation is busy") {
+		t.Errorf("expected active conversation adoption to be refused, got %v", err)
+	}
 
 	// 1. Standalone graceful restart: should detect active session and SKIP restart
 	restartRes, err := mgr.RestartSyncDaemon(ctx, false)

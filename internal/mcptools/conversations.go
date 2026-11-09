@@ -40,7 +40,7 @@ type getConversationOutput struct {
 
 type adoptConversationInput struct {
 	ConversationID string `json:"conversation_id" jsonschema:"required: true, conversation ID (UUID) to adopt into a registered project"`
-	Project        string `json:"project,omitempty" jsonschema:"target project ID, name, or directory path to bind the conversation to (defaults to current project if empty)"`
+	Project        string `json:"project,omitempty" jsonschema:"target project ID, name, or directory path. Required if the conversation has no current cloud project"`
 	Title          string `json:"title,omitempty" jsonschema:"optional title to assign; if omitted, retains existing non-empty title or derives from user prompt preview"`
 	RestartDaemon  *bool  `json:"restart_daemon,omitempty" jsonschema:"whether to attempt a graceful restart of antigravity-cli-daemon if idle (default: false)"`
 	ForceRestart   bool   `json:"force_restart,omitempty" jsonschema:"if true, bypasses the idle check and forces daemon restart (dangerous, defaults to false)"`

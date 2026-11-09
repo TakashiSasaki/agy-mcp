@@ -18,7 +18,7 @@ func TestAdoptConversationOverMCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	schema := `
 	CREATE TABLE conversation_summaries (
@@ -41,6 +41,18 @@ func TestAdoptConversationOverMCP(t *testing.T) {
 		VALUES ('conv-mcp-target', '', 'Review API schema compatibility', '', 'default-cli-project', 'COMPLETED', 0, '2026-11-09 10:00:00+00:00')
 	`)
 	if err != nil {
+		t.Fatal(err)
+	}
+	trajectoryDir := filepath.Join(tempDir, "conversations")
+	if err := os.Mkdir(trajectoryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trajectory, err := sql.Open("sqlite", filepath.Join(trajectoryDir, "conv-mcp-target.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = trajectory.Close() }()
+	if _, err := trajectory.Exec("CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob); INSERT INTO trajectory_metadata_blob VALUES ('main', X'')"); err != nil {
 		t.Fatal(err)
 	}
 

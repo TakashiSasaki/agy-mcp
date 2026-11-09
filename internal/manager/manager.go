@@ -29,17 +29,17 @@ import (
 
 // Manager coordinates jobs backed by an on-disk store.
 type Manager struct {
-	cfg         config.Config
-	store       jobStore   // *jobstore.Store in production; an interface so tests can inject failures
-	gate        *gate      // serializes conflicting jobs and caps total concurrency within this process
-	xlock       *crossLock // serializes same-key jobs across sibling processes sharing the state dir
+	cfg                 config.Config
+	store               jobStore   // *jobstore.Store in production; an interface so tests can inject failures
+	gate                *gate      // serializes conflicting jobs and caps total concurrency within this process
+	xlock               *crossLock // serializes same-key jobs across sibling processes sharing the state dir
 	cacheFile           string     // agy conversation cache (last_conversations.json); injectable for tests
 	projectsDir         string     // config directory for projects (~/.gemini/config/projects); injectable for tests
 	dataDir             string     // root directory for repositories (/data); injectable for tests
 	conversationsDBPath string     // path to conversation_summaries.db; injectable for tests
 	daemonRestartMu     sync.Mutex
 	lastDaemonRestart   time.Time
-	restartDaemonCmd    func(context.Context) error
+	restartDaemonCmd    func(context.Context, func(context.Context) error) (bool, error)
 	idemMu              sync.Mutex
 	idemKeys            map[string]bool // short-lived in-process idempotency claims; cross-process half lives in xlock
 
@@ -115,10 +115,6 @@ func New(c config.Config) *Manager {
 	m.readUsage = func(ctx context.Context) ([]byte, error) {
 		return m.runJSONProbe(ctx, "/"+usageCommandName, usageProbeArgs(), "", true, usageProbeTimeout, usageProbeKillGrace)
 	}
-	m.restartDaemonCmd = func(ctx context.Context) error {
-		cmd := probeCmd(ctx, "systemctl", "--user", "restart", "antigravity-cli-daemon.service")
-		return cmd.Run()
-	}
 	return m
 }
 
@@ -137,7 +133,14 @@ func (m *Manager) SetConversationsDBPathForTest(dbPath string) {
 func (m *Manager) SetRestartDaemonCmdForTest(fn func(context.Context) error) {
 	m.daemonRestartMu.Lock()
 	defer m.daemonRestartMu.Unlock()
-	m.restartDaemonCmd = fn
+	m.restartDaemonCmd = func(ctx context.Context, prepare func(context.Context) error) (bool, error) {
+		var prepErr error
+		if prepare != nil {
+			prepErr = prepare(ctx)
+		}
+		startErr := fn(ctx)
+		return startErr == nil, errors.Join(prepErr, startErr)
+	}
 }
 
 // StartRequest describes a run to start.

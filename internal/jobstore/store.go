@@ -346,6 +346,12 @@ func writeFileAtomicDurable(dir, name string, b []byte) error {
 	return nil
 }
 
+// WritePrivateFileAtomic publishes a private state file using the same atomic
+// replacement and durability rules as job receipts. Name is a file basename.
+func WritePrivateFileAtomic(dir, name string, data []byte) error {
+	return writeFileAtomicDurable(dir, name, data)
+}
+
 // missingAncestors returns the ancestor directories of dir that do not exist yet,
 // deepest first (dir itself, then its parent, and so on), stopping at the first
 // ancestor that already exists. This is the set os.MkdirAll(dir) will have to
