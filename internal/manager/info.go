@@ -28,6 +28,8 @@ type RuntimeInfo struct {
 	AuthCheckedAt    string `json:"auth_checked_at,omitempty" jsonschema:"UTC RFC 3339 timestamp of this optional model-list authentication probe"`
 	AuthDetail       string `json:"auth_detail,omitempty" jsonschema:"authentication probe diagnostic; CLI integration warnings do not by themselves imply auth failure"`
 	ReadOnlyEnforced bool   `json:"read_only_enforced" jsonschema:"false: this runtime does not provide a verified read-only execution backend"`
+	BuildBranch      string `json:"build_branch,omitempty" jsonschema:"git branch for this enhanced server build ('codex/local-enhancements')"`
+	CanonicalWorktree string `json:"canonical_worktree,omitempty" jsonschema:"canonical git worktree path hosting source enhancements"`
 }
 
 // RuntimeInfo never starts a model turn. Version checking is read-only; the
@@ -49,6 +51,8 @@ func (m *Manager) RuntimeInfo(ctx context.Context, checkAuth bool) (RuntimeInfo,
 		DefaultCwd: cwd, DefaultModel: modelID(m.cfg.DefaultModel), DefaultTimeout: m.cfg.DefaultTimeout.String(),
 		JobTTL: m.cfg.JobTTL.String(), MaxConcurrency: maximum, RunningJobs: running,
 		ConcurrencyScope: "process", AgyStatus: "unavailable", AuthStatus: "not_checked",
+		BuildBranch:       "codex/local-enhancements",
+		CanonicalWorktree: "/data/agy-mcp/codex/local-enhancements",
 	}
 	out.ExecutableState, out.ExecutableAdvice = executableState()
 	out.Hostname, _ = os.Hostname()

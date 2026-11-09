@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/tphakala/agy-mcp/v2/internal/protohelper"
 	_ "modernc.org/sqlite"
 )
 
@@ -32,18 +33,25 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 		source text NOT NULL DEFAULT "",
 		project_id text NOT NULL DEFAULT "",
 		agent_name text NOT NULL DEFAULT "",
-		not_fully_idle numeric NOT NULL DEFAULT false
+		not_fully_idle numeric NOT NULL DEFAULT false,
+		raw_summary blob
 	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
 
-	// Insert orphan session without title or project
+	// Mock raw_summary containing Field 15 (title: "") and Field 17.18 (project_id: "default-cli-project")
+	f15 := protohelper.MakeLengthDelimited(15, protohelper.MakeLengthDelimited(1, []byte("")))
+	f17 := protohelper.MakeLengthDelimited(17, protohelper.MakeLengthDelimited(18, []byte("default-cli-project")))
+	mockRaw := append(f15, f17...)
+
+	// Insert orphan session without title or project, with existing workspace URI
+	origWorkspace := `["file:///data/existing-ws"]`
 	_, err = db.Exec(`
-		INSERT INTO conversation_summaries (conversation_id, title, preview, workspace_uris, project_id, not_fully_idle, last_modified_time)
-		VALUES ('conv-target-1', '', 'How do I optimize this Go codebase for concurrency?', '', 'default-cli-project', 0, '2026-11-09 10:00:00+00:00')
-	`)
+		INSERT INTO conversation_summaries (conversation_id, title, preview, workspace_uris, project_id, not_fully_idle, last_modified_time, raw_summary)
+		VALUES ('conv-target-1', '', 'How do I optimize this Go codebase for concurrency?', ?, 'default-cli-project', 0, '2026-11-09 10:00:00+00:00', ?)
+	`, origWorkspace, mockRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +84,14 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	})
 
 	ctx := t.Context()
+	restartTrue := true
 
-	// 1. First adoption: should update DB and restart daemon
+	// 1. First adoption with restart_daemon: true
 	res1, err := mgr.AdoptConversation(ctx, AdoptConversationInput{
 		ConversationID: "conv-target-1",
 		Project:        "Target App", // resolve by name
 		Title:          "Concurrency Optimization",
+		RestartDaemon:  &restartTrue,
 	})
 	if err != nil {
 		t.Fatalf("first AdoptConversation: %v", err)
@@ -101,34 +111,58 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	if !res1.DaemonRestarted {
 		t.Errorf("expected daemon_restarted=true, got reason: %s", res1.DaemonRestartReason)
 	}
+	if !res1.MetadataUpdated {
+		t.Errorf("expected metadata_updated=true")
+	}
+	if !res1.PostRestartVerified {
+		t.Errorf("expected post_restart_verified=true")
+	}
 	if atomic.LoadInt32(&restartCalls) != 1 {
 		t.Errorf("expected 1 restart call, got %d", atomic.LoadInt32(&restartCalls))
 	}
 
-	// Verify DB state
+	// Verify DB state and workspace preservation
 	var dbPID, dbTitle, dbURI string
-	_ = db.QueryRow("SELECT project_id, title, workspace_uris FROM conversation_summaries WHERE conversation_id = 'conv-target-1'").Scan(&dbPID, &dbTitle, &dbURI)
-	if dbPID != "proj-uuid-1234" || dbTitle != "Concurrency Optimization" {
-		t.Errorf("DB state unexpected: pid=%s, title=%s", dbPID, dbTitle)
+	var dbRaw []byte
+	_ = db.QueryRow("SELECT project_id, title, workspace_uris, raw_summary FROM conversation_summaries WHERE conversation_id = 'conv-target-1'").Scan(&dbPID, &dbTitle, &dbURI, &dbRaw)
+	if dbPID != "proj-uuid-1234" {
+		t.Errorf("DB project_id = %s, want proj-uuid-1234", dbPID)
+	}
+	if dbTitle != "Concurrency Optimization" {
+		t.Errorf("DB title = %s, want 'Concurrency Optimization'", dbTitle)
+	}
+	// Check non-destructive workspace merge: both existing and new target root should be present
+	if dbURI != `["file:///data/existing-ws","file:///data/target-app"]` {
+		t.Errorf("DB workspace_uris = %s, want merged list", dbURI)
+	}
+	// Check raw_summary updated in DB
+	f17Bytes, ok := protohelper.GetFieldBytes(dbRaw, 17)
+	if !ok {
+		t.Fatalf("raw_summary missing field 17")
+	}
+	subPID, ok := protohelper.GetFieldBytes(f17Bytes, 18)
+	if !ok || string(subPID) != "proj-uuid-1234" {
+		t.Errorf("raw_summary field 17.18 = %q, want 'proj-uuid-1234'", string(subPID))
 	}
 
-	// 2. Second adoption with same arguments: should be IDEMPOTENT (already_converted=true, cooldown skips restart)
+	// 2. Second adoption with identical parameters (Idempotent No-op)
 	res2, err := mgr.AdoptConversation(ctx, AdoptConversationInput{
 		ConversationID: "conv-target-1",
 		Project:        "proj-uuid-1234", // resolve by ID
 		Title:          "Concurrency Optimization",
+		RestartDaemon:  &restartTrue,
 	})
 	if err != nil {
 		t.Fatalf("second AdoptConversation: %v", err)
 	}
+	if !res2.Success {
+		t.Errorf("expected success=true")
+	}
 	if !res2.AlreadyConverted {
-		t.Errorf("expected already_converted=true on second run")
+		t.Errorf("expected already_converted=true on repeated adoption")
 	}
-	if res2.DaemonRestarted {
-		t.Errorf("expected cooldown to prevent second restart")
-	}
-	if atomic.LoadInt32(&restartCalls) != 1 {
-		t.Errorf("restart call count should remain 1, got %d", atomic.LoadInt32(&restartCalls))
+	if res2.MetadataUpdated {
+		t.Errorf("expected metadata_updated=false on idempotent run")
 	}
 }
 
@@ -146,50 +180,67 @@ func TestAdoptConversationTitleDerivationFromPreview(t *testing.T) {
 		conversation_id text PRIMARY KEY,
 		title text NOT NULL DEFAULT "",
 		preview text NOT NULL DEFAULT "",
+		step_count integer NOT NULL DEFAULT 0,
+		last_modified_time datetime NOT NULL,
 		workspace_uris text NOT NULL,
+		status text NOT NULL DEFAULT "",
+		source text NOT NULL DEFAULT "",
 		project_id text NOT NULL DEFAULT "",
-		not_fully_idle numeric NOT NULL DEFAULT false,
-		last_modified_time datetime NOT NULL
+		agent_name text NOT NULL DEFAULT "",
+		not_fully_idle numeric NOT NULL DEFAULT false
 	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
 
+	previewText := "Please explain how Antigravity manages local worktrees and bare git repositories across diverse agent branches."
 	_, err = db.Exec(`
 		INSERT INTO conversation_summaries (conversation_id, title, preview, workspace_uris, project_id, not_fully_idle, last_modified_time)
-		VALUES ('conv-preview-test', '', 'Analyze PostgreSQL query latency and generate indexing recommendations', '', 'default-cli-project', 0, '2026-11-09 10:00:00+00:00')
-	`)
+		VALUES ('conv-preview-derive', '', ?, '', 'default-cli-project', 0, '2026-11-09 10:00:00+00:00')
+	`, previewText)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	projDir := filepath.Join(dir, "projects")
-	_ = os.MkdirAll(projDir, 0o755)
-	projJSON := `{"id": "proj-db", "name": "DB Project", "projectResources": {"resources": [{"folderUri": "file:///data/db"}]}}`
-	_ = os.WriteFile(filepath.Join(projDir, "db.json"), []byte(projJSON), 0o644)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projJSON := `{
+		"id": "proj-uuid-5678",
+		"name": "Docs Project",
+		"projectResources": {"resources": [{"folderUri": "file:///data/docs"}]},
+		"isWorkspaceOnly": false
+	}`
+	if err := os.WriteFile(filepath.Join(projDir, "docs.json"), []byte(projJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	mgr := &Manager{
 		projectsDir:         projDir,
 		dataDir:             t.TempDir(),
 		conversationsDBPath: dbPath,
 	}
-	mgr.SetRestartDaemonCmdForTest(func(ctx context.Context) error { return nil })
 
-	// Adopt without Title specified
-	res, err := mgr.AdoptConversation(t.Context(), AdoptConversationInput{
-		ConversationID: "conv-preview-test",
-		Project:        "DB Project",
+	ctx := t.Context()
+
+	// Title is omitted: should derive 60-char truncated title with "..."
+	res, err := mgr.AdoptConversation(ctx, AdoptConversationInput{
+		ConversationID: "conv-preview-derive",
+		Project:        "Docs Project",
 	})
 	if err != nil {
 		t.Fatalf("AdoptConversation: %v", err)
 	}
-	if res.Title != "Analyze PostgreSQL query latency and generate indexing recom..." {
-		t.Errorf("unexpected derived title: %q", res.Title)
+
+	expectedPrefix := "Please explain how Antigravity manages local worktrees and b..."
+	if res.Title != expectedPrefix {
+		t.Errorf("derived Title = %q, want %q", res.Title, expectedPrefix)
 	}
 }
 
-func TestAdoptConversationGracefulRestartIdleCheck(t *testing.T) {
+func TestRestartSyncDaemonIdleCheck(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "conversation_summaries.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -203,69 +254,78 @@ func TestAdoptConversationGracefulRestartIdleCheck(t *testing.T) {
 		conversation_id text PRIMARY KEY,
 		title text NOT NULL DEFAULT "",
 		preview text NOT NULL DEFAULT "",
+		step_count integer NOT NULL DEFAULT 0,
+		last_modified_time datetime NOT NULL,
 		workspace_uris text NOT NULL,
-		project_id text NOT NULL DEFAULT "",
 		status text NOT NULL DEFAULT "",
-		not_fully_idle numeric NOT NULL DEFAULT false,
-		last_modified_time datetime NOT NULL
+		source text NOT NULL DEFAULT "",
+		project_id text NOT NULL DEFAULT "",
+		agent_name text NOT NULL DEFAULT "",
+		not_fully_idle numeric NOT NULL DEFAULT false
 	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatal(err)
 	}
 
-	// Insert an active running conversation (not idle!)
+	// Insert an ACTIVE running conversation (not_fully_idle = 1)
 	_, err = db.Exec(`
 		INSERT INTO conversation_summaries (conversation_id, title, preview, workspace_uris, project_id, status, not_fully_idle, last_modified_time)
-		VALUES 
-			('conv-active', 'Active Task', '', '', 'proj-1', 'CASCADE_RUN_STATUS_RUNNING', 1, '2026-11-09 10:00:00+00:00'),
-			('conv-target', '', 'Some prompt', '', 'default-cli-project', 'COMPLETED', 0, '2026-11-09 09:00:00+00:00')
+		VALUES ('active-conv-1', 'Active Session', 'running prompt', '', 'default-cli-project', 'CASCADE_RUN_STATUS_RUNNING', 1, '2026-11-09 10:00:00+00:00')
 	`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	projDir := filepath.Join(dir, "projects")
-	_ = os.MkdirAll(projDir, 0o755)
-	projJSON := `{"id": "proj-1", "name": "App", "projectResources": {"resources": [{"folderUri": "file:///data/app"}]}}`
-	_ = os.WriteFile(filepath.Join(projDir, "app.json"), []byte(projJSON), 0o644)
-
 	mgr := &Manager{
-		projectsDir:         projDir,
+		projectsDir:         filepath.Join(dir, "projects"),
 		dataDir:             t.TempDir(),
 		conversationsDBPath: dbPath,
 	}
 
-	var restarted bool
+	var restartCalls int32
 	mgr.SetRestartDaemonCmdForTest(func(ctx context.Context) error {
-		restarted = true
+		atomic.AddInt32(&restartCalls, 1)
 		return nil
 	})
 
-	// 1. Without force: should skip restart because conv-active is not idle
-	res, err := mgr.AdoptConversation(t.Context(), AdoptConversationInput{
-		ConversationID: "conv-target",
-		Project:        "App",
-		Title:          "Adopted Safe",
-	})
+	ctx := t.Context()
+
+	// 1. Standalone graceful restart: should detect active session and SKIP restart
+	restartRes, err := mgr.RestartSyncDaemon(ctx, false)
 	if err != nil {
-		t.Fatalf("AdoptConversation: %v", err)
+		t.Fatalf("RestartSyncDaemon: %v", err)
 	}
-	if res.DaemonRestarted || restarted {
-		t.Errorf("expected restart to be SKIPPED due to active session")
+	if restartRes.DaemonRestarted {
+		t.Errorf("expected daemon_restarted=false when active tasks exist")
 	}
-	if res.ActiveSessionsCount != 1 {
-		t.Errorf("expected ActiveSessionsCount=1, got %d", res.ActiveSessionsCount)
+	if restartRes.ActiveSessionsCount != 1 {
+		t.Errorf("expected ActiveSessionsCount=1, got %d", restartRes.ActiveSessionsCount)
+	}
+	if atomic.LoadInt32(&restartCalls) != 0 {
+		t.Errorf("expected 0 restart calls, got %d", atomic.LoadInt32(&restartCalls))
 	}
 
-	// 2. Standalone restart with force_restart=true: should bypass idle check
-	resForce, err := mgr.AdoptConversation(t.Context(), AdoptConversationInput{
-		ForceRestart: true,
-	})
+	// 2. Standalone force restart: should bypass idle check
+	forceRes, err := mgr.RestartSyncDaemon(ctx, true)
 	if err != nil {
 		t.Fatalf("standalone force restart: %v", err)
 	}
-	if !resForce.DaemonRestarted || !restarted {
-		t.Errorf("expected force restart to succeed")
+	if !forceRes.DaemonRestarted {
+		t.Errorf("expected daemon_restarted=true with force=true")
+	}
+	if atomic.LoadInt32(&restartCalls) != 1 {
+		t.Errorf("expected 1 restart call after force restart, got %d", atomic.LoadInt32(&restartCalls))
+	}
+}
+
+func TestAdoptConversationRequiresConversationID(t *testing.T) {
+	mgr := &Manager{}
+	_, err := mgr.AdoptConversation(context.Background(), AdoptConversationInput{
+		ConversationID: "",
+		Project:        "any-proj",
+	})
+	if err == nil || err.Error() != "conversation_id is required" {
+		t.Errorf("expected 'conversation_id is required', got %v", err)
 	}
 }

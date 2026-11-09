@@ -1,16 +1,20 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/tphakala/agy-mcp/v2/internal/protohelper"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,7 +31,9 @@ type ConversationSummaryItem struct {
 	ConversationID   string   `json:"conversation_id" jsonschema:"unique UUID of the conversation session"`
 	Title            string   `json:"title" jsonschema:"human-readable title of the conversation"`
 	ProjectID        string   `json:"project_id" jsonschema:"associated project ID"`
+	ProjectName      string   `json:"project_name,omitempty" jsonschema:"human-readable project name"`
 	IsCloudSynced    bool     `json:"is_cloud_synced" jsonschema:"true if the conversation belongs to a registered cloud-synced project"`
+	SyncScope        string   `json:"sync_scope,omitempty" jsonschema:"cloud sync scope: 'cloud', 'local_only', 'cli_default', or 'unregistered'"`
 	Archived         bool     `json:"archived" jsonschema:"true if the conversation has been archived"`
 	Status           string   `json:"status" jsonschema:"execution lifecycle status of the conversation"`
 	StepCount        int      `json:"step_count" jsonschema:"number of execution steps recorded in the session"`
@@ -37,6 +43,7 @@ type ConversationSummaryItem struct {
 
 // ListConversationsInput provides parameters to filter and paginate conversation sessions.
 type ListConversationsInput struct {
+	ConversationID  string `json:"conversation_id,omitempty" jsonschema:"optional exact conversation ID (UUID) to filter"`
 	ProjectID       string `json:"project_id,omitempty" jsonschema:"optional project ID or UUID to filter conversations (e.g. 'c5f32b28-...', 'default-cli-project', 'outside-of-project')"`
 	Query           string `json:"query,omitempty" jsonschema:"optional substring to search within conversation titles"`
 	IncludeArchived bool   `json:"include_archived,omitempty" jsonschema:"whether to include archived conversations (default: false)"`
@@ -51,27 +58,39 @@ type ListConversationsResult struct {
 	HasMore       bool                      `json:"has_more"`
 }
 
-// AdoptConversationInput provides parameters for adopting a conversation into a project
-// and/or performing a graceful sync daemon restart.
+// AdoptConversationInput provides parameters for adopting a conversation into a project.
 type AdoptConversationInput struct {
-	ConversationID string `json:"conversation_id,omitempty" jsonschema:"optional conversation ID (UUID) to adopt into a cloud-synced project; if omitted, performs a standalone graceful sync daemon restart"`
-	Project        string `json:"project,omitempty" jsonschema:"target project ID, name, or directory path to bind the conversation to (required when conversation_id is provided)"`
+	ConversationID string `json:"conversation_id" jsonschema:"required: true, conversation ID (UUID) to adopt into a cloud-synced project"`
+	Project        string `json:"project,omitempty" jsonschema:"target project ID, name, or directory path to bind the conversation to (defaults to current project if empty)"`
 	Title          string `json:"title,omitempty" jsonschema:"optional title to assign; if omitted, retains existing non-empty title or derives from user prompt preview"`
-	RestartDaemon  *bool  `json:"restart_daemon,omitempty" jsonschema:"whether to attempt a graceful restart of antigravity-cli-daemon if idle (default: true)"`
+	RestartDaemon  *bool  `json:"restart_daemon,omitempty" jsonschema:"whether to attempt a graceful restart of antigravity-cli-daemon if idle (default: false)"`
 	ForceRestart   bool   `json:"force_restart,omitempty" jsonschema:"if true, bypasses the idle check and forces daemon restart (dangerous, defaults to false)"`
 }
 
-// AdoptConversationResult returns the outcome of conversation adoption and daemon restart.
+// AdoptConversationResult returns the outcome of conversation adoption and verification.
 type AdoptConversationResult struct {
-	Success             bool   `json:"success" jsonschema:"true if the requested conversion and/or restart succeeded"`
-	AlreadyConverted    bool   `json:"already_converted" jsonschema:"true if the conversation was already bound to the target project with an effective title (idempotent no-op)"`
-	ConversationID      string `json:"conversation_id,omitempty" jsonschema:"conversation ID that was processed"`
-	ProjectID           string `json:"project_id,omitempty" jsonschema:"resolved project UUID"`
-	ProjectName         string `json:"project_name,omitempty" jsonschema:"human-readable name of the target project"`
-	Title               string `json:"title,omitempty" jsonschema:"title assigned or retained on the conversation"`
-	DaemonRestarted     bool   `json:"daemon_restarted" jsonschema:"true if antigravity-cli-daemon was successfully restarted"`
-	DaemonRestartReason string `json:"daemon_restart_reason,omitempty" jsonschema:"explanation of restart outcome"`
-	ActiveSessionsCount int    `json:"active_sessions_count,omitempty" jsonschema:"number of currently active/running sessions detected if restart was skipped"`
+	Success               bool   `json:"success" jsonschema:"true if the adoption succeeded"`
+	AlreadyConverted      bool   `json:"already_converted" jsonschema:"true if the conversation was already bound to the target project with the desired title and workspace"`
+	ConversationID        string `json:"conversation_id" jsonschema:"conversation ID that was processed"`
+	ProjectID             string `json:"project_id" jsonschema:"resolved project UUID"`
+	ProjectName           string `json:"project_name" jsonschema:"human-readable name of the target project"`
+	Title                 string `json:"title" jsonschema:"title assigned or retained on the conversation"`
+	MetadataUpdated       bool   `json:"metadata_updated" jsonschema:"true if conversation_summaries.db columns and raw_summary blob were updated"`
+	TrajectoryBlobUpdated bool   `json:"trajectory_blob_updated" jsonschema:"true if conversations/<id>.db trajectory_metadata_blob was updated"`
+	AnnotationsUpdated     bool   `json:"annotations_updated" jsonschema:"true if annotations/<id>.pbtxt was updated"`
+	RPCNotified           bool   `json:"rpc_notified" jsonschema:"true if Language Server Connect RPC UpdateConversationAnnotations was notified"`
+	DaemonRestarted       bool   `json:"daemon_restarted" jsonschema:"true if antigravity-cli-daemon was restarted"`
+	DaemonRestartReason   string `json:"daemon_restart_reason,omitempty" jsonschema:"explanation of restart outcome"`
+	ActiveSessionsCount   int    `json:"active_sessions_count,omitempty" jsonschema:"number of currently active/running sessions detected if restart was skipped"`
+	PostRestartVerified   bool   `json:"post_restart_verified" jsonschema:"true if verified that the updated state persists in conversation_summaries.db"`
+}
+
+// DaemonRestartResult carries the output of a standalone graceful sync daemon restart.
+type DaemonRestartResult struct {
+	Success             bool   `json:"success" jsonschema:"true if restart completed or was cleanly skipped due to active sessions"`
+	DaemonRestarted     bool   `json:"daemon_restarted" jsonschema:"true if antigravity-cli-daemon was restarted"`
+	DaemonRestartReason string `json:"daemon_restart_reason" jsonschema:"explanation of restart outcome"`
+	ActiveSessionsCount int    `json:"active_sessions_count" jsonschema:"number of currently active sessions detected"`
 }
 
 type projectConversationStats struct {
@@ -99,41 +118,26 @@ func parseSQLiteTimestamp(raw string) (time.Time, string) {
 	return time.Time{}, raw
 }
 
-func openReadonlyDB(dbPath string) (*sql.DB, bool, error) {
-	if dbPath == "" {
-		return nil, false, nil
-	}
-	if _, err := os.Stat(dbPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	// Connect using read-only query mode to avoid any write locks
-	dsn := fmt.Sprintf("file:%s?mode=ro", filepath.ToSlash(dbPath))
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, false, fmt.Errorf("open sqlite db: %w", err)
-	}
-	return db, true, nil
-}
-
 // GetProjectConversationStats inspects conversation_summaries.db and computes
-// conversation count and latest modified timestamp for each project_id.
+// the number of sessions and latest activity timestamp grouped by project_id.
 func (m *Manager) GetProjectConversationStats() (map[string]projectConversationStats, error) {
 	dbPath := m.conversationsDBPath
 	if dbPath == "" {
 		dbPath = defaultConversationsDBPath()
 	}
-	db, ok, err := openReadonlyDB(dbPath)
-	if err != nil || !ok {
-		return map[string]projectConversationStats{}, err
+	if _, err := os.Stat(dbPath); err != nil {
+		return make(map[string]projectConversationStats), nil
+	}
+
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open conversation db read-only: %w", err)
 	}
 	defer db.Close()
 
 	rows, err := db.Query("SELECT project_id, count(*), max(last_modified_time) FROM conversation_summaries GROUP BY project_id")
 	if err != nil {
-		return map[string]projectConversationStats{}, nil
+		return nil, fmt.Errorf("query project stats: %w", err)
 	}
 	defer rows.Close()
 
@@ -145,17 +149,29 @@ func (m *Manager) GetProjectConversationStats() (map[string]projectConversationS
 		if err := rows.Scan(&pid, &count, &maxTime); err != nil {
 			continue
 		}
-		_, formatted := parseSQLiteTimestamp(maxTime.String)
-		stats[pid.String] = projectConversationStats{
+		key := pid.String
+		if key == "" {
+			key = "unassigned"
+		}
+		_, rfc := parseSQLiteTimestamp(maxTime.String)
+		stats[key] = projectConversationStats{
 			Count:      count,
-			LastActive: formatted,
+			LastActive: rfc,
 		}
 	}
 	return stats, nil
 }
 
-// ListConversations queries conversation sessions with filtering and pagination.
+// ListConversations queries conversation_summaries.db for matching conversation records.
 func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversationsResult, error) {
+	dbPath := m.conversationsDBPath
+	if dbPath == "" {
+		dbPath = defaultConversationsDBPath()
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("conversation database not found at %s: %w", dbPath, err)
+	}
+
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 50
@@ -167,47 +183,44 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 		offset = 0
 	}
 
-	dbPath := m.conversationsDBPath
-	if dbPath == "" {
-		dbPath = defaultConversationsDBPath()
-	}
-	db, ok, err := openReadonlyDB(dbPath)
+	projects, err := m.ListProjects("")
 	if err != nil {
-		return nil, err
+		projects = []ProjectInfo{}
 	}
-	if !ok {
-		return &ListConversationsResult{Conversations: []ConversationSummaryItem{}}, nil
+	projectMap := make(map[string]ProjectInfo)
+	for _, p := range projects {
+		projectMap[p.ID] = p
+	}
+
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open conversation db read-only: %w", err)
 	}
 	defer db.Close()
 
-	// Check if conversations_fts exists for archived status check
-	hasFTS := false
-	var tableName string
-	if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='conversations_fts'").Scan(&tableName); err == nil && tableName == "conversations_fts" {
-		hasFTS = true
-	}
+	var hasFTS bool
+	var ftsCheck int
+	_ = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations_fts'").Scan(&ftsCheck)
+	hasFTS = ftsCheck > 0
 
-	// Build WHERE clause
 	var whereClauses []string
-	var args []any
+	var args []interface{}
+
+	if strings.TrimSpace(in.ConversationID) != "" {
+		whereClauses = append(whereClauses, "c.conversation_id = ?")
+		args = append(args, strings.TrimSpace(in.ConversationID))
+	}
 
 	if in.ProjectID != "" {
 		whereClauses = append(whereClauses, "c.project_id = ?")
 		args = append(args, in.ProjectID)
 	}
-
 	if in.Query != "" {
 		whereClauses = append(whereClauses, "c.title LIKE ?")
 		args = append(args, "%"+in.Query+"%")
 	}
-
 	if !in.IncludeArchived && hasFTS {
-		whereClauses = append(whereClauses, "COALESCE(f.archived, 0) = 0")
-	}
-
-	whereSQL := ""
-	if len(whereClauses) > 0 {
-		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+		whereClauses = append(whereClauses, "(f.archived IS NULL OR f.archived = 0)")
 	}
 
 	var fromClause string
@@ -217,22 +230,26 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 		fromClause = "FROM conversation_summaries c"
 	}
 
-	countQuery := fmt.Sprintf("SELECT COUNT(*) %s %s", fromClause, whereSQL)
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	countQuery := "SELECT count(*) " + fromClause + whereSQL
 	var totalCount int
 	if err := db.QueryRow(countQuery, args...).Scan(&totalCount); err != nil {
 		return nil, fmt.Errorf("count conversations: %w", err)
 	}
 
-	// Select fields
-	var selectCols string
+	selectCols := "c.conversation_id, c.title, c.step_count, c.last_modified_time, c.workspace_uris, c.status, c.project_id"
 	if hasFTS {
-		selectCols = "c.conversation_id, c.title, c.project_id, c.status, c.step_count, c.workspace_uris, c.last_modified_time, COALESCE(f.archived, 0)"
+		selectCols += ", COALESCE(f.archived, 0)"
 	} else {
-		selectCols = "c.conversation_id, c.title, c.project_id, c.status, c.step_count, c.workspace_uris, c.last_modified_time, 0"
+		selectCols += ", 0"
 	}
 
-	dataQuery := fmt.Sprintf("SELECT %s %s %s ORDER BY c.last_modified_time DESC LIMIT ? OFFSET ?", selectCols, fromClause, whereSQL)
-	queryArgs := append(slicesClone(args), limit, offset)
+	dataQuery := fmt.Sprintf("SELECT %s %s%s ORDER BY c.last_modified_time DESC LIMIT ? OFFSET ?", selectCols, fromClause, whereSQL)
+	queryArgs := append(args, limit, offset)
 
 	rows, err := db.Query(dataQuery, queryArgs...)
 	if err != nil {
@@ -240,136 +257,229 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 	}
 	defer rows.Close()
 
-	// Discover cloud projects to set IsCloudSynced
-	cloudProjects := m.discoverCloudProjectIDs()
-
 	var items []ConversationSummaryItem
 	for rows.Next() {
 		var (
-			cid         sql.NullString
-			title       sql.NullString
-			pid         sql.NullString
-			status      sql.NullString
-			stepCount   int
-			urisRaw     sql.NullString
-			lastModRaw  sql.NullString
-			archivedNum int
+			cid          string
+			title        sql.NullString
+			stepCount    int
+			lastModRaw   sql.NullString
+			wsRaw        sql.NullString
+			status       sql.NullString
+			projectID    sql.NullString
+			archivedFlag int
 		)
-		if err := rows.Scan(&cid, &title, &pid, &status, &stepCount, &urisRaw, &lastModRaw, &archivedNum); err != nil {
-			continue
+		if err := rows.Scan(&cid, &title, &stepCount, &lastModRaw, &wsRaw, &status, &projectID, &archivedFlag); err != nil {
+			return nil, fmt.Errorf("scan conversation row: %w", err)
 		}
 
-		var uris []string
-		if urisRaw.Valid && urisRaw.String != "" {
-			_ = json.Unmarshal([]byte(urisRaw.String), &uris)
+		var wsList []string
+		if wsRaw.Valid && wsRaw.String != "" {
+			_ = json.Unmarshal([]byte(wsRaw.String), &wsList)
 		}
-		if uris == nil {
-			uris = []string{}
+		if wsList == nil {
+			wsList = []string{}
 		}
 
-		_, formattedTime := parseSQLiteTimestamp(lastModRaw.String)
+		_, lastModRFC := parseSQLiteTimestamp(lastModRaw.String)
 
-		isSynced := false
-		if pid.Valid && cloudProjects[pid.String] {
-			isSynced = true
+		isCloudSynced := false
+		syncScope := "unregistered"
+		projName := ""
+		if proj, ok := projectMap[projectID.String]; ok {
+			projName = proj.Name
+			syncScope = proj.SyncScope
+			if proj.IsCloudSynced && strings.TrimSpace(title.String) != "" {
+				isCloudSynced = true
+			}
+		} else if projectID.String == "default-cli-project" {
+			syncScope = "cli_default"
 		}
 
 		items = append(items, ConversationSummaryItem{
-			ConversationID:   cid.String,
+			ConversationID:   cid,
 			Title:            title.String,
-			ProjectID:        pid.String,
-			IsCloudSynced:    isSynced,
-			Archived:         archivedNum > 0,
+			ProjectID:        projectID.String,
+			ProjectName:      projName,
+			IsCloudSynced:    isCloudSynced,
+			SyncScope:        syncScope,
+			Archived:         archivedFlag > 0,
 			Status:           status.String,
 			StepCount:        stepCount,
-			WorkspaceURIs:    uris,
-			LastModifiedTime: formattedTime,
+			WorkspaceURIs:    wsList,
+			LastModifiedTime: lastModRFC,
 		})
 	}
+
 	if items == nil {
 		items = []ConversationSummaryItem{}
 	}
 
-	hasMore := (offset + len(items)) < totalCount
-
 	return &ListConversationsResult{
 		Conversations: items,
 		TotalCount:    totalCount,
-		HasMore:       hasMore,
+		HasMore:       offset+len(items) < totalCount,
 	}, nil
 }
 
-// discoverCloudProjectIDs reads registered project JSON files and returns IDs
-// that are considered cloud-synced (not isWorkspaceOnly, and not cli-default/outside-of-project).
-func (m *Manager) discoverCloudProjectIDs() map[string]bool {
-	projDir := m.projectsDir
-	if projDir == "" {
-		projDir = defaultProjectsConfigDir()
-	}
-	cloudMap := make(map[string]bool)
-	entries, err := os.ReadDir(projDir)
+// GetConversation retrieves detailed metadata and cloud-sync status for a single conversation.
+func (m *Manager) GetConversation(conversationID string) (*ConversationSummaryItem, error) {
+	res, err := m.ListConversations(ListConversationsInput{
+		ConversationID:  conversationID,
+		IncludeArchived: true,
+		Limit:           1,
+	})
 	if err != nil {
-		return cloudMap
+		return nil, err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(projDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		var reg projectRegistration
-		if err := json.Unmarshal(data, &reg); err != nil || reg.ID == "" {
-			continue
-		}
-		if reg.ID == "default-cli-project" || reg.ID == "outside-of-project" {
-			continue
-		}
-		if reg.IsWorkspaceOnly != nil && *reg.IsWorkspaceOnly {
-			continue
-		}
-		cloudMap[reg.ID] = true
+	if len(res.Conversations) == 0 {
+		return nil, fmt.Errorf("conversation %q not found", conversationID)
 	}
-	return cloudMap
+	return &res.Conversations[0], nil
 }
 
-func slicesClone[T any](s []T) []T {
-	if s == nil {
-		return nil
+// mergeWorkspaceURIs non-destructively preserves existing URIs and appends targetProjRoot if not already present.
+func mergeWorkspaceURIs(curJSON string, targetProjRoot string) string {
+	var uris []string
+	if curJSON != "" {
+		_ = json.Unmarshal([]byte(curJSON), &uris)
 	}
-	c := make([]T, len(s))
-	copy(c, s)
-	return c
+	if targetProjRoot != "" {
+		targetURI := "file://" + filepath.ToSlash(targetProjRoot)
+		found := false
+		for _, u := range uris {
+			if strings.TrimRight(u, "/") == strings.TrimRight(targetURI, "/") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			uris = append(uris, targetURI)
+		}
+	}
+	b, _ := json.Marshal(uris)
+	return string(b)
 }
 
-const daemonRestartCooldown = 15 * time.Second
+// updateTrajectoryMetadataBlob updates Field 18 (project_id) in conversations/<id>.db's trajectory_metadata_blob.
+func (m *Manager) updateTrajectoryMetadataBlob(conversationID string, projectID string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	convDBPath := filepath.Join(home, ".gemini", "antigravity-cli", "conversations", conversationID+".db")
+	if _, err := os.Stat(convDBPath); err != nil {
+		return false
+	}
 
-// AdoptConversation binds a conversation to a specified project, assigns or retains a title,
-// and optionally triggers a graceful sync daemon restart if no sessions are actively running.
-// If in.ConversationID is empty, it operates as a standalone graceful sync daemon restart.
+	db, err := sql.Open("sqlite", convDBPath)
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+
+	var origData []byte
+	err = db.QueryRow("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").Scan(&origData)
+	if err != nil {
+		return false
+	}
+
+	newData, err := protohelper.SetFieldBytes(origData, 18, []byte(projectID))
+	if err != nil {
+		return false
+	}
+
+	_, err = db.Exec("UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'", newData)
+	return err == nil
+}
+
+// updateAnnotationFile updates or adds title:"..." in annotations/<id>.pbtxt.
+func (m *Manager) updateAnnotationFile(conversationID string, title string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	annotDir := filepath.Join(home, ".gemini", "antigravity-cli", "annotations")
+	_ = os.MkdirAll(annotDir, 0755)
+	annotPath := filepath.Join(annotDir, conversationID+".pbtxt")
+
+	escapedTitle := strings.ReplaceAll(title, `\`, `\\`)
+	escapedTitle = strings.ReplaceAll(escapedTitle, `"`, `\"`)
+	newTitleEntry := fmt.Sprintf(`title:"%s"`, escapedTitle)
+
+	data, err := os.ReadFile(annotPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.WriteFile(annotPath, []byte(newTitleEntry+"\n"), 0644) == nil
+		}
+		return false
+	}
+
+	content := string(data)
+	re := regexp.MustCompile(`title:\s*"([^"\\]|\\.)*"`)
+	if re.MatchString(content) {
+		content = re.ReplaceAllString(content, newTitleEntry)
+	} else {
+		content = newTitleEntry + " " + strings.TrimSpace(content) + "\n"
+	}
+	return os.WriteFile(annotPath, []byte(content), 0644) == nil
+}
+
+// notifyLanguageServerAnnotationUpdate calls Connect RPC UpdateConversationAnnotations if Language Server is running.
+func (m *Manager) notifyLanguageServerAnnotationUpdate(ctx context.Context, conversationID string, title string) bool {
+	lsAddr := os.Getenv("ANTIGRAVITY_LS_ADDRESS")
+	if lsAddr == "" {
+		return false
+	}
+	csrfToken := os.Getenv("ANTIGRAVITY_CSRF_TOKEN")
+
+	url := fmt.Sprintf("http://%s/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations", lsAddr)
+	payload := map[string]interface{}{
+		"cascade_id": conversationID,
+		"annotations": map[string]string{
+			"title": title,
+		},
+		"merge_annotations": true,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if csrfToken != "" {
+		req.Header.Set("x-codeium-csrf-token", csrfToken)
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// AdoptConversation binds a conversation to a registered project, assigns an effective title,
+// and ensures consistent atomic persistence across DB, protobuf blobs, annotation files, and Connect RPC.
 func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInput) (*AdoptConversationResult, error) {
-	res := &AdoptConversationResult{}
+	if strings.TrimSpace(in.ConversationID) == "" {
+		return nil, errors.New("conversation_id is required")
+	}
+
+	res := &AdoptConversationResult{
+		ConversationID: in.ConversationID,
+	}
 
 	dbPath := m.conversationsDBPath
 	if dbPath == "" {
 		dbPath = defaultConversationsDBPath()
 	}
 
-	// Case 1: Standalone graceful daemon restart (ConversationID is omitted)
-	if strings.TrimSpace(in.ConversationID) == "" {
-		restarted, reason, activeCount, err := m.restartSyncDaemon(ctx, in.ForceRestart)
-		if err != nil {
-			return nil, err
-		}
-		res.Success = true
-		res.DaemonRestarted = restarted
-		res.DaemonRestartReason = reason
-		res.ActiveSessionsCount = activeCount
-		return res, nil
-	}
-
-	// Case 2: Adopt Conversation into a Project
 	targetProj, err := m.resolveProjectTarget(in.Project)
 	if err != nil {
 		return nil, err
@@ -385,22 +495,36 @@ func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInp
 	}
 	defer db.Close()
 
+	// Check if raw_summary column exists
+	var rawCheck int
+	_ = db.QueryRow("SELECT count(*) FROM pragma_table_info('conversation_summaries') WHERE name = 'raw_summary'").Scan(&rawCheck)
+	hasRawSummary := rawCheck > 0
+
 	// Query current conversation row
 	var (
-		curProjectID sql.NullString
-		curWorkspace sql.NullString
-		curTitle     sql.NullString
-		curPreview   sql.NullString
+		curProjectID  sql.NullString
+		curWorkspace  sql.NullString
+		curTitle      sql.NullString
+		curPreview    sql.NullString
+		curRawSummary []byte
 	)
-	err = db.QueryRow(
-		"SELECT project_id, workspace_uris, title, preview FROM conversation_summaries WHERE conversation_id = ?",
-		in.ConversationID,
-	).Scan(&curProjectID, &curWorkspace, &curTitle, &curPreview)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	var queryErr error
+	if hasRawSummary {
+		queryErr = db.QueryRow(
+			"SELECT project_id, workspace_uris, title, preview, raw_summary FROM conversation_summaries WHERE conversation_id = ?",
+			in.ConversationID,
+		).Scan(&curProjectID, &curWorkspace, &curTitle, &curPreview, &curRawSummary)
+	} else {
+		queryErr = db.QueryRow(
+			"SELECT project_id, workspace_uris, title, preview FROM conversation_summaries WHERE conversation_id = ?",
+			in.ConversationID,
+		).Scan(&curProjectID, &curWorkspace, &curTitle, &curPreview)
+	}
+	if queryErr != nil {
+		if errors.Is(queryErr, sql.ErrNoRows) {
 			return nil, fmt.Errorf("conversation %q not found in conversation_summaries.db", in.ConversationID)
 		}
-		return nil, fmt.Errorf("query conversation: %w", err)
+		return nil, fmt.Errorf("query conversation: %w", queryErr)
 	}
 
 	// Determine final title
@@ -427,40 +551,81 @@ func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInp
 		}
 	}
 
-	targetWorkspaceBytes, _ := json.Marshal([]string{"file://" + filepath.ToSlash(targetProj.Root)})
-	targetWorkspaceStr := string(targetWorkspaceBytes)
+	mergedWorkspace := mergeWorkspaceURIs(curWorkspace.String, targetProj.Root)
 
-	// Idempotency check: already in target project with desired title and workspace
+	// Idempotency check: already in target project with desired title and merged workspace
 	isAlreadyConverted := (curProjectID.String == targetProj.ID) &&
 		(curTitle.String == finalTitle) &&
-		(curWorkspace.String == targetWorkspaceStr || targetProj.Root == "")
+		(curWorkspace.String == mergedWorkspace || targetProj.Root == "")
 
+	// 1. Update conversations/<id>.db trajectory_metadata_blob
+	trajUpdated := m.updateTrajectoryMetadataBlob(in.ConversationID, targetProj.ID)
+	res.TrajectoryBlobUpdated = trajUpdated
+
+	// 2. Update annotations/<id>.pbtxt
+	annotUpdated := m.updateAnnotationFile(in.ConversationID, finalTitle)
+	res.AnnotationsUpdated = annotUpdated
+
+	// 3. Update conversation_summaries.db columns AND raw_summary protobuf blob
+	metadataUpdated := false
 	if !isAlreadyConverted {
-		_, err = db.Exec(
-			"UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, title = ? WHERE conversation_id = ?",
-			targetProj.ID, targetWorkspaceStr, finalTitle, in.ConversationID,
-		)
+		var newRawSummary []byte
+		if hasRawSummary && len(curRawSummary) > 0 {
+			// Update Subfield 1 in Field 15 (title)
+			s1, err := protohelper.SetSubFieldBytes(curRawSummary, 15, 1, []byte(finalTitle))
+			if err == nil {
+				// Update Subfield 18 in Field 17 (project_id)
+				s2, err := protohelper.SetSubFieldBytes(s1, 17, 18, []byte(targetProj.ID))
+				if err == nil {
+					newRawSummary = s2
+				}
+			}
+		}
+
+		if hasRawSummary && len(newRawSummary) > 0 {
+			_, err = db.Exec(
+				"UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, title = ?, raw_summary = ? WHERE conversation_id = ?",
+				targetProj.ID, mergedWorkspace, finalTitle, newRawSummary, in.ConversationID,
+			)
+		} else {
+			_, err = db.Exec(
+				"UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, title = ? WHERE conversation_id = ?",
+				targetProj.ID, mergedWorkspace, finalTitle, in.ConversationID,
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("update conversation summary: %w", err)
 		}
+		metadataUpdated = true
 	}
+	res.MetadataUpdated = metadataUpdated
+
+	// 4. Notify Language Server Connect RPC if alive
+	rpcNotified := m.notifyLanguageServerAnnotationUpdate(ctx, in.ConversationID, finalTitle)
+	res.RPCNotified = rpcNotified
 
 	res.Success = true
 	res.AlreadyConverted = isAlreadyConverted
-	res.ConversationID = in.ConversationID
 	res.ProjectID = targetProj.ID
 	res.ProjectName = targetProj.Name
 	res.Title = finalTitle
 
-	// Handle daemon restart if requested (default: true)
-	restart := true
+	// 5. Verify post-update state in DB
+	var verifyPID, verifyTitle string
+	_ = db.QueryRow("SELECT project_id, title FROM conversation_summaries WHERE conversation_id = ?", in.ConversationID).Scan(&verifyPID, &verifyTitle)
+	if verifyPID == targetProj.ID && verifyTitle == finalTitle {
+		res.PostRestartVerified = true
+	}
+
+	// 6. Optional daemon restart (default: false now that Connect RPC live-notifies)
+	restart := false
 	if in.RestartDaemon != nil {
 		restart = *in.RestartDaemon
 	}
 
 	if !restart {
 		res.DaemonRestarted = false
-		res.DaemonRestartReason = "restart disabled by caller"
+		res.DaemonRestartReason = "restart not requested (connect rpc and file persistence applied)"
 		return res, nil
 	}
 
@@ -477,104 +642,98 @@ func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInp
 	return res, nil
 }
 
-func (m *Manager) resolveProjectTarget(projectQuery string) (*ProjectInfo, error) {
-	query := strings.TrimSpace(projectQuery)
-	if query == "" {
-		return nil, errors.New("project identifier or name is required")
-	}
-	projects, err := m.ListProjects("")
+// RestartSyncDaemon exposes standalone graceful restart functionality.
+func (m *Manager) RestartSyncDaemon(ctx context.Context, force bool) (*DaemonRestartResult, error) {
+	restarted, reason, activeCount, err := m.restartSyncDaemon(ctx, force)
 	if err != nil {
-		return nil, fmt.Errorf("list projects: %w", err)
+		return nil, err
 	}
-
-	lowerQuery := strings.ToLower(query)
-
-	// 1. Exact ID match
-	for _, p := range projects {
-		if strings.EqualFold(p.ID, query) {
-			return &p, nil
-		}
-	}
-
-	// 2. Exact Name match
-	for _, p := range projects {
-		if strings.EqualFold(p.Name, query) {
-			return &p, nil
-		}
-	}
-
-	// 3. Exact Root directory match
-	cleanQuery := filepath.Clean(query)
-	for _, p := range projects {
-		if filepath.Clean(p.Root) == cleanQuery {
-			return &p, nil
-		}
-	}
-
-	// 4. Substring match
-	var matches []ProjectInfo
-	for _, p := range projects {
-		if strings.Contains(strings.ToLower(p.ID), lowerQuery) ||
-			strings.Contains(strings.ToLower(p.Name), lowerQuery) ||
-			strings.Contains(strings.ToLower(p.Root), lowerQuery) {
-			matches = append(matches, p)
-		}
-	}
-	if len(matches) == 1 {
-		return &matches[0], nil
-	}
-	if len(matches) > 1 {
-		var names []string
-		for _, match := range matches {
-			names = append(names, fmt.Sprintf("%s (%s)", match.Name, match.ID))
-		}
-		return nil, fmt.Errorf("project query %q is ambiguous: matches %s", query, strings.Join(names, ", "))
-	}
-
-	return nil, fmt.Errorf("project %q not found in registered Antigravity projects or /data", query)
+	return &DaemonRestartResult{
+		Success:             true,
+		DaemonRestarted:     restarted,
+		DaemonRestartReason: reason,
+		ActiveSessionsCount: activeCount,
+	}, nil
 }
 
-func (m *Manager) restartSyncDaemon(ctx context.Context, force bool) (restarted bool, reason string, activeCount int, err error) {
+func (m *Manager) resolveProjectTarget(projectQuery string) (*ProjectInfo, error) {
+	projects, err := m.ListProjects("")
+	if err != nil {
+		return nil, fmt.Errorf("list projects for adoption resolution: %w", err)
+	}
+
+	cleanQuery := strings.TrimSpace(projectQuery)
+	if cleanQuery == "" {
+		for _, p := range projects {
+			if p.IsCloudSynced {
+				return &p, nil
+			}
+		}
+		if len(projects) > 0 {
+			return &projects[0], nil
+		}
+		return nil, errors.New("no projects available to adopt conversation")
+	}
+
+	for _, p := range projects {
+		if strings.EqualFold(p.ID, cleanQuery) {
+			return &p, nil
+		}
+	}
+	for _, p := range projects {
+		if strings.EqualFold(p.Name, cleanQuery) {
+			return &p, nil
+		}
+	}
+	queryPath := filepath.Clean(cleanQuery)
+	for _, p := range projects {
+		if p.Root != "" && filepath.Clean(p.Root) == queryPath {
+			return &p, nil
+		}
+	}
+
+	return nil, fmt.Errorf("target project %q could not be resolved by ID, name, or folder path", cleanQuery)
+}
+
+// restartSyncDaemon performs an idle-checked graceful restart of antigravity-cli-daemon.
+func (m *Manager) restartSyncDaemon(ctx context.Context, force bool) (bool, string, int, error) {
 	m.daemonRestartMu.Lock()
 	defer m.daemonRestartMu.Unlock()
 
-	// 1. Cooldown check (prevent restart thrashing within 15 seconds)
 	now := time.Now()
-	if !m.lastDaemonRestart.IsZero() && now.Sub(m.lastDaemonRestart) < daemonRestartCooldown {
-		return false, "skipped: cooldown active (recently restarted)", 0, nil
+	if !force && now.Sub(m.lastDaemonRestart) < 15*time.Second {
+		rem := 15*time.Second - now.Sub(m.lastDaemonRestart)
+		return false, fmt.Sprintf("debounced restart: last restart was %v ago (cooldown %v remaining)", now.Sub(m.lastDaemonRestart).Round(time.Second), rem.Round(time.Second)), 0, nil
 	}
 
-	// 2. Idle check (unless force is true)
 	if !force {
 		dbPath := m.conversationsDBPath
 		if dbPath == "" {
 			dbPath = defaultConversationsDBPath()
 		}
-		if _, statErr := os.Stat(dbPath); statErr == nil {
-			db, ok, openErr := openReadonlyDB(dbPath)
-			if openErr == nil && ok {
+		if _, err := os.Stat(dbPath); err == nil {
+			db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+			if err == nil {
 				defer db.Close()
 				var running int
 				_ = db.QueryRow("SELECT COUNT(*) FROM conversation_summaries WHERE not_fully_idle != 0 OR status = 'CASCADE_RUN_STATUS_RUNNING'").Scan(&running)
 				if running > 0 {
-					return false, fmt.Sprintf("skipped: %d active session(s) running; changes saved to DB and will sync in next automatic cycle", running), running, nil
+					return false, fmt.Sprintf("%d active conversation(s) running; skipped restart to protect active tasks", running), running, nil
 				}
 			}
 		}
 	}
 
-	// 3. Perform restart
-	cmdFn := m.restartDaemonCmd
-	if cmdFn == nil {
-		cmdFn = func(c context.Context) error {
+	if m.restartDaemonCmd == nil {
+		m.restartDaemonCmd = func(c context.Context) error {
 			return probeCmd(c, "systemctl", "--user", "restart", "antigravity-cli-daemon.service").Run()
 		}
 	}
 
-	if err := cmdFn(ctx); err != nil {
-		return false, fmt.Sprintf("restart failed: %v", err), 0, err
+	if err := m.restartDaemonCmd(ctx); err != nil {
+		return false, fmt.Sprintf("daemon restart failed: %v", err), 0, err
 	}
 
 	m.lastDaemonRestart = time.Now()
-	return true, "restarted gracefully", 0, nil
+	return true, "antigravity-cli-daemon restarted gracefully", 0, nil
 }

@@ -112,4 +112,23 @@ func TestConversationsToolsOverMCP(t *testing.T) {
 	if !ok || len(convsAll) != 2 {
 		t.Fatalf("expected 2 conversations, got %#v", scAll["conversations"])
 	}
+
+	// 3. Call agy_get_conversation for conv-1
+	resGet, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: toolAgyGetConversation,
+		Arguments: map[string]any{
+			"conversation_id": "conv-1",
+		},
+	})
+	if err != nil || resGet.IsError {
+		t.Fatalf("call agy_get_conversation: err=%v, res=%+v", err, resGet)
+	}
+	scGet := structMap(t, resGet.StructuredContent)
+	convObj, ok := scGet["conversation"].(map[string]any)
+	if !ok || convObj["conversation_id"] != "conv-1" {
+		t.Errorf("expected conv-1 details, got %#v", scGet)
+	}
+	if convObj["title"] != "Active Session" {
+		t.Errorf("expected title='Active Session', got %v", convObj["title"])
+	}
 }

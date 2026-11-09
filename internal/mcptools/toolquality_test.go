@@ -47,7 +47,9 @@ var wantAnnotations = map[string]mcp.ToolAnnotations{
 	toolAgyListProjects:     {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyResolveWorkspace: {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyListConversations: {ReadOnlyHint: true, OpenWorldHint: new(false)},
-	toolAgyAdoptConversation: {DestructiveHint: new(false), IdempotentHint: true, OpenWorldHint: new(false)},
+	toolAgyGetConversation:   {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyAdoptConversation: {DestructiveHint: new(true), IdempotentHint: true, OpenWorldHint: new(false)},
+	toolAgyRestartSyncDaemon: {DestructiveHint: new(true), IdempotentHint: false, OpenWorldHint: new(false)},
 }
 
 // eqBoolPtr compares two optional hints. Nil is distinct from false: the MCP
@@ -144,8 +146,10 @@ var wantSiblings = map[string][]string{
 	toolAgyReadArtifact:     {toolAgyListArtifacts, toolAgyStatus},
 	toolAgyListProjects:      {toolAgyResolveWorkspace, toolAgyRun},
 	toolAgyResolveWorkspace:  {toolAgyListProjects, toolAgyRun},
-	toolAgyListConversations: {toolAgyListProjects, toolListSessions},
-	toolAgyAdoptConversation: {toolAgyListConversations, toolAgyListProjects},
+	toolAgyListConversations: {toolAgyGetConversation, toolListSessions},
+	toolAgyGetConversation:   {toolAgyListConversations, toolAgyAdoptConversation},
+	toolAgyAdoptConversation: {toolAgyGetConversation, toolAgyRestartSyncDaemon},
+	toolAgyRestartSyncDaemon: {toolAgyAdoptConversation, toolAgyListConversations},
 }
 
 // mentions reports whether desc names tool as a whole word. A plain substring
