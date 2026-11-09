@@ -9,6 +9,7 @@ import (
 
 const (
 	toolAgyListConversations = "agy_list_conversations"
+	toolAgyAdoptConversation = "agy_adopt_conversation"
 )
 
 type listConversationsInput struct {
@@ -23,6 +24,32 @@ type listConversationsOutput struct {
 	Conversations []manager.ConversationSummaryItem `json:"conversations" jsonschema:"list of discovered conversation sessions"`
 	TotalCount    int                                `json:"total_count" jsonschema:"total count of conversations matching the filter criteria"`
 	HasMore       bool                               `json:"has_more" jsonschema:"true if more conversations exist beyond the current limit and offset"`
+}
+
+type adoptConversationInput struct {
+	ConversationID string `json:"conversation_id,omitempty" jsonschema:"optional conversation ID (UUID) to adopt into a cloud-synced project; if omitted, performs a standalone graceful sync daemon restart"`
+	Project        string `json:"project,omitempty" jsonschema:"target project ID, name, or directory path to bind the conversation to (required when conversation_id is provided)"`
+	Title          string `json:"title,omitempty" jsonschema:"optional title to assign; if omitted, retains existing non-empty title or derives from user prompt preview"`
+	RestartDaemon  *bool  `json:"restart_daemon,omitempty" jsonschema:"whether to attempt a graceful restart of antigravity-cli-daemon if idle (default: true)"`
+	ForceRestart   bool   `json:"force_restart,omitempty" jsonschema:"if true, bypasses the idle check and forces daemon restart (dangerous, defaults to false)"`
+}
+
+type adoptConversationOutput struct {
+	Success             bool   `json:"success" jsonschema:"true if the requested conversion and/or restart succeeded"`
+	AlreadyConverted    bool   `json:"already_converted" jsonschema:"true if the conversation was already bound to the target project with an effective title (idempotent no-op)"`
+	ConversationID      string `json:"conversation_id,omitempty" jsonschema:"conversation ID that was processed"`
+	ProjectID           string `json:"project_id,omitempty" jsonschema:"resolved project UUID"`
+	ProjectName         string `json:"project_name,omitempty" jsonschema:"human-readable name of the target project"`
+	Title               string `json:"title,omitempty" jsonschema:"title assigned or retained on the conversation"`
+	DaemonRestarted     bool   `json:"daemon_restarted" jsonschema:"true if antigravity-cli-daemon was successfully restarted"`
+	DaemonRestartReason string `json:"daemon_restart_reason,omitempty" jsonschema:"explanation of restart outcome"`
+	ActiveSessionsCount int    `json:"active_sessions_count,omitempty" jsonschema:"number of currently active/running sessions detected if restart was skipped"`
+}
+
+var annAdopt = &mcp.ToolAnnotations{
+	DestructiveHint: new(false),
+	IdempotentHint:  true,
+	OpenWorldHint:   new(false),
 }
 
 func registerConversations(s *toolServer, mgr *manager.Manager) {
@@ -49,6 +76,38 @@ func registerConversations(s *toolServer, mgr *manager.Manager) {
 			Conversations: res.Conversations,
 			TotalCount:    res.TotalCount,
 			HasMore:       res.HasMore,
+		}, nil
+	})
+
+	addTool(s, &mcp.Tool{
+		Name:        toolAgyAdoptConversation,
+		Title:       "Adopt conversation into cloud project",
+		Annotations: annAdopt,
+		Description: "Adopt a conversation into a cloud-synced project and/or perform a graceful sync daemon restart. Binds a local conversation to the target project, assigns an effective title, and safely triggers antigravity-cli-daemon restart when all sessions are idle (skipping restart if active tasks are running). Omit conversation_id to perform a standalone graceful daemon restart. Use agy_list_conversations to inspect conversation status or agy_list_projects to discover target projects. Idempotent across multiple invocations.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in adoptConversationInput) (*mcp.CallToolResult, adoptConversationOutput, error) {
+		res, err := mgr.AdoptConversation(ctx, manager.AdoptConversationInput{
+			ConversationID: in.ConversationID,
+			Project:        in.Project,
+			Title:          in.Title,
+			RestartDaemon:  in.RestartDaemon,
+			ForceRestart:   in.ForceRestart,
+		})
+		if err != nil {
+			return nil, adoptConversationOutput{}, err
+		}
+		if res == nil {
+			return nil, adoptConversationOutput{Success: false}, nil
+		}
+		return nil, adoptConversationOutput{
+			Success:             res.Success,
+			AlreadyConverted:    res.AlreadyConverted,
+			ConversationID:      res.ConversationID,
+			ProjectID:           res.ProjectID,
+			ProjectName:         res.ProjectName,
+			Title:               res.Title,
+			DaemonRestarted:     res.DaemonRestarted,
+			DaemonRestartReason: res.DaemonRestartReason,
+			ActiveSessionsCount: res.ActiveSessionsCount,
 		}, nil
 	})
 }

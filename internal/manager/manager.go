@@ -37,6 +37,9 @@ type Manager struct {
 	projectsDir         string     // config directory for projects (~/.gemini/config/projects); injectable for tests
 	dataDir             string     // root directory for repositories (/data); injectable for tests
 	conversationsDBPath string     // path to conversation_summaries.db; injectable for tests
+	daemonRestartMu     sync.Mutex
+	lastDaemonRestart   time.Time
+	restartDaemonCmd    func(context.Context) error
 	idemMu              sync.Mutex
 	idemKeys            map[string]bool // short-lived in-process idempotency claims; cross-process half lives in xlock
 
@@ -112,6 +115,10 @@ func New(c config.Config) *Manager {
 	m.readUsage = func(ctx context.Context) ([]byte, error) {
 		return m.runJSONProbe(ctx, "/"+usageCommandName, usageProbeArgs(), "", true, usageProbeTimeout, usageProbeKillGrace)
 	}
+	m.restartDaemonCmd = func(ctx context.Context) error {
+		cmd := probeCmd(ctx, "systemctl", "--user", "restart", "antigravity-cli-daemon.service")
+		return cmd.Run()
+	}
 	return m
 }
 
@@ -124,6 +131,13 @@ func (m *Manager) SetProjectDirsForTest(projectsDir, dataDir string) {
 // SetConversationsDBPathForTest sets the path to conversation_summaries.db for testing.
 func (m *Manager) SetConversationsDBPathForTest(dbPath string) {
 	m.conversationsDBPath = dbPath
+}
+
+// SetRestartDaemonCmdForTest sets the command runner for restarting the sync daemon in tests.
+func (m *Manager) SetRestartDaemonCmdForTest(fn func(context.Context) error) {
+	m.daemonRestartMu.Lock()
+	defer m.daemonRestartMu.Unlock()
+	m.restartDaemonCmd = fn
 }
 
 // StartRequest describes a run to start.

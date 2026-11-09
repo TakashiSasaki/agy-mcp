@@ -168,7 +168,7 @@ func TestHTTPServeListsTools(t *testing.T) {
 	for _, tool := range tools.Tools {
 		got[tool.Name] = true
 	}
-	want := []string{"agy_run", "agy_status", "agy_cancel", "agy_run_sync", "agy_wait", "list_models", "list_agents", "list_sessions", "agy_usage", "agy_list_artifacts", "agy_read_artifact", "agy_list_projects", "agy_resolve_workspace", "agy_list_conversations", "agy_list_jobs", "agy_get_result", "agy_info", "agy_events", "agy_logs", "agy_verification"}
+	want := []string{"agy_run", "agy_status", "agy_cancel", "agy_run_sync", "agy_wait", "list_models", "list_agents", "list_sessions", "agy_usage", "agy_list_artifacts", "agy_read_artifact", "agy_list_projects", "agy_resolve_workspace", "agy_list_conversations", "agy_adopt_conversation", "agy_list_jobs", "agy_get_result", "agy_info", "agy_events", "agy_logs", "agy_verification"}
 	if len(tools.Tools) != len(want) {
 		t.Fatalf("registered %d tools, want %d (%v)", len(tools.Tools), len(want), want)
 	}

@@ -1,8 +1,10 @@
 package manager
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +49,29 @@ type ListConversationsResult struct {
 	Conversations []ConversationSummaryItem `json:"conversations"`
 	TotalCount    int                       `json:"total_count"`
 	HasMore       bool                      `json:"has_more"`
+}
+
+// AdoptConversationInput provides parameters for adopting a conversation into a project
+// and/or performing a graceful sync daemon restart.
+type AdoptConversationInput struct {
+	ConversationID string `json:"conversation_id,omitempty" jsonschema:"optional conversation ID (UUID) to adopt into a cloud-synced project; if omitted, performs a standalone graceful sync daemon restart"`
+	Project        string `json:"project,omitempty" jsonschema:"target project ID, name, or directory path to bind the conversation to (required when conversation_id is provided)"`
+	Title          string `json:"title,omitempty" jsonschema:"optional title to assign; if omitted, retains existing non-empty title or derives from user prompt preview"`
+	RestartDaemon  *bool  `json:"restart_daemon,omitempty" jsonschema:"whether to attempt a graceful restart of antigravity-cli-daemon if idle (default: true)"`
+	ForceRestart   bool   `json:"force_restart,omitempty" jsonschema:"if true, bypasses the idle check and forces daemon restart (dangerous, defaults to false)"`
+}
+
+// AdoptConversationResult returns the outcome of conversation adoption and daemon restart.
+type AdoptConversationResult struct {
+	Success             bool   `json:"success" jsonschema:"true if the requested conversion and/or restart succeeded"`
+	AlreadyConverted    bool   `json:"already_converted" jsonschema:"true if the conversation was already bound to the target project with an effective title (idempotent no-op)"`
+	ConversationID      string `json:"conversation_id,omitempty" jsonschema:"conversation ID that was processed"`
+	ProjectID           string `json:"project_id,omitempty" jsonschema:"resolved project UUID"`
+	ProjectName         string `json:"project_name,omitempty" jsonschema:"human-readable name of the target project"`
+	Title               string `json:"title,omitempty" jsonschema:"title assigned or retained on the conversation"`
+	DaemonRestarted     bool   `json:"daemon_restarted" jsonschema:"true if antigravity-cli-daemon was successfully restarted"`
+	DaemonRestartReason string `json:"daemon_restart_reason,omitempty" jsonschema:"explanation of restart outcome"`
+	ActiveSessionsCount int    `json:"active_sessions_count,omitempty" jsonschema:"number of currently active/running sessions detected if restart was skipped"`
 }
 
 type projectConversationStats struct {
@@ -316,4 +341,240 @@ func slicesClone[T any](s []T) []T {
 	c := make([]T, len(s))
 	copy(c, s)
 	return c
+}
+
+const daemonRestartCooldown = 15 * time.Second
+
+// AdoptConversation binds a conversation to a specified project, assigns or retains a title,
+// and optionally triggers a graceful sync daemon restart if no sessions are actively running.
+// If in.ConversationID is empty, it operates as a standalone graceful sync daemon restart.
+func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInput) (*AdoptConversationResult, error) {
+	res := &AdoptConversationResult{}
+
+	dbPath := m.conversationsDBPath
+	if dbPath == "" {
+		dbPath = defaultConversationsDBPath()
+	}
+
+	// Case 1: Standalone graceful daemon restart (ConversationID is omitted)
+	if strings.TrimSpace(in.ConversationID) == "" {
+		restarted, reason, activeCount, err := m.restartSyncDaemon(ctx, in.ForceRestart)
+		if err != nil {
+			return nil, err
+		}
+		res.Success = true
+		res.DaemonRestarted = restarted
+		res.DaemonRestartReason = reason
+		res.ActiveSessionsCount = activeCount
+		return res, nil
+	}
+
+	// Case 2: Adopt Conversation into a Project
+	targetProj, err := m.resolveProjectTarget(in.Project)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("conversation database not found at %s: %w", dbPath, err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open conversation db for write: %w", err)
+	}
+	defer db.Close()
+
+	// Query current conversation row
+	var (
+		curProjectID sql.NullString
+		curWorkspace sql.NullString
+		curTitle     sql.NullString
+		curPreview   sql.NullString
+	)
+	err = db.QueryRow(
+		"SELECT project_id, workspace_uris, title, preview FROM conversation_summaries WHERE conversation_id = ?",
+		in.ConversationID,
+	).Scan(&curProjectID, &curWorkspace, &curTitle, &curPreview)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("conversation %q not found in conversation_summaries.db", in.ConversationID)
+		}
+		return nil, fmt.Errorf("query conversation: %w", err)
+	}
+
+	// Determine final title
+	finalTitle := strings.TrimSpace(in.Title)
+	if finalTitle == "" {
+		if curTitle.Valid && strings.TrimSpace(curTitle.String) != "" {
+			finalTitle = curTitle.String
+		} else if curPreview.Valid && strings.TrimSpace(curPreview.String) != "" {
+			prev := strings.ReplaceAll(curPreview.String, "\n", " ")
+			prev = strings.ReplaceAll(prev, "\r", "")
+			prev = strings.TrimSpace(prev)
+			runes := []rune(prev)
+			if len(runes) > 60 {
+				finalTitle = string(runes[:60]) + "..."
+			} else {
+				finalTitle = string(runes)
+			}
+		} else {
+			shortID := in.ConversationID
+			if len(shortID) > 8 {
+				shortID = shortID[:8]
+			}
+			finalTitle = "Adopted Conversation " + shortID
+		}
+	}
+
+	targetWorkspaceBytes, _ := json.Marshal([]string{"file://" + filepath.ToSlash(targetProj.Root)})
+	targetWorkspaceStr := string(targetWorkspaceBytes)
+
+	// Idempotency check: already in target project with desired title and workspace
+	isAlreadyConverted := (curProjectID.String == targetProj.ID) &&
+		(curTitle.String == finalTitle) &&
+		(curWorkspace.String == targetWorkspaceStr || targetProj.Root == "")
+
+	if !isAlreadyConverted {
+		_, err = db.Exec(
+			"UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, title = ? WHERE conversation_id = ?",
+			targetProj.ID, targetWorkspaceStr, finalTitle, in.ConversationID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update conversation summary: %w", err)
+		}
+	}
+
+	res.Success = true
+	res.AlreadyConverted = isAlreadyConverted
+	res.ConversationID = in.ConversationID
+	res.ProjectID = targetProj.ID
+	res.ProjectName = targetProj.Name
+	res.Title = finalTitle
+
+	// Handle daemon restart if requested (default: true)
+	restart := true
+	if in.RestartDaemon != nil {
+		restart = *in.RestartDaemon
+	}
+
+	if !restart {
+		res.DaemonRestarted = false
+		res.DaemonRestartReason = "restart disabled by caller"
+		return res, nil
+	}
+
+	restarted, reason, activeCount, err := m.restartSyncDaemon(ctx, in.ForceRestart)
+	if err != nil {
+		res.DaemonRestarted = false
+		res.DaemonRestartReason = fmt.Sprintf("restart failed: %v", err)
+		return res, nil
+	}
+	res.DaemonRestarted = restarted
+	res.DaemonRestartReason = reason
+	res.ActiveSessionsCount = activeCount
+
+	return res, nil
+}
+
+func (m *Manager) resolveProjectTarget(projectQuery string) (*ProjectInfo, error) {
+	query := strings.TrimSpace(projectQuery)
+	if query == "" {
+		return nil, errors.New("project identifier or name is required")
+	}
+	projects, err := m.ListProjects("")
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+
+	lowerQuery := strings.ToLower(query)
+
+	// 1. Exact ID match
+	for _, p := range projects {
+		if strings.EqualFold(p.ID, query) {
+			return &p, nil
+		}
+	}
+
+	// 2. Exact Name match
+	for _, p := range projects {
+		if strings.EqualFold(p.Name, query) {
+			return &p, nil
+		}
+	}
+
+	// 3. Exact Root directory match
+	cleanQuery := filepath.Clean(query)
+	for _, p := range projects {
+		if filepath.Clean(p.Root) == cleanQuery {
+			return &p, nil
+		}
+	}
+
+	// 4. Substring match
+	var matches []ProjectInfo
+	for _, p := range projects {
+		if strings.Contains(strings.ToLower(p.ID), lowerQuery) ||
+			strings.Contains(strings.ToLower(p.Name), lowerQuery) ||
+			strings.Contains(strings.ToLower(p.Root), lowerQuery) {
+			matches = append(matches, p)
+		}
+	}
+	if len(matches) == 1 {
+		return &matches[0], nil
+	}
+	if len(matches) > 1 {
+		var names []string
+		for _, match := range matches {
+			names = append(names, fmt.Sprintf("%s (%s)", match.Name, match.ID))
+		}
+		return nil, fmt.Errorf("project query %q is ambiguous: matches %s", query, strings.Join(names, ", "))
+	}
+
+	return nil, fmt.Errorf("project %q not found in registered Antigravity projects or /data", query)
+}
+
+func (m *Manager) restartSyncDaemon(ctx context.Context, force bool) (restarted bool, reason string, activeCount int, err error) {
+	m.daemonRestartMu.Lock()
+	defer m.daemonRestartMu.Unlock()
+
+	// 1. Cooldown check (prevent restart thrashing within 15 seconds)
+	now := time.Now()
+	if !m.lastDaemonRestart.IsZero() && now.Sub(m.lastDaemonRestart) < daemonRestartCooldown {
+		return false, "skipped: cooldown active (recently restarted)", 0, nil
+	}
+
+	// 2. Idle check (unless force is true)
+	if !force {
+		dbPath := m.conversationsDBPath
+		if dbPath == "" {
+			dbPath = defaultConversationsDBPath()
+		}
+		if _, statErr := os.Stat(dbPath); statErr == nil {
+			db, ok, openErr := openReadonlyDB(dbPath)
+			if openErr == nil && ok {
+				defer db.Close()
+				var running int
+				_ = db.QueryRow("SELECT COUNT(*) FROM conversation_summaries WHERE not_fully_idle != 0 OR status = 'CASCADE_RUN_STATUS_RUNNING'").Scan(&running)
+				if running > 0 {
+					return false, fmt.Sprintf("skipped: %d active session(s) running; changes saved to DB and will sync in next automatic cycle", running), running, nil
+				}
+			}
+		}
+	}
+
+	// 3. Perform restart
+	cmdFn := m.restartDaemonCmd
+	if cmdFn == nil {
+		cmdFn = func(c context.Context) error {
+			return probeCmd(c, "systemctl", "--user", "restart", "antigravity-cli-daemon.service").Run()
+		}
+	}
+
+	if err := cmdFn(ctx); err != nil {
+		return false, fmt.Sprintf("restart failed: %v", err), 0, err
+	}
+
+	m.lastDaemonRestart = time.Now()
+	return true, "restarted gracefully", 0, nil
 }
