@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	toolAgyListConversations  = "agy_list_conversations"
+	toolAgyListConversations = "agy_list_conversations"
 	toolAgyGetConversation   = "agy_get_conversation"
 	toolAgyAdoptConversation = "agy_adopt_conversation"
 	toolAgyRestartSyncDaemon = "agy_restart_sync_daemon"
@@ -26,8 +26,8 @@ type listConversationsInput struct {
 
 type listConversationsOutput struct {
 	Conversations []manager.ConversationSummaryItem `json:"conversations" jsonschema:"list of discovered conversation sessions"`
-	TotalCount    int                                `json:"total_count" jsonschema:"total count of conversations matching the filter criteria"`
-	HasMore       bool                               `json:"has_more" jsonschema:"true if more conversations exist beyond the current limit and offset"`
+	TotalCount    int                               `json:"total_count" jsonschema:"total count of conversations matching the filter criteria"`
+	HasMore       bool                              `json:"has_more" jsonschema:"true if more conversations exist beyond the current limit and offset"`
 }
 
 type getConversationInput struct {
@@ -46,22 +46,7 @@ type adoptConversationInput struct {
 	ForceRestart   bool   `json:"force_restart,omitempty" jsonschema:"if true, bypasses the idle check and forces daemon restart (dangerous, defaults to false)"`
 }
 
-type adoptConversationOutput struct {
-	Success               bool   `json:"success" jsonschema:"true if the adoption succeeded"`
-	AlreadyConverted      bool   `json:"already_converted" jsonschema:"true if the conversation was already bound to the target project with the desired title and workspace"`
-	ConversationID        string `json:"conversation_id" jsonschema:"conversation ID that was processed"`
-	ProjectID             string `json:"project_id" jsonschema:"resolved project UUID"`
-	ProjectName           string `json:"project_name" jsonschema:"human-readable name of the target project"`
-	Title                 string `json:"title" jsonschema:"title assigned or retained on the conversation"`
-	MetadataUpdated       bool   `json:"metadata_updated" jsonschema:"true if conversation_summaries.db columns and raw_summary blob were updated"`
-	TrajectoryBlobUpdated bool   `json:"trajectory_blob_updated" jsonschema:"true if conversations/<id>.db trajectory_metadata_blob was updated"`
-	AnnotationsUpdated     bool   `json:"annotations_updated" jsonschema:"true if annotations/<id>.pbtxt was updated"`
-	RPCNotified           bool   `json:"rpc_notified" jsonschema:"true if Language Server Connect RPC UpdateConversationAnnotations was notified"`
-	DaemonRestarted       bool   `json:"daemon_restarted" jsonschema:"true if antigravity-cli-daemon was restarted"`
-	DaemonRestartReason   string `json:"daemon_restart_reason,omitempty" jsonschema:"explanation of restart outcome"`
-	ActiveSessionsCount   int    `json:"active_sessions_count,omitempty" jsonschema:"number of currently active/running sessions detected if restart was skipped"`
-	PostRestartVerified   bool   `json:"post_restart_verified" jsonschema:"true if verified that the updated state persists in conversation_summaries.db"`
-}
+type adoptConversationOutput = manager.AdoptConversationResult
 
 type restartSyncDaemonInput struct {
 	Force bool `json:"force,omitempty" jsonschema:"optional, if true, bypasses the idle check and forces daemon restart (dangerous, defaults to false)"`
@@ -136,7 +121,7 @@ func registerConversations(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyAdoptConversation,
 		Title:       "Adopt conversation into cloud project",
 		Annotations: annAdopt,
-		Description: "Use when: adopting or converting a local Antigravity conversation (e.g. started with -p or without a title) into a registered cloud-synced project by binding project metadata, deriving/updating its title, and ensuring atomic persistence across DB, protobuf caches, and Connect RPC. Do not use when: you only want to restart the sync daemon without modifying a conversation (use agy_restart_sync_daemon instead). Use agy_get_conversation to verify post-adoption status, agy_list_conversations to find conversations, or agy_list_projects to discover target projects.",
+		Description: "Use when: adopting a local Antigravity conversation into a registered cloud project while retaining its conversation ID and history. Pass restart_daemon:true to request an idle-checked Remote Control daemon refresh and wait for its summary to confirm the new project and title. Inspect cloud_sync_state separately from local adoption success. Do not use when: you only want to restart the sync daemon without modifying a conversation (use agy_restart_sync_daemon instead). Use agy_get_conversation to verify sync status, agy_list_conversations to find conversations, or agy_list_projects to discover target projects.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in adoptConversationInput) (*mcp.CallToolResult, adoptConversationOutput, error) {
 		res, err := mgr.AdoptConversation(ctx, manager.AdoptConversationInput{
 			ConversationID: in.ConversationID,
@@ -151,22 +136,7 @@ func registerConversations(s *toolServer, mgr *manager.Manager) {
 		if res == nil {
 			return nil, adoptConversationOutput{Success: false}, nil
 		}
-		return nil, adoptConversationOutput{
-			Success:               res.Success,
-			AlreadyConverted:      res.AlreadyConverted,
-			ConversationID:        res.ConversationID,
-			ProjectID:             res.ProjectID,
-			ProjectName:           res.ProjectName,
-			Title:                 res.Title,
-			MetadataUpdated:       res.MetadataUpdated,
-			TrajectoryBlobUpdated: res.TrajectoryBlobUpdated,
-			AnnotationsUpdated:     res.AnnotationsUpdated,
-			RPCNotified:           res.RPCNotified,
-			DaemonRestarted:       res.DaemonRestarted,
-			DaemonRestartReason:   res.DaemonRestartReason,
-			ActiveSessionsCount:   res.ActiveSessionsCount,
-			PostRestartVerified:   res.PostRestartVerified,
-		}, nil
+		return nil, *res, nil
 	})
 
 	// 4. agy_restart_sync_daemon

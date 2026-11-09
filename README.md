@@ -410,6 +410,26 @@ implies that an interrupted long-running job took zero seconds.
 
 `agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
 
+`agy_adopt_conversation(conversation_id, project, title?, restart_daemon?)` attaches
+an existing local conversation to a registered cloud project. Use a project ID
+from `agy_list_projects(sync_filter: "cloud_only")`. The conversation keeps
+its ID and history. Omit the title to keep it or derive one from the preview.
+
+Pass `restart_daemon: true` to refresh the systemd-managed Remote Control
+daemon when idle and wait briefly for it to pick up the change. With the
+default `false`, call `agy_restart_sync_daemon` separately if a refresh is
+needed. `agy_get_conversation` and `agy_list_conversations` report
+`is_cloud_synced: true` when the daemon's persisted summary matches the
+conversation ID, project and title. MEASURED against agy 1.5.3, the daemon
+populates this snapshot during startup reconciliation.
+
+`cloud_sync_state` is `confirmed` when that evidence matches, `pending`
+when a readable snapshot lacks the new binding, and `unavailable` when the
+snapshot cannot be read. Conversation lookups also return `local_only` for
+conversations outside cloud projects or without a title. Adoption
+`success` reports the local change. `post_restart_verified` records that
+the call restarted the daemon and observed the updated summary.
+
 Project discovery retains one entry per registered resource root. A multi-root
 project therefore repeats its project ID; resolving that ID requires an absolute
 directory selection instead of silently choosing the last resource. Distinct

@@ -6,8 +6,8 @@ import (
 )
 
 var (
-	ErrVarintOverflow = errors.New("varint overflow")
-	ErrUnexpectedEOF  = io.ErrUnexpectedEOF
+	ErrVarintOverflow  = errors.New("varint overflow")
+	ErrUnexpectedEOF   = io.ErrUnexpectedEOF
 	ErrInvalidWireType = errors.New("invalid protobuf wire type")
 )
 
@@ -37,7 +37,7 @@ func DecodeVarint(data []byte) (uint64, int, error) {
 	var val uint64
 	var shift uint
 	for i, b := range data {
-		if i >= 10 {
+		if i >= 10 || (i == 9 && b > 1) {
 			return 0, 0, ErrVarintOverflow
 		}
 		val |= uint64(b&0x7f) << shift
@@ -63,6 +63,9 @@ func ParseFields(data []byte) ([]Field, error) {
 
 		fieldNum := int(key >> 3)
 		wireType := int(key & 0x07)
+		if fieldNum <= 0 || key>>3 > 1<<29-1 {
+			return nil, ErrInvalidWireType
+		}
 
 		switch wireType {
 		case 0: // Varint
@@ -93,10 +96,10 @@ func ParseFields(data []byte) ([]Field, error) {
 				return nil, err
 			}
 			i += n
-			lenInt := int(length)
-			if lenInt < 0 || i+lenInt > len(data) {
+			if length > uint64(len(data)-i) {
 				return nil, ErrUnexpectedEOF
 			}
+			lenInt := int(length)
 			val := data[i : i+lenInt]
 			i += lenInt
 			fields = append(fields, Field{

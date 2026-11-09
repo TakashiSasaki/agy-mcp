@@ -6,8 +6,19 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/tphakala/agy-mcp/v2/internal/protohelper"
 	_ "modernc.org/sqlite"
 )
+
+func testDaemonConversation(id, project, title string) []byte {
+	annotations := protohelper.MakeLengthDelimited(annotationTitleField, []byte(title))
+	metadata := protohelper.MakeLengthDelimited(trajectoryProjectField, []byte(project))
+	summary := append(protohelper.MakeLengthDelimited(summaryAnnotationsField, annotations),
+		protohelper.MakeLengthDelimited(summaryTrajectoryField, metadata)...)
+	entry := append(protohelper.MakeLengthDelimited(1, []byte(id)),
+		protohelper.MakeLengthDelimited(2, summary)...)
+	return protohelper.MakeLengthDelimited(1, entry)
+}
 
 func createTestConversationsDB(t *testing.T, dir string) string {
 	t.Helper()
@@ -73,6 +84,11 @@ func createTestConversationsDB(t *testing.T, dir string) string {
 func TestListConversationsFilteringAndPagination(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := createTestConversationsDB(t, dir)
+	snapshot := append(testDaemonConversation("c1", "proj-uuid-1", "Active Cloud Conversation"),
+		testDaemonConversation("c2", "default-cli-project", "Archived Cloud Conversation")...)
+	if err := os.WriteFile(filepath.Join(dir, "agyhub_summaries_proto.pb"), snapshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a mock registered project for proj-uuid-1
 	projDir := filepath.Join(dir, "projects")
@@ -122,6 +138,9 @@ func TestListConversationsFilteringAndPagination(t *testing.T) {
 	}
 	if resArchived.TotalCount != 4 {
 		t.Errorf("TotalCount with archived = %d, want 4", resArchived.TotalCount)
+	}
+	if got := resArchived.Conversations[1]; got.IsCloudSynced || got.CloudSyncState != ConversationSyncPending {
+		t.Errorf("stale daemon project should be pending, got %+v", got)
 	}
 
 	// 3. Filter by project_id = "proj-uuid-1" with archived included

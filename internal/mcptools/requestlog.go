@@ -43,6 +43,8 @@ type requestLogEntry struct {
 	JobStarted          *bool  `json:"job_started,omitempty"`
 	ResultComplete      *bool  `json:"result_complete,omitempty"`
 	VerificationOutcome string `json:"verification_outcome,omitempty"`
+	CloudSyncState      string `json:"cloud_sync_state,omitempty"`
+	DaemonRestarted     *bool  `json:"daemon_restarted,omitempty"`
 	ToolCount           *int   `json:"tool_count,omitempty"`
 	CatalogSHA256       string `json:"catalog_sha256,omitempty"`
 	CatalogComplete     *bool  `json:"catalog_complete,omitempty"`
@@ -118,7 +120,8 @@ func loggedToolName(name string) string {
 	case toolAgyRun, toolAgyRunSync, toolAgyStatus, toolAgyWait, toolAgyCancel,
 		toolAgyUsage, toolListModels, toolListAgents, toolListSessions,
 		toolAgyListArtifacts, toolAgyReadArtifact, toolAgyListProjects, toolAgyResolveWorkspace,
-		toolAgyListJobs, toolAgyGetResult, toolAgyInfo, toolAgyEvents, toolAgyLogs, toolAgyVerification:
+		toolAgyListJobs, toolAgyGetResult, toolAgyInfo, toolAgyEvents, toolAgyLogs, toolAgyVerification,
+		toolAgyListConversations, toolAgyGetConversation, toolAgyAdoptConversation, toolAgyRestartSyncDaemon:
 		return name
 	default:
 		return "unknown"
@@ -147,6 +150,8 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 			Partial             bool   `json:"partial"`
 			Complete            *bool  `json:"complete"`
 			VerificationOutcome string `json:"verification_outcome"`
+			CloudSyncState      string `json:"cloud_sync_state"`
+			DaemonRestarted     *bool  `json:"daemon_restarted"`
 		}
 		data, ok := result.StructuredContent.(json.RawMessage)
 		if !ok || json.Unmarshal(data, &output) != nil {
@@ -176,6 +181,14 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 			case "passed", "failed", verificationOutcomeUnknown:
 				entry.VerificationOutcome = output.VerificationOutcome
 			}
+		case toolAgyAdoptConversation:
+			switch output.CloudSyncState {
+			case manager.ConversationSyncConfirmed, manager.ConversationSyncPending, manager.ConversationSyncUnavailable:
+				entry.CloudSyncState = output.CloudSyncState
+			}
+			entry.DaemonRestarted = output.DaemonRestarted
+		case toolAgyRestartSyncDaemon:
+			entry.DaemonRestarted = output.DaemonRestarted
 		}
 	case *mcp.ListToolsResult:
 		if result == nil {

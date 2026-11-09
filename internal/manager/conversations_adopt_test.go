@@ -80,7 +80,8 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	var restartCalls int32
 	mgr.SetRestartDaemonCmdForTest(func(ctx context.Context) error {
 		atomic.AddInt32(&restartCalls, 1)
-		return nil
+		return os.WriteFile(filepath.Join(dir, "agyhub_summaries_proto.pb"),
+			testDaemonConversation("conv-target-1", "proj-uuid-1234", "Concurrency Optimization"), 0o600)
 	})
 
 	ctx := t.Context()
@@ -116,6 +117,9 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	}
 	if !res1.PostRestartVerified {
 		t.Errorf("expected post_restart_verified=true")
+	}
+	if res1.CloudSyncState != ConversationSyncConfirmed {
+		t.Errorf("cloud_sync_state = %q, want confirmed", res1.CloudSyncState)
 	}
 	if atomic.LoadInt32(&restartCalls) != 1 {
 		t.Errorf("expected 1 restart call, got %d", atomic.LoadInt32(&restartCalls))

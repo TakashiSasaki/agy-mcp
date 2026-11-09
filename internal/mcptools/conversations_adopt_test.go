@@ -79,6 +79,9 @@ func TestAdoptConversationOverMCP(t *testing.T) {
 	if sc["title"] != "Schema Compatibility Review" {
 		t.Errorf("expected title='Schema Compatibility Review', got %v", sc["title"])
 	}
+	if sc["cloud_sync_state"] != "unavailable" || sc["post_restart_verified"] != false {
+		t.Errorf("local adoption without daemon evidence was reported verified: %#v", sc)
+	}
 
 	// Verify idempotency on second call
 	res2, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
