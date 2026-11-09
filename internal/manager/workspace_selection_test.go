@@ -8,7 +8,7 @@ import (
 
 func linkedProjectFixture(t *testing.T) (mgr *Manager, projectRoot string, pathsByBranch map[string]string) {
 	t.Helper()
-	root := t.TempDir()
+	root := canonicalProjectTestRoot(t)
 	seed := filepath.Join(root, "seed")
 	createTestGitRepo(t, seed)
 	data := filepath.Join(root, "data")

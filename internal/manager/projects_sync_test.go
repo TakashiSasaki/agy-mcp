@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,33 +12,33 @@ func TestProjectCloudSyncStatusAndFilters(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// 1. Cloud-synced project (UUID ID, isWorkspaceOnly: false)
-	cloudJSON := `{
+	cloudJSON := fmt.Sprintf(`{
 		"id": "11111111-2222-3333-4444-555555555555",
 		"name": "Cloud Project",
-		"projectResources": {"resources": [{"folderUri": "file:///data/cloud-repo"}]},
+		"projectResources": {"resources": [{"folderUri": %q}]},
 		"isWorkspaceOnly": false
-	}`
+	}`, projectFileURI(filepath.Join(dataDir, "cloud-repo"), ""))
 	if err := os.WriteFile(filepath.Join(projDir, "cloud.json"), []byte(cloudJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// 2. Local-only project (UUID ID, isWorkspaceOnly: true)
-	localJSON := `{
+	localJSON := fmt.Sprintf(`{
 		"id": "99999999-8888-7777-6666-555555555555",
 		"name": "Local Only Project",
-		"projectResources": {"resources": [{"folderUri": "file:///data/local-repo"}]},
+		"projectResources": {"resources": [{"folderUri": %q}]},
 		"isWorkspaceOnly": true
-	}`
+	}`, projectFileURI(filepath.Join(dataDir, "local-repo"), ""))
 	if err := os.WriteFile(filepath.Join(projDir, "local.json"), []byte(localJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// 3. Default CLI project
-	cliJSON := `{
+	cliJSON := fmt.Sprintf(`{
 		"id": "default-cli-project",
 		"name": "CLI Workspace",
-		"projectResources": {"resources": [{"folderUri": "file:///data/cli-repo"}]}
-	}`
+		"projectResources": {"resources": [{"folderUri": %q}]}
+	}`, projectFileURI(filepath.Join(dataDir, "cli-repo"), ""))
 	if err := os.WriteFile(filepath.Join(projDir, "default-cli-project.json"), []byte(cliJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}

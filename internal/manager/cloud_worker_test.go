@@ -28,10 +28,7 @@ func testCloudWorker(t *testing.T) (*Manager, *sql.DB) {
 			t.Fatal(err)
 		}
 	}
-	projectConfig := []byte(`{"id":"cloud-project-1","name":"Worker test","projectResources":{"resources":[{"folderUri":"file:///srv/test"}]},"isWorkspaceOnly":false}`)
-	if err := os.WriteFile(filepath.Join(m.projectsDir, "test.json"), projectConfig, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeProjectResources(t, m.projectsDir, "test.json", workerTestProject, "Worker test", projectFileURI(root, ""))
 	db, err := sql.Open("sqlite", m.conversationsDBPath)
 	if err != nil {
 		t.Fatal(err)

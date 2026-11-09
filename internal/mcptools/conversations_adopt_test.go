@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,7 +60,7 @@ func TestAdoptConversationOverMCP(t *testing.T) {
 
 	projDir := filepath.Join(tempDir, "projects")
 	_ = os.MkdirAll(projDir, 0o755)
-	projJSON := `{"id": "proj-mcp-uuid", "name": "MCP Project", "projectResources": {"resources": [{"folderUri": "file:///data/mcp-project"}]}}`
+	projJSON := fmt.Sprintf(`{"id": "proj-mcp-uuid", "name": "MCP Project", "projectResources": {"resources": [{"folderUri": %q}]}}`, tempDir)
 	_ = os.WriteFile(filepath.Join(projDir, "mcp.json"), []byte(projJSON), 0o644)
 
 	mgr := manager.New(config.Config{StateDir: t.TempDir()})

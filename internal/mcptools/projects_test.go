@@ -32,9 +32,9 @@ func TestProjectsToolsOverMCP(t *testing.T) {
 		"projectResources": map[string]any{
 			"resources": []map[string]any{
 				{
-					"folderUri": "file://" + sampleProjectDir,
+					"folderUri": sampleProjectDir,
 					"gitFolder": map[string]any{
-						"folderUri":     "file://" + sampleProjectDir,
+						"folderUri":     sampleProjectDir,
 						"defaultBranch": "main",
 					},
 				},

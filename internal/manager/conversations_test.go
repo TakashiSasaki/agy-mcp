@@ -105,15 +105,7 @@ func TestListConversationsFilteringAndPagination(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projJSON := `{
-		"id": "proj-uuid-1",
-		"name": "Cloud Project",
-		"projectResources": {"resources": [{"folderUri": "file:///data/repo1"}]},
-		"isWorkspaceOnly": false
-	}`
-	if err := os.WriteFile(filepath.Join(projDir, "proj-uuid-1.json"), []byte(projJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeProjectResources(t, projDir, "proj-uuid-1.json", "proj-uuid-1", "Cloud Project", projectFileURI(dir, ""))
 
 	mgr := &Manager{
 		projectsDir:         projDir,

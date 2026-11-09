@@ -12,6 +12,17 @@ import (
 	"testing"
 )
 
+// Git can print the long form of a Windows temporary path whose environment
+// uses an 8.3 alias. Construct expectations from the canonical checkout root.
+func canonicalProjectTestRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func projectFileURI(path, host string) string {
 	urlPath := filepath.ToSlash(path)
 	if filepath.VolumeName(path) != "" && !strings.HasPrefix(urlPath, "/") {
@@ -110,7 +121,7 @@ func TestProjectResourcePathsRejectNonlocalURIs(t *testing.T) {
 // Mutation guard: ordinary repositories require worktree enumeration too;
 // porcelain -z preserves whitespace and newline characters in checkout paths.
 func TestProjectOrdinaryRepositoryLinkedWorktrees(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalProjectTestRoot(t)
 	repo := filepath.Join(root, "main repo")
 	createTestGitRepo(t, repo)
 	linked := filepath.Join(root, "linked space\ntrailing ") //nolint:gocritic // Exercise a legal POSIX newline and trailing-space filename, not a path separator.

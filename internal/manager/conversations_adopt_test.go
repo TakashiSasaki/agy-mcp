@@ -121,15 +121,7 @@ func TestAdoptConversationSuccessAndIdempotency(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projJSON := `{
-		"id": "proj-uuid-1234",
-		"name": "Target App",
-		"projectResources": {"resources": [{"folderUri": "file:///data/target-app"}]},
-		"isWorkspaceOnly": false
-	}`
-	if err := os.WriteFile(filepath.Join(projDir, "target.json"), []byte(projJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeProjectResources(t, projDir, "target.json", "proj-uuid-1234", "Target App", projectFileURI(dir, ""))
 
 	mgr := &Manager{
 		projectsDir:         projDir,
@@ -319,15 +311,7 @@ func TestAdoptConversationTitleDerivationFromPreview(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projJSON := `{
-		"id": "proj-uuid-5678",
-		"name": "Docs Project",
-		"projectResources": {"resources": [{"folderUri": "file:///data/docs"}]},
-		"isWorkspaceOnly": false
-	}`
-	if err := os.WriteFile(filepath.Join(projDir, "docs.json"), []byte(projJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeProjectResources(t, projDir, "docs.json", "proj-uuid-5678", "Docs Project", projectFileURI(dir, ""))
 
 	mgr := &Manager{
 		projectsDir:         projDir,

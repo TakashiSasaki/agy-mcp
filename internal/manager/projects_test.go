@@ -43,11 +43,7 @@ func createTestGitRepo(t *testing.T, dir string) {
 }
 
 func TestListProjectsAndResolveWorkspace(t *testing.T) {
-	tempBase := filepath.Join(os.TempDir(), "agy-test-projects")
-	if err := os.MkdirAll(tempBase, 0o755); err != nil {
-		t.Fatalf("mkdir tempBase: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tempBase) })
+	tempBase := canonicalProjectTestRoot(t)
 
 	testProjectsDir := filepath.Join(tempBase, "projects-config")
 	testDataDir := filepath.Join(tempBase, "data")
@@ -84,9 +80,9 @@ func TestListProjectsAndResolveWorkspace(t *testing.T) {
 		"projectResources": map[string]any{
 			"resources": []map[string]any{
 				{
-					"folderUri": "file://" + externalRepoDir,
+					"folderUri": projectFileURI(externalRepoDir, ""),
 					"gitFolder": map[string]any{
-						"folderUri":     "file://" + externalRepoDir,
+						"folderUri":     projectFileURI(externalRepoDir, ""),
 						"defaultBranch": "main",
 					},
 				},
@@ -218,11 +214,7 @@ func TestParseGitRemotes(t *testing.T) {
 }
 
 func TestResolveWorkspaceMultipleWorktrees(t *testing.T) {
-	tempBase := filepath.Join(os.TempDir(), "agy-test-multi-wt")
-	if err := os.MkdirAll(tempBase, 0o755); err != nil {
-		t.Fatalf("mkdir tempBase: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tempBase) })
+	tempBase := canonicalProjectTestRoot(t)
 
 	testProjectsDir := filepath.Join(tempBase, "projects")
 	testDataDir := filepath.Join(tempBase, "data")
@@ -241,9 +233,9 @@ func TestResolveWorkspaceMultipleWorktrees(t *testing.T) {
 		"projectResources": map[string]any{
 			"resources": []map[string]any{
 				{
-					"folderUri": "file://" + mainWt,
+					"folderUri": projectFileURI(mainWt, ""),
 					"gitFolder": map[string]any{
-						"folderUri":     "file://" + mainWt,
+						"folderUri":     projectFileURI(mainWt, ""),
 						"defaultBranch": "main",
 					},
 				},
