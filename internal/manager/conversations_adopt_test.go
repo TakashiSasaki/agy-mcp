@@ -359,7 +359,7 @@ func TestRestartSyncDaemonIdleCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	schema := `
 	CREATE TABLE conversation_summaries (
@@ -395,9 +395,9 @@ func TestRestartSyncDaemonIdleCheck(t *testing.T) {
 		conversationsDBPath: dbPath,
 	}
 
-	var restartCalls int32
+	var restartCalls atomic.Int32
 	mgr.SetRestartDaemonCmdForTest(func(ctx context.Context) error {
-		atomic.AddInt32(&restartCalls, 1)
+		restartCalls.Add(1)
 		return nil
 	})
 
@@ -418,8 +418,8 @@ func TestRestartSyncDaemonIdleCheck(t *testing.T) {
 	if restartRes.ActiveSessionsCount != 1 {
 		t.Errorf("expected ActiveSessionsCount=1, got %d", restartRes.ActiveSessionsCount)
 	}
-	if atomic.LoadInt32(&restartCalls) != 0 {
-		t.Errorf("expected 0 restart calls, got %d", atomic.LoadInt32(&restartCalls))
+	if calls := restartCalls.Load(); calls != 0 {
+		t.Errorf("expected 0 restart calls, got %d", calls)
 	}
 
 	// 2. Standalone force restart: should bypass idle check
@@ -430,14 +430,14 @@ func TestRestartSyncDaemonIdleCheck(t *testing.T) {
 	if !forceRes.DaemonRestarted {
 		t.Errorf("expected daemon_restarted=true with force=true")
 	}
-	if atomic.LoadInt32(&restartCalls) != 1 {
-		t.Errorf("expected 1 restart call after force restart, got %d", atomic.LoadInt32(&restartCalls))
+	if calls := restartCalls.Load(); calls != 1 {
+		t.Errorf("expected 1 restart call after force restart, got %d", calls)
 	}
 }
 
 func TestAdoptConversationRequiresConversationID(t *testing.T) {
 	mgr := &Manager{}
-	_, err := mgr.AdoptConversation(context.Background(), AdoptConversationInput{
+	_, err := mgr.AdoptConversation(t.Context(), AdoptConversationInput{
 		ConversationID: "",
 		Project:        "any-proj",
 	})

@@ -36,7 +36,7 @@ func createTestConversationsDB(t *testing.T, dir string) string {
 	if err != nil {
 		t.Fatalf("create test db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	schema := `
 	CREATE TABLE conversation_summaries (

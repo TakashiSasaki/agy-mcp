@@ -33,16 +33,15 @@ func EncodeVarint(val uint64) []byte {
 
 // DecodeVarint decodes an unsigned 64-bit integer from protobuf varint bytes.
 // Returns the decoded value, the number of bytes read, or an error.
-func DecodeVarint(data []byte) (uint64, int, error) {
-	var val uint64
+func DecodeVarint(data []byte) (value uint64, consumed int, err error) {
 	var shift uint
 	for i, b := range data {
 		if i >= 10 || (i == 9 && b > 1) {
 			return 0, 0, ErrVarintOverflow
 		}
-		val |= uint64(b&0x7f) << shift
+		value |= uint64(b&0x7f) << shift
 		if (b & 0x80) == 0 {
-			return val, i + 1, nil
+			return value, i + 1, nil
 		}
 		shift += 7
 	}
@@ -180,7 +179,7 @@ func SetFieldBytes(proto []byte, fieldNum int, newContent []byte) ([]byte, error
 
 // SetSubFieldBytes parses the submessage at fieldNum (if present), replaces/appends subFieldNum inside it,
 // and updates fieldNum in the parent message.
-func SetSubFieldBytes(proto []byte, fieldNum int, subFieldNum int, newContent []byte) ([]byte, error) {
+func SetSubFieldBytes(proto []byte, fieldNum, subFieldNum int, newContent []byte) ([]byte, error) {
 	origSubBytes, _ := GetFieldBytes(proto, fieldNum)
 	newSubBytes, err := SetFieldBytes(origSubBytes, subFieldNum, newContent)
 	if err != nil {

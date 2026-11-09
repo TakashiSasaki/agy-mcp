@@ -196,13 +196,14 @@ func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInf
 			}
 			syncScope := "cloud"
 			isCloudSynced := true
-			if id == "default-cli-project" {
+			switch {
+			case id == "default-cli-project":
 				syncScope = "cli_default"
 				isCloudSynced = false
-			} else if id == "outside-of-project" {
+			case id == "outside-of-project":
 				syncScope = "outside_project"
 				isCloudSynced = false
-			} else if registration.IsWorkspaceOnly != nil && *registration.IsWorkspaceOnly {
+			case registration.IsWorkspaceOnly != nil && *registration.IsWorkspaceOnly:
 				syncScope = "local_only"
 				isCloudSynced = false
 			}
@@ -418,32 +419,36 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 	pq := strings.ToLower(projectQuery)
 
 	// Strategy A: Exact ID match
-	for _, p := range projects {
+	for i := range projects {
+		p := &projects[i]
 		if strings.EqualFold(p.ID, projectQuery) {
-			matched = append(matched, p)
+			matched = append(matched, *p)
 		}
 	}
 	// Strategy B: Exact Name match
 	if len(matched) == 0 {
-		for _, p := range projects {
+		for i := range projects {
+			p := &projects[i]
 			if strings.EqualFold(p.Name, projectQuery) {
-				matched = append(matched, p)
+				matched = append(matched, *p)
 			}
 		}
 	}
 	// Strategy C: Exact Base folder match
 	if len(matched) == 0 {
-		for _, p := range projects {
+		for i := range projects {
+			p := &projects[i]
 			if strings.EqualFold(filepath.Base(p.Root), projectQuery) {
-				matched = append(matched, p)
+				matched = append(matched, *p)
 			}
 		}
 	}
 	// Strategy D: Substring match
 	if len(matched) == 0 {
-		for _, p := range projects {
+		for i := range projects {
+			p := &projects[i]
 			if strings.Contains(strings.ToLower(p.Name), pq) || strings.Contains(strings.ToLower(p.RepositoryURL), pq) {
-				matched = append(matched, p)
+				matched = append(matched, *p)
 			}
 		}
 	}
@@ -457,7 +462,8 @@ func (m *Manager) ResolveWorkspace(projectQuery, branchQuery string) (ResolveWor
 
 	if len(matched) > 1 {
 		var candNames []string
-		for _, p := range matched {
+		for i := range matched {
+			p := &matched[i]
 			candNames = append(candNames, fmt.Sprintf("%s (%s)", p.Name, p.Root))
 		}
 		slices.Sort(candNames)

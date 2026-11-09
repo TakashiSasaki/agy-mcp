@@ -99,7 +99,7 @@ type projectConversationStats struct {
 	LastActive string
 }
 
-func parseSQLiteTimestamp(raw string) (time.Time, string) {
+func parseSQLiteTimestamp(raw string) (modified time.Time, formatted string) {
 	if raw == "" || strings.HasPrefix(raw, "0001-01-01") {
 		return time.Time{}, ""
 	}
@@ -134,13 +134,13 @@ func (m *Manager) GetProjectConversationStats() (map[string]projectConversationS
 	if err != nil {
 		return nil, fmt.Errorf("open conversation db read-only: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rows, err := db.Query("SELECT project_id, count(*), max(last_modified_time) FROM conversation_summaries GROUP BY project_id")
 	if err != nil {
 		return nil, fmt.Errorf("query project stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	stats := make(map[string]projectConversationStats)
 	for rows.Next() {
@@ -179,25 +179,22 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 	} else if limit > 200 {
 		limit = 200
 	}
-	offset := in.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	offset := max(in.Offset, 0)
 
 	projects, err := m.ListProjects("")
 	if err != nil {
 		projects = []ProjectInfo{}
 	}
 	projectMap := make(map[string]ProjectInfo)
-	for _, p := range projects {
-		projectMap[p.ID] = p
+	for i := range projects {
+		projectMap[projects[i].ID] = projects[i]
 	}
 
 	db, err := sql.Open("sqlite", conversationDBURI(dbPath, "ro"))
 	if err != nil {
 		return nil, fmt.Errorf("open conversation db read-only: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var hasFTS bool
 	var ftsCheck int
@@ -205,7 +202,7 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 	hasFTS = ftsCheck > 0
 
 	var whereClauses []string
-	var args []interface{}
+	var args []any
 
 	if strings.TrimSpace(in.ConversationID) != "" {
 		whereClauses = append(whereClauses, "c.conversation_id = ?")
@@ -250,13 +247,13 @@ func (m *Manager) ListConversations(in ListConversationsInput) (*ListConversatio
 	}
 
 	dataQuery := fmt.Sprintf("SELECT %s %s%s ORDER BY c.last_modified_time DESC LIMIT ? OFFSET ?", selectCols, fromClause, whereSQL)
-	queryArgs := append(args, limit, offset)
+	args = append(args, limit, offset)
 
-	rows, err := db.Query(dataQuery, queryArgs...)
+	rows, err := db.Query(dataQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query conversations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []ConversationSummaryItem
 	daemonSummaries, _ := readDaemonConversations(dbPath)

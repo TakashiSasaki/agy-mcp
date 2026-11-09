@@ -24,9 +24,8 @@ func TestVarintRoundTrip(t *testing.T) {
 
 func TestSetFieldBytes(t *testing.T) {
 	// Construct message: Field 1 = "hello", Field 2 = "world"
-	f1 := MakeLengthDelimited(1, []byte("hello"))
-	f2 := MakeLengthDelimited(2, []byte("world"))
-	msg := append(f1, f2...)
+	msg := MakeLengthDelimited(1, []byte("hello"))
+	msg = append(msg, MakeLengthDelimited(2, []byte("world"))...)
 
 	// Replace Field 2 with "universe"
 	updated, err := SetFieldBytes(msg, 2, []byte("universe"))
@@ -78,10 +77,10 @@ func TestSetSubFieldBytes(t *testing.T) {
 }
 
 func TestPreserveOtherFields(t *testing.T) {
-	// Varint field 1 = 42, 64-bit field 2, length-delimited field 3
-	v1 := append(EncodeVarint(1<<3|0), EncodeVarint(42)...)
-	f3 := MakeLengthDelimited(3, []byte("foo"))
-	msg := append(v1, f3...)
+	// Varint field 1 = 42 and length-delimited field 3.
+	msg := EncodeVarint(1 << 3)
+	msg = append(msg, EncodeVarint(42)...)
+	msg = append(msg, MakeLengthDelimited(3, []byte("foo"))...)
 
 	updated, err := SetFieldBytes(msg, 3, []byte("bar"))
 	if err != nil {
