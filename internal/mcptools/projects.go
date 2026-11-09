@@ -13,7 +13,8 @@ const (
 )
 
 type listProjectsInput struct {
-	Query string `json:"query,omitempty" jsonschema:"optional query substring to filter projects by name, id, repository URL, or folder name"`
+	Query      string `json:"query,omitempty" jsonschema:"optional query substring to filter projects by name, id, repository URL, or folder name"`
+	SyncFilter string `json:"sync_filter,omitempty" jsonschema:"optional filter by cloud sync status: 'all' (default), 'cloud_only' (synchronized with Antigravity cloud / AgiHub), or 'local_only' (local-only or unregistered repositories)"`
 }
 
 type listProjectsOutput struct {
@@ -41,9 +42,9 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyListProjects,
 		Title:       "List registered projects",
 		Annotations: annReadLocal,
-		Description: "List registered Antigravity projects and repositories under /data with their paths, git remote URLs, default branches, and active linked worktrees. Every local resource is retained; project IDs can repeat across roots, and distinct registrations sharing a root remain discoverable. Ordinary repositories and shared-bare repositories both enumerate linked worktrees. Local file URIs are decoded; remote file authorities and nonlocal URIs are omitted. Use it to discover available projects before starting a run, or pass query to filter by name, ID, or repo URL. Pair with agy_resolve_workspace to resolve a project to a concrete working directory for agy_run.",
+		Description: "List registered Antigravity projects and repositories under /data with their paths, git remote URLs, default branches, active linked worktrees, and cloud synchronization status (is_cloud_synced, sync_scope, conversation_count, last_active_time). Every local resource is retained; project IDs can repeat across roots, and distinct registrations sharing a root remain discoverable. Ordinary repositories and shared-bare repositories both enumerate linked worktrees. Local file URIs are decoded; remote file authorities and nonlocal URIs are omitted. Use sync_filter ('cloud_only', 'local_only') to filter by AgiHub cloud synchronization status. Use query to filter by name, ID, or repo URL. Pair with agy_resolve_workspace to resolve a project to a concrete working directory for agy_run.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listProjectsInput) (*mcp.CallToolResult, listProjectsOutput, error) {
-		projs, err := mgr.ListProjects(in.Query)
+		projs, err := mgr.ListProjects(in.Query, in.SyncFilter)
 		if err != nil {
 			return nil, listProjectsOutput{}, err
 		}

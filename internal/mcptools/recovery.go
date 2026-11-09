@@ -124,7 +124,8 @@ func resultPage(st manager.Status, in resultInput) (resultOutput, error) {
 func registerRecovery(s *toolServer, mgr *manager.Manager) {
 	addTool(s, &mcp.Tool{
 		Name: toolAgyListJobs, Title: "Find stored agy jobs", Annotations: annReadLocal,
-		Description: "Recover a lost job_id without starting work. Search retained jobs by cwd, task_label, state or idempotency_key; no prompts, arguments, result bodies or retry tokens are returned. " +
+		Description: "Use when: finding and recovering background jobs managed by the agy-mcp server process (by cwd, task_label, state, or idempotency_key). Do not use when: querying Antigravity conversations or IDE chat history (use agy_list_conversations or list_sessions instead). " +
+			"Recover a lost job_id without starting work. Search retained jobs by cwd, task_label, state or idempotency_key; no prompts, arguments, result bodies or retry tokens are returned. " +
 			"An exact key search skips metadata-only records left before supervisor admission. A miss can mean admission is still in progress. Replay the exact saved request. A readable match can survive an unrelated unreadable record; an incomplete miss returns an error. " +
 			"Results are newest first. Offset pages may shift as jobs start or expire; total_count is an observation, not a snapshot guarantee. " +
 			"Listing never marks a job collected. Use agy_status with include_result false for metadata, agy_wait to wait on the same job, or agy_get_result to read its terminal result.",
