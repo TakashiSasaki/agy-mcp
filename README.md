@@ -438,6 +438,9 @@ conversations outside cloud projects or without a title. Adoption
 `success` reports the local change. `post_restart_verified` records that
 the call restarted the daemon and observed the updated summary.
 
+See [AGY conversation adoption and Remote Control summaries](docs/agy-conversation-adoption.md)
+for the measured storage layout, startup reconciliation, and history checks.
+
 Project discovery retains one entry per registered resource root. A multi-root
 project therefore repeats its project ID; resolving that ID requires an absolute
 directory selection instead of silently choosing the last resource. Distinct
