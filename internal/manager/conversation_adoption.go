@@ -33,6 +33,20 @@ func (m *Manager) AdoptConversation(ctx context.Context, in AdoptConversationInp
 	if !adoptionConversationID.MatchString(in.ConversationID) {
 		return nil, errors.New("conversation_id must be a valid conversation identifier")
 	}
+	release, managed, err := m.cloudManualGate()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if managed {
+		pending, err := m.cloudConversationPending(in.ConversationID)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			return nil, errors.New("conversation has a job awaiting automatic cloud sync")
+		}
+	}
 	if m.xlock != nil {
 		key := keyFor(StartRequest{ConversationID: in.ConversationID})
 		locked, err := m.xlock.tryLock(key)

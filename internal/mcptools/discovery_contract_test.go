@@ -43,7 +43,9 @@ func TestRunDiscoveryContract(t *testing.T) {
 			}
 			for field, prop := range schema.Properties {
 				for _, example := range prop.Examples {
-					if err := resolved.Validate(map[string]any{"prompt": "task", field: example}); err != nil {
+					args := map[string]any{"prompt": "task", "project": "example-project"}
+					args[field] = example
+					if err := resolved.Validate(args); err != nil {
 						t.Errorf("%s example violates advertised schema: %v", field, err)
 					}
 				}
@@ -59,6 +61,9 @@ func TestRunDiscoveryContract(t *testing.T) {
 
 func assertRunChoicesAndDefaults(t *testing.T, schema *jsonschema.Schema) {
 	t.Helper()
+	if !slices.Contains(schema.Required, "project") || slices.Contains(schema.Required, "title") {
+		t.Errorf("require project and allow an omitted title, got required=%v", schema.Required)
+	}
 	for field, want := range map[string][]any{
 		"mode":     {"", "accept-edits", "auto"},
 		"effort":   {"", "low", "medium", "high", "xhigh", "max"},

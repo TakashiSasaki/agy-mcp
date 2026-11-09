@@ -68,7 +68,9 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 		// Name the step agy is on when the stream has reported one, so the message
 		// says what the run is doing rather than only how long it has been at it.
 		msg := fmt.Sprintf("job %s running (%s)", jobID, sec)
-		if st.StepType != "" {
+		if st.State != manager.StateRunning {
+			msg = fmt.Sprintf("job %s execution %s; cloud sync %s", jobID, st.State, st.CloudSyncState)
+		} else if st.StepType != "" {
 			msg += ": " + st.StepType
 		}
 		_ = req.Session.NotifyProgress(nctx, &mcp.ProgressNotificationParams{
@@ -78,7 +80,7 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 		})
 		ncancel()
 	}
-	st, terminal, err := mgr.WaitTerminal(ctx, jobID, deadline, onTick)
+	st, terminal, err := mgr.WaitCloudJob(ctx, jobID, deadline, onTick)
 	if err != nil {
 		// Classify by error identity, not context state: ctx can already be
 		// Done() in the same poll tick as an unrelated Status() read failure,
@@ -89,7 +91,7 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 			// The client gave up on the call; the job stays alive under its
 			// detached supervisor. Carry the job id in the error so a
 			// gracefully-cancelling client can still find the job.
-			return runSyncOutput{}, fmt.Errorf("wait cancelled; job %s is still running, wait for it with agy_wait or check it with agy_status: %w", jobID, err)
+			return runSyncOutput{}, fmt.Errorf("wait cancelled; use agy_wait or agy_status with job %s: %w", jobID, err)
 		}
 		return runSyncOutput{}, fmt.Errorf("job %s status read failed: %w", jobID, err)
 	}
@@ -102,11 +104,12 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 			out.NextAction = nextActionGetResult
 		}
 	}
-	if terminal {
+	if st.State != manager.StateRunning {
 		if include {
 			markCollected(mgr, jobID)
 		}
-	} else {
+	}
+	if !terminal && st.State == manager.StateRunning {
 		// Name agy_wait first: one blocking call is cheaper than an agy_status poll
 		// loop, and the note is the instruction a caller actually acts on at overrun
 		// (the tool description is far away by then). Saying the job is still running
@@ -115,6 +118,8 @@ func awaitJob(ctx context.Context, req *mcp.CallToolRequest, mgr *manager.Manage
 		out.Note = "wait cap reached; this is not a failure, the job is still running. " +
 			"Call agy_wait with this job_id to block until it finishes, or agy_status to check it now. " +
 			"Do not re-send the prompt."
+	} else if !terminal {
+		out.Note = "execution finished; cloud sync is still pending. Call agy_wait again with this job_id."
 	}
 	return out, nil
 }

@@ -24,7 +24,7 @@ func registerWait(s *toolServer, mgr *manager.Manager) {
 		Name:        toolAgyWait,
 		Title:       "Wait for an agy job",
 		Annotations: annReadLocal,
-		Description: "Block until an agy job finishes (bounded by wait). " +
+		Description: "Block until execution and required cloud conversation sync finish (bounded by wait). " +
 			"Accepts any job_id, whether it came from agy_run or from an agy_run_sync that " +
 			"outlived its inline wait. Prefer one agy_wait over repeated agy_status polling " +
 			"when the next step depends on the job's result; use agy_status instead for a " +

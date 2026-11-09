@@ -59,6 +59,14 @@ func main() {
 		os.Exit(doctorMain(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
+	if len(os.Args) >= 2 && (os.Args[1] == "sync-worker" || os.Args[1] == "sync-watchdog") {
+		if err := runSyncService(os.Args[1:]); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-version") {
 		fmt.Printf("agy-mcp %s\n", mcptools.ServerVersion())
 		return
@@ -68,6 +76,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runSyncService(args []string) error {
+	worker := args[0] == "sync-worker"
+	if (worker && len(args) != 1) || (!worker && (len(args) < 3 || args[1] != "--")) {
+		return errors.New("usage: agy-mcp sync-worker or agy-mcp sync-watchdog -- <command> [args...]")
+	}
+	cfg, err := config.Resolve()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	mgr := manager.New(cfg)
+	if worker {
+		log.Printf("%s starting cloud sync worker", mcptools.ServerVersion())
+		return mgr.RunCloudSyncWorker(ctx)
+	}
+	return mgr.GuardCloudWatchdog(ctx, args[2:])
 }
 
 // serve resolves configuration, runs startup garbage collection, and serves the

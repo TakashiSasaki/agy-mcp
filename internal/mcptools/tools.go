@@ -20,6 +20,8 @@ import (
 // exclusive, what a field defaults to, and what happens on expiry. Keeping that
 // here rather than in the tool description avoids restating the schema in prose.
 type runInput struct {
+	Project           string `json:"project" jsonschema:"registered cloud project ID or unique name; required on every run. Discover targets with agy_list_projects and sync_filter cloud_only"`
+	Title             string `json:"title,omitempty" jsonschema:"conversation title to assign after execution; omit to keep its title or derive one from the prompt preview"`
 	ExpectedGitBranch string `json:"expected_git_branch,omitempty" jsonschema:"optional exact Git branch name required before fresh execution, e.g. main or feature/task; a mismatch or unavailable Git state refuses with workspace_mismatch and job_started false. Omit for no branch precondition. Part of idempotency identity; an existing job replays without rechecking. This preflight is not a lock against later changes"`
 	ExpectedGitHead   string `json:"expected_git_head,omitempty" jsonschema:"optional full 40- or 64-character hexadecimal Git commit ID required before fresh execution; use head_full from agy_resolve_workspace or git rev-parse HEAD, not the short head display. Hex case is normalized. Mismatch or unavailable Git state refuses with workspace_mismatch and job_started false. Part of idempotency identity; existing jobs replay without rechecking. Does not prevent later branch or file changes"`
 
@@ -186,6 +188,8 @@ func (in runInput) toStartRequest() (manager.StartRequest, error) {
 		TaskLabel:    in.TaskLabel,
 		ArtifactDirs: in.ArtifactDirs,
 		Prompt:       in.Prompt, Model: in.Model, Dirs: in.Dirs,
+		Project:        in.Project,
+		Title:          in.Title,
 		ConversationID: in.ConversationID, ContinueLatest: in.ContinueLatest, Cwd: in.Cwd,
 		JSONSchema:     in.JSONSchema,
 		Effort:         in.Effort,
@@ -245,6 +249,8 @@ func parsePositiveDuration(name, s, example string) (time.Duration, error) {
 }
 
 type runOutput struct {
+	CloudProjectID string              `json:"cloud_project_id,omitempty" jsonschema:"resolved cloud project for the job"`
+	CloudSyncState string              `json:"cloud_sync_state,omitempty" jsonschema:"pending, unavailable, confirmed or failed, separately from execution state"`
 	JobID          string              `json:"job_id" jsonschema:"handle for this run; pass it to agy_wait, agy_status or agy_cancel"`
 	ConversationID string              `json:"conversation_id,omitempty" jsonschema:"conversation this run belongs to; pass it back as conversation_id to continue the thread. A fresh run may omit it if agy has yet to emit its init event within the conversation ID wait budget (default 5s after admission). agy_status reports the ID once available"`
 	State          string              `json:"state" jsonschema:"running for a newly-created job; when idempotency_key replays an existing job, its current running, done, failed or cancelled state. Use agy_wait or agy_status when you need the full terminal result"`
@@ -262,6 +268,9 @@ type statusResponse struct {
 }
 
 type statusOutput struct {
+	CloudProjectID    string `json:"cloud_project_id,omitempty" jsonschema:"resolved cloud project for the job; absent for jobs created before cloud integration"`
+	CloudSyncState    string `json:"cloud_sync_state,omitempty" jsonschema:"pending, unavailable, confirmed or failed; confirmed means the Remote Control daemon summary covers this job's persisted revision"`
+	CloudSyncReason   string `json:"cloud_sync_reason,omitempty" jsonschema:"reason for a pending, unavailable or failed sync observation"`
 	TaskLabel         string `json:"task_label,omitempty" jsonschema:"caller-supplied label for recovering and identifying the job"`
 	ResultAvailable   bool   `json:"result_available" jsonschema:"whether this job currently has recoverable result text"`
 	ResultIncluded    bool   `json:"result_included" jsonschema:"whether result text is included in this response"`
@@ -356,6 +365,9 @@ func toStatusOutput(st manager.Status) statusOutput {
 		selectedSource = manager.ModelSourceCLIInit
 	}
 	out := statusOutput{
+		CloudProjectID:       st.CloudProjectID,
+		CloudSyncState:       st.CloudSyncState,
+		CloudSyncReason:      st.CloudSyncReason,
 		TaskLabel:            st.TaskLabel,
 		ResultAvailable:      st.Result != "",
 		ResultIncluded:       st.Result != "",
@@ -689,6 +701,10 @@ func NewServer(mgr *manager.Manager) *mcp.Server {
 }
 
 func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
+	return newServerWithJobStarter(mgr, logger, mgr.StartCloudJob)
+}
+
+func newServerWithJobStarter(mgr *manager.Manager, logger *log.Logger, start func(manager.StartRequest) (manager.Job, error)) *mcp.Server {
 	s := &toolServer{Server: mcp.NewServer(&mcp.Implementation{Name: "agy-mcp", Version: serverVersion(), Icons: []mcp.Icon{{Source: "https://oci.moukaeritai.work/mcp-icons/agy-mcp/icons/icon-512.png?v=2519cb99ec85", MIMEType: "image/png", Sizes: []string{"512x512"}}, {Source: "https://oci.moukaeritai.work/mcp-icons/agy-mcp/favicon.svg?v=2519cb99ec85", MIMEType: "image/svg+xml", Sizes: []string{"any"}}}}, &mcp.ServerOptions{
 		Instructions: serverInstructions,
 	})}
@@ -705,7 +721,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		if err != nil {
 			return nil, runOutput{}, invalidRunError(err)
 		}
-		job, err := mgr.StartJob(req)
+		job, err := start(req)
 		if err != nil {
 			return nil, runOutput{}, err
 		}
@@ -714,7 +730,8 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		// report a run's conversation fill it from a Status read, which costs nothing
 		// extra because they were reading the status anyway. (list_sessions reports
 		// conversation ids too, but those come from agy's own cache, not from a run.)
-		return nil, runOutput{JobID: job.ID, ConversationID: mgr.AwaitConversationID(ctx, job), State: job.State, Quota: quotaFor(mgr)}, nil
+		return nil, runOutput{JobID: job.ID, ConversationID: mgr.AwaitConversationID(ctx, job), State: job.State,
+			Quota: quotaFor(mgr), CloudProjectID: job.CloudProjectID, CloudSyncState: job.CloudSyncState}, nil
 	})
 
 	addTool(s, &mcp.Tool{
@@ -769,7 +786,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 		return nil, cancelOutput{State: state}, nil
 	})
 
-	registerRunSync(s, mgr)
+	registerRunSync(s, mgr, start)
 	registerWait(s, mgr)
 	registerUsage(s, mgr)
 	registerArtifacts(s, mgr)

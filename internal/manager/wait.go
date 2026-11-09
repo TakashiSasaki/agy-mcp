@@ -3,6 +3,8 @@ package manager
 import (
 	"context"
 	"time"
+
+	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
 )
 
 // WaitPollInterval is how often WaitTerminal re-reads job status and invokes
@@ -27,6 +29,16 @@ const WaitPollInterval = 250 * time.Millisecond
 // so a terminal job's id is already on disk and there is nothing left to wait
 // for.
 func (m *Manager) WaitTerminal(ctx context.Context, id string, deadline time.Time, onTick func(Status)) (Status, bool, error) {
+	return m.waitJob(ctx, id, deadline, onTick, false)
+}
+
+// WaitCloudJob waits for execution and the cloud worker's final receipt. Jobs
+// created before cloud integration complete on their execution state alone.
+func (m *Manager) WaitCloudJob(ctx context.Context, id string, deadline time.Time, onTick func(Status)) (Status, bool, error) {
+	return m.waitJob(ctx, id, deadline, onTick, true)
+}
+
+func (m *Manager) waitJob(ctx context.Context, id string, deadline time.Time, onTick func(Status), waitCloud bool) (Status, bool, error) {
 	ticker := time.NewTicker(WaitPollInterval)
 	defer ticker.Stop()
 	for {
@@ -34,7 +46,8 @@ func (m *Manager) WaitTerminal(ctx context.Context, id string, deadline time.Tim
 		if err != nil {
 			return Status{}, false, err
 		}
-		if st.State != StateRunning {
+		if st.State != StateRunning && (!waitCloud || st.CloudSyncState == "" ||
+			st.CloudSyncState == jobstore.CloudConfirmed || st.CloudSyncState == jobstore.CloudFailed) {
 			return st, true, nil
 		}
 		if time.Now().After(deadline) {

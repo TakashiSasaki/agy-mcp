@@ -69,6 +69,7 @@ type Manager struct {
 	// sysctl read failure (not reliably reproducible for a real child process)
 	// and without any risk of a package-level var leaking into another test.
 	readStartTimeTicks func(int) (uint64, bool)
+	cloudStartDaemon   func(context.Context) error
 
 	// testHookMidRelease, when non-nil, is invoked by releaseKey between its two
 	// unlock steps (the cross-process xlock.unlock and the in-process gate.release).
@@ -150,6 +151,8 @@ type StartRequest struct {
 	TaskLabel         string   // optional human-readable label; metadata only, not part of request identity
 	ArtifactDirs      []string // explicit artifact read roots; not execution workspaces
 	Prompt            string
+	Project           string
+	Title             string
 	Model             string   // optional; falls back to cfg.DefaultModel, then reduced by modelID
 	Effort            string   // optional; --effort <low|medium|high>, reasoning effort for the session
 	Mode              string   // optional; --mode <accept-edits>, agy's agent execution mode (mcptools refuses plan, issue #219)
@@ -171,6 +174,8 @@ type Job struct {
 	ID             string
 	ConversationID string
 	State          string // "running"
+	CloudProjectID string
+	CloudSyncState string
 }
 
 // versionCheckTimeout bounds the `agy --version` probe so a wedged binary
@@ -534,7 +539,8 @@ func (m *Manager) findIdempotentJob(req StartRequest, args []string) (Job, bool,
 		if err != nil {
 			return Job{}, false, fmt.Errorf("read job %s status for idempotency_key %q: %w", id, req.IdempotencyKey, err)
 		}
-		return Job{ID: id, ConversationID: st.ConversationID, State: st.State}, true, nil
+		return Job{ID: id, ConversationID: st.ConversationID, State: st.State,
+			CloudProjectID: st.CloudProjectID, CloudSyncState: st.CloudSyncState}, true, nil
 	}
 	return Job{}, false, scanErr
 }
@@ -654,6 +660,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		return Job{}, refusedStart("unsupported_platform", "change_environment", false, proc.ErrUnsupported)
 	}
 	requestedCwd := req.Cwd
+	req.Project, req.Title = strings.TrimSpace(req.Project), strings.TrimSpace(req.Title)
 	req, err := m.normalizeRequest(req)
 	if err != nil {
 		return Job{}, refusedStart("invalid_argument", "change_request", false, err)
@@ -718,10 +725,11 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	// A retry that resolved to an existing job above needs no agy binary at all.
 	// A genuinely new run does, and still checks the binary before reserving a
 	// concurrency slot or creating a job directory.
-	agy, err := m.agyBinaryChecked(context.Background())
+	agy, cloud, releaseLaunch, err := m.prepareJobLaunch(req)
 	if err != nil {
-		return Job{}, refusedStart("agy_unavailable", "check_configuration", false, err)
+		return Job{}, err
 	}
+	defer releaseLaunch()
 
 	// Refuse a continuation of a conversation some running job already drives.
 	// The gate covers two runs that both name the conversation up front; this
@@ -778,6 +786,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 		GitDirty:       gitDirty,
 		Model:          req.Model,
 		ConversationID: req.ConversationID,
+		Cloud:          cloud,
 		IdempotencyKey: req.IdempotencyKey,
 		Prompt:         req.Prompt,
 		StartedAt:      time.Now().UTC(),
@@ -882,7 +891,7 @@ func (m *Manager) StartJob(req StartRequest) (Job, error) {
 	// a fresh run is named by agy's init event a moment later, and waiting for that
 	// is AwaitConversationID's job, paid only by the caller that reports the id in
 	// its own response.
-	return Job{ID: id, ConversationID: req.ConversationID, State: StateRunning}, nil
+	return startedJob(id, req.ConversationID, cloud), nil
 }
 
 // startSupervisor starts the detached child with a private admission pipe on
@@ -1062,6 +1071,19 @@ func (m *Manager) gcEvaluate(l loadedJob, cutoff time.Time) bool {
 	if err != nil {
 		log.Printf("GC: job %s completion/observation time unavailable, keeping: %v", l.id, err)
 		return false
+	}
+	if l.meta.Cloud != nil && !m.preparedOnly(l.meta) {
+		dir, err := m.store.Dir(l.id)
+		if err != nil {
+			return false
+		}
+		receipt, err := jobstore.ReadCloudSync(dir)
+		if err != nil || !receipt.Settled() {
+			return false
+		}
+		if receipt.SettledAt.After(retainedFrom) {
+			retainedFrom = receipt.SettledAt
+		}
 	}
 	if !retainedFrom.Before(cutoff) {
 		return false

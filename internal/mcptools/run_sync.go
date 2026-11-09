@@ -62,12 +62,12 @@ type runSyncOutput struct {
 
 // registerRunSync adds the agy_run_sync tool: start a job, wait inline for it
 // (bounded), streaming progress notifications when the client asked for them.
-func registerRunSync(s *toolServer, mgr *manager.Manager) {
+func registerRunSync(s *toolServer, mgr *manager.Manager, start func(manager.StartRequest) (manager.Job, error)) {
 	addStartTool(s, &mcp.Tool{
 		Name:        toolAgyRunSync,
 		Title:       "Delegate to agy (wait inline)",
 		Annotations: annDelegate,
-		Description: "Delegate a prompt to an agy model and wait for the result inline (bounded by wait). " +
+		Description: "Delegate a prompt to an agy model and wait for execution and cloud conversation sync (bounded by wait). " +
 			"Use when the answer is needed before your next step AND the task is bounded enough to finish within the wait: " +
 			"a focused peer review, a second opinion, a rubber-duck question. " +
 			"For open-ended work that routinely runs past the wait cap (web research, a whole-codebase review), " +
@@ -87,7 +87,7 @@ func registerRunSync(s *toolServer, mgr *manager.Manager) {
 		if err != nil {
 			return nil, runSyncOutput{}, invalidRunError(err)
 		}
-		job, err := mgr.StartJob(startReq)
+		job, err := start(startReq)
 		if err != nil {
 			return nil, runSyncOutput{}, err
 		}

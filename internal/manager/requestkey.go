@@ -56,6 +56,8 @@ type requestKeyFields struct {
 	ArtifactDirs      []string      `json:"artifact_dirs,omitempty"`
 	ExpectedGitBranch string        `json:"expected_git_branch,omitempty"`
 	ExpectedGitHead   string        `json:"expected_git_head,omitempty"`
+	Project           string        `json:"project,omitempty"`
+	Title             string        `json:"title,omitempty"`
 }
 
 // requestKey identifies a normalized request for idempotency_key replays. It
@@ -103,6 +105,8 @@ func requestKey(req StartRequest) string {
 		Timeout:           req.Timeout,
 		ArtifactDirs:      req.ArtifactDirs,
 		ExpectedGitBranch: req.ExpectedGitBranch, ExpectedGitHead: req.ExpectedGitHead,
+		Project: req.Project,
+		Title:   req.Title,
 	})
 	if err != nil {
 		return ""
@@ -130,6 +134,9 @@ func requestKey(req StartRequest) string {
 func sameRequest(meta jobstore.Meta, req StartRequest, args []string) bool {
 	if meta.RequestKey != "" {
 		return meta.RequestKey == requestKey(req)
+	}
+	if req.Project != "" || req.Title != "" || meta.Cloud != nil {
+		return false
 	}
 	// CLI args never carried preconditions, so a legacy argument-only record
 	// must match the explicitly persisted expectations as well.

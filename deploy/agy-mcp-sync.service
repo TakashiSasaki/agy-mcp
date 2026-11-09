@@ -1,0 +1,16 @@
+[Unit]
+Description=agy-mcp cloud conversation sync worker
+After=antigravity-cli-daemon.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment="AGY_MCP_AGY_PATH=%h/.local/bin/agy"
+Environment="AGY_MCP_STATE_DIR=%h/.local/state/agy-mcp"
+ExecStart=%h/go/bin/agy-mcp sync-worker
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=50s
+
+[Install]
+WantedBy=default.target

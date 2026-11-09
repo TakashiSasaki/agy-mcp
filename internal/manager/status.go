@@ -131,8 +131,11 @@ type Status struct {
 	// that its sign-in expired (issue #214). It never changes State,
 	// FailureReason or Error; the tool layer turns it into recovery advice. Set
 	// only alongside StateFailed and ReasonAgyError.
-	SignInRequired bool
-	ConversationID string
+	SignInRequired  bool
+	ConversationID  string
+	CloudProjectID  string
+	CloudSyncState  string
+	CloudSyncReason string
 	// Model is the legacy model id agy-mcp resolved for this run and persisted to
 	// meta: the request's model, or AGY_MCP_DEFAULT_MODEL when none was given,
 	// reduced to the id column (see modelID). Empty when neither was set, meaning
@@ -227,6 +230,16 @@ func (m *Manager) Status(id string) (Status, error) {
 	}
 	if st.ExecutionCwd == "" {
 		st.ExecutionCwd = meta.Cwd
+	}
+	if meta.Cloud != nil {
+		st.CloudProjectID = meta.Cloud.ProjectID
+		st.CloudSyncState = jobstore.CloudPending
+		receipt, err := jobstore.ReadCloudSync(dir)
+		if err == nil {
+			st.CloudSyncState, st.CloudSyncReason = receipt.State, receipt.Reason
+		} else if !errors.Is(err, os.ErrNotExist) {
+			st.CloudSyncState, st.CloudSyncReason = jobstore.CloudUnavailable, "sync_receipt_unavailable"
+		}
 	}
 	// The progress file is what makes a running job's conversation id readable:
 	// the supervisor records it as soon as agy's init event names the

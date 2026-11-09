@@ -7,7 +7,19 @@ Choose how clients reach agy-mcp after the [shared build and local check](#build
 | [ChatGPT through Secure MCP Tunnel](#connect-through-chatgpt-secure-mcp-tunnel) | Select the tunnel in ChatGPT. | `tunnel-client` launches agy-mcp over stdio. |
 | [Standalone server under systemd](#run-a-standalone-http-server-with-systemd) | Point a Streamable HTTP MCP client at `http://127.0.0.1:8765/mcp`. | The `agy-mcp.service` user unit runs agy-mcp directly in HTTP mode. |
 
-In either deployment, a separate supervisor runs Antigravity CLI (`agy`) for each job and saves its state on the host. If both deployments run side by side and need independent job histories, give each a distinct `AGY_MCP_STATE_DIR`.
+In either deployment, a separate supervisor runs Antigravity CLI (`agy`) for each job and saves its state on the host. Transports sharing the AGY profile use the same `AGY_MCP_STATE_DIR`.
+
+## Required cloud job sync
+
+Both run tools require a registered cloud project and a live sync worker. The initial supported configuration uses AGY 1.5.3, Linux and the existing `antigravity-cli-daemon.service` systemd user unit. Set up and sign in to AGY, register the cloud project and start Remote Control before enabling new job admission. Tool discovery and existing job reads remain available while the worker is offline.
+
+Use one canonical local `AGY_MCP_STATE_DIR` per AGY profile. Set the same directory in the worker, the HTTP server and the tunnel child. The worker records this association in the profile's private `.agy-mcp-sync` directory. A separate job store needs a separate AGY profile. Keep the same installed executable for the worker and both transports.
+
+Copy [the sync worker unit](../deploy/agy-mcp-sync.service) to the systemd user unit directory and adapt its AGY path, agy-mcp path and job store to the installation. On hosts with a Remote Control watchdog, wrap its existing command with `agy-mcp sync-watchdog -- <command>`, using the same job store. The [watchdog drop-in](../deploy/agy-sync-watchdog.conf) shows this host's configuration. Run `systemctl --user daemon-reload` and `systemctl --user enable --now agy-mcp-sync.service`. Bring up the MCP transports using the same binary. From MCP, list cloud projects, submit a disposable job with one of those IDs and wait on the returned `job_id` until its sync settles.
+
+The worker keeps working after an MCP client disconnects. During a drain or restart, new submissions may return `cloud_sync_busy` and `job_started: false`. Retry the same request and key after maintenance. Keep normal conversation writes on the MCP path. To run turns directly from the browser or CLI, stop the sync worker first and start it after those turns finish.
+
+For an upgrade or rollback, stop intake and drain existing execution. Let pending sync settle before stopping the worker when possible. Keep the job store, sync receipts and profile maintenance record. Restore the previous binary and the matching service configuration together, including the watchdog command. When restoring a cloud-capable build, start the worker before admitting jobs and verify any pending job by its original ID. If the worker stopped during maintenance, let it restore Remote Control from its journal before rolling back.
 
 ## Prerequisites
 
@@ -194,7 +206,7 @@ In [ChatGPT Plugins](https://chatgpt.com/#settings/Connectors), add a custom MCP
 
 ## Run a standalone HTTP server with systemd
 
-After building and checking the binary, create a user service that runs agy-mcp directly. This path uses the server's Streamable HTTP transport. Install OpenSSL to generate the HTTP bearer token. Keep the service bound to loopback and give the token only to clients allowed to run jobs. For an independent job history alongside the tunnel, set `agy_state_dir="$HOME/.local/state/agy-mcp-http"` and run `install -d -m 700 "$agy_state_dir"` before writing the unit.
+After building and checking the binary, create a user service that runs agy-mcp directly. This path uses the server's Streamable HTTP transport. Install OpenSSL to generate the HTTP bearer token. Keep the service bound to loopback and give the token only to clients allowed to run jobs. If this transport shares the tunnel profile, use the same `agy_state_dir` as the tunnel and sync worker.
 
 ```bash
 http_env_file="$HOME/.config/agy-mcp/http.env"

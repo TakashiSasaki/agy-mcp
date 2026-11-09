@@ -168,6 +168,12 @@ func decodeSummaryTimestamp(data []byte) time.Time {
 // binding at startup. Removing the stale entry lets AGY rebuild it.
 // Preserve all other protobuf fields byte for byte, including unknown fields.
 func invalidateCachedConversation(path, id string, target daemonConversation) (bool, error) {
+	return invalidateSummaryEntries(path, func(key string, summary daemonConversation) (selected, stale bool) {
+		return key == id, !summary.matches(target)
+	})
+}
+
+func invalidateSummaryEntries(path string, classify func(string, daemonConversation) (selected, stale bool)) (bool, error) {
 	fields, originalInfo, err := readSummarySnapshot(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -175,35 +181,33 @@ func invalidateCachedConversation(path, id string, target daemonConversation) (b
 	if err != nil {
 		return false, err
 	}
-	remove := -1
-	seen := false
-	for i, field := range fields {
+	seen := make(map[string]bool)
+	var updated []byte
+	removed := false
+	for _, field := range fields {
 		if field.FieldNum != 1 {
+			updated = append(updated, field.Raw...)
 			continue
 		}
 		key, summary, err := decodeDaemonSummary(field)
 		if err != nil {
 			return false, err
 		}
-		if key != id {
-			continue
+		selected, stale := classify(key, summary)
+		if selected {
+			if seen[key] {
+				return false, errors.New("duplicate target conversation in summary snapshot")
+			}
+			seen[key] = true
+			if stale {
+				removed = true
+				continue
+			}
 		}
-		if seen {
-			return false, errors.New("duplicate target conversation in summary snapshot")
-		}
-		seen = true
-		if !summary.matches(target) {
-			remove = i
-		}
+		updated = append(updated, field.Raw...)
 	}
-	if remove < 0 {
+	if !removed {
 		return false, nil
-	}
-	var updated []byte
-	for i, field := range fields {
-		if i != remove {
-			updated = append(updated, field.Raw...)
-		}
 	}
 	currentInfo, err := os.Lstat(path)
 	if err != nil {

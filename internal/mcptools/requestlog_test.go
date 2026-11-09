@@ -322,7 +322,7 @@ func TestRequestLoggingRealServer(t *testing.T) {
 	}
 	// Cover both a typed handler refusal and SDK validation before the handler.
 	for tool, args := range map[string]map[string]any{
-		toolAgyRun:     {"prompt": "secret-prompt", "timeout": "secret-duration"},
+		toolAgyRun:     {"prompt": "secret-prompt", "project": "example-project", "timeout": "secret-duration"},
 		toolAgyRunSync: {"unexpected": "secret-value"},
 	} {
 		if out := call(tool, args, true); out["start_error_code"] != startInvalidArgument || out["job_started"] != false {

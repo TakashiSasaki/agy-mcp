@@ -41,6 +41,7 @@ type Meta struct {
 	GitDirty          *bool         `json:"git_dirty,omitempty"`
 	Model             string        `json:"model,omitempty"`
 	ConversationID    string        `json:"conversation_id,omitempty"`
+	Cloud             *CloudIntent  `json:"cloud,omitempty"`
 	IdempotencyKey    string        `json:"idempotency_key,omitempty"`
 	RequestKey        string        `json:"request_key,omitempty"`   // hash of the normalized request, set only with an idempotency_key; compared on a replay
 	CwdAliasKey       string        `json:"cwd_alias_key,omitempty"` // request hash with the originally submitted absolute cwd before resolving symlinks

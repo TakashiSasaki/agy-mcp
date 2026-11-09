@@ -350,6 +350,20 @@ func (m *Manager) GetConversation(conversationID string) (*ConversationSummaryIt
 
 // RestartSyncDaemon exposes standalone graceful restart functionality.
 func (m *Manager) RestartSyncDaemon(ctx context.Context, force bool) (*DaemonRestartResult, error) {
+	release, managed, err := m.cloudManualGate()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if managed {
+		_, active, err := m.cloudJobs()
+		if err != nil {
+			return nil, err
+		}
+		if active {
+			return &DaemonRestartResult{Success: true, DaemonRestartReason: "an MCP job is active"}, nil
+		}
+	}
 	restarted, reason, activeCount, err := m.restartSyncDaemon(ctx, force, nil)
 	if err != nil {
 		return nil, err
@@ -418,7 +432,7 @@ func (m *Manager) restartSyncDaemon(ctx context.Context, force bool, prepare fun
 }
 
 func restartRemoteControlDaemon(ctx context.Context, prepare func(context.Context) error) (started bool, err error) {
-	const service = "antigravity-cli-daemon.service"
+	const service = remoteControlService
 	if prepare == nil {
 		err = probeCmd(ctx, "systemctl", "--user", "restart", service).Run()
 		return err == nil, err
