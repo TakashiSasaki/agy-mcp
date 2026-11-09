@@ -24,12 +24,16 @@ type ProjectWorktree struct {
 
 // ProjectInfo provides structured metadata for a repository/project.
 type ProjectInfo struct {
-	ID            string            `json:"id" jsonschema:"project identifier; a multi-root project has one entry per root with the same identifier"`
-	Name          string            `json:"name" jsonschema:"human-readable project name"`
-	Root          string            `json:"root" jsonschema:"root directory of the project container or repository"`
-	RepositoryURL string            `json:"repository_url,omitempty" jsonschema:"git remote fetch URL if configured"`
-	DefaultBranch string            `json:"default_branch,omitempty" jsonschema:"default or main branch name"`
-	Worktrees     []ProjectWorktree `json:"worktrees" jsonschema:"list of active linked worktrees and working branches"`
+	ID                string            `json:"id" jsonschema:"project identifier; a multi-root project has one entry per root with the same identifier"`
+	Name              string            `json:"name" jsonschema:"human-readable project name"`
+	Root              string            `json:"root" jsonschema:"root directory of the project container or repository"`
+	RepositoryURL     string            `json:"repository_url,omitempty" jsonschema:"git remote fetch URL if configured"`
+	DefaultBranch     string            `json:"default_branch,omitempty" jsonschema:"default or main branch name"`
+	Worktrees         []ProjectWorktree `json:"worktrees" jsonschema:"list of active linked worktrees and working branches"`
+	IsCloudSynced     bool              `json:"is_cloud_synced" jsonschema:"true if this project is registered and synchronized with Antigravity cloud / AgiHub"`
+	SyncScope         string            `json:"sync_scope" jsonschema:"synchronization scope: 'cloud' (registered cloud project), 'local_only' (isWorkspaceOnly set to true), 'cli_default' (default CLI scope), or 'unregistered' (directory under /data not registered in Antigravity)"`
+	ConversationCount int               `json:"conversation_count" jsonschema:"total number of conversation sessions recorded for this project in conversation_summaries.db"`
+	LastActiveTime    string            `json:"last_active_time,omitempty" jsonschema:"RFC3339 timestamp of the most recent conversation turn or update in this project"`
 }
 
 // ResolveWorkspaceResult carries a path only for a unique selection. Resolved
@@ -54,8 +58,9 @@ func defaultProjectsConfigDir() string {
 }
 
 // ListProjects discovers registered Antigravity projects from ~/.gemini/config/projects/*.json
-// and canonical repositories under /data.
-func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
+// and canonical repositories under /data. Optional syncFilter ("cloud_only", "local_only", "all")
+// filters projects by their cloud synchronization status.
+func (m *Manager) ListProjects(query string, syncFilter ...string) ([]ProjectInfo, error) {
 	projDir := m.projectsDir
 	if projDir == "" {
 		projDir = defaultProjectsConfigDir()
@@ -67,6 +72,9 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 
 	projects, registeredRoots := discoverRegisteredProjects(projDir)
 	discoverDataProjects(dataDir, projects, registeredRoots)
+
+	// Fetch conversation counts and last active times from SQLite DB if available
+	stats, _ := m.GetProjectConversationStats()
 
 	// 3. Inspect Git remotes and worktrees for each project
 	var out []ProjectInfo
@@ -82,6 +90,22 @@ func (m *Manager) ListProjects(query string) ([]ProjectInfo, error) {
 			wts = []ProjectWorktree{}
 		}
 		proj.Worktrees = wts
+
+		if s, ok := stats[proj.ID]; ok {
+			proj.ConversationCount = s.Count
+			proj.LastActiveTime = s.LastActive
+		}
+
+		// Apply syncFilter if provided
+		if len(syncFilter) > 0 && syncFilter[0] != "" {
+			f := strings.ToLower(syncFilter[0])
+			if f == "cloud_only" && !proj.IsCloudSynced {
+				continue
+			}
+			if f == "local_only" && proj.IsCloudSynced {
+				continue
+			}
+		}
 
 		// If a query is provided, filter by Name, ID, or RepositoryURL
 		if query != "" {
@@ -123,6 +147,7 @@ type projectKey struct{ id, name, root string }
 type projectRegistration struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
+	IsWorkspaceOnly  *bool  `json:"isWorkspaceOnly,omitempty"`
 	ProjectResources struct {
 		Resources []struct {
 			FolderURI string `json:"folderUri"`
@@ -169,10 +194,29 @@ func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInf
 			if name == "" {
 				name = filepath.Base(root)
 			}
+			syncScope := "cloud"
+			isCloudSynced := true
+			if id == "default-cli-project" {
+				syncScope = "cli_default"
+				isCloudSynced = false
+			} else if id == "outside-of-project" {
+				syncScope = "outside_project"
+				isCloudSynced = false
+			} else if registration.IsWorkspaceOnly != nil && *registration.IsWorkspaceOnly {
+				syncScope = "local_only"
+				isCloudSynced = false
+			}
+
 			// Keep each resource and registration identity for ambiguity checks.
 			key := projectKey{id, name, root}
-			projects[key] = &ProjectInfo{ID: id, Name: name, Root: root,
-				DefaultBranch: resource.GitFolder.DefaultBranch}
+			projects[key] = &ProjectInfo{
+				ID:            id,
+				Name:          name,
+				Root:          root,
+				DefaultBranch: resource.GitFolder.DefaultBranch,
+				IsCloudSynced: isCloudSynced,
+				SyncScope:     syncScope,
+			}
 			roots[root] = true
 		}
 	}
@@ -193,7 +237,13 @@ func discoverDataProjects(dir string, projects map[projectKey]*ProjectInfo, regi
 			continue
 		}
 		name := entry.Name()
-		projects[projectKey{name, name, root}] = &ProjectInfo{ID: name, Name: name, Root: root}
+		projects[projectKey{name, name, root}] = &ProjectInfo{
+			ID:            name,
+			Name:          name,
+			Root:          root,
+			IsCloudSynced: false,
+			SyncScope:     "unregistered",
+		}
 	}
 }
 

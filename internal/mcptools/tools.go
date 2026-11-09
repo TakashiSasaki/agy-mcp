@@ -774,6 +774,7 @@ func newServer(mgr *manager.Manager, logger *log.Logger) *mcp.Server {
 	registerUsage(s, mgr)
 	registerArtifacts(s, mgr)
 	registerProjects(s, mgr)
+	registerConversations(s, mgr)
 
 	addTool(s, &mcp.Tool{
 		Name:        toolListModels,

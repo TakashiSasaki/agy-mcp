@@ -46,6 +46,7 @@ var wantAnnotations = map[string]mcp.ToolAnnotations{
 	toolAgyReadArtifact:     {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyListProjects:     {ReadOnlyHint: true, OpenWorldHint: new(false)},
 	toolAgyResolveWorkspace: {ReadOnlyHint: true, OpenWorldHint: new(false)},
+	toolAgyListConversations: {ReadOnlyHint: true, OpenWorldHint: new(false)},
 }
 
 // eqBoolPtr compares two optional hints. Nil is distinct from false: the MCP
@@ -140,8 +141,9 @@ var wantSiblings = map[string][]string{
 	toolAgyUsage:            {toolAgyRun, toolAgyRunSync},
 	toolAgyListArtifacts:    {toolAgyReadArtifact, toolAgyStatus},
 	toolAgyReadArtifact:     {toolAgyListArtifacts, toolAgyStatus},
-	toolAgyListProjects:     {toolAgyResolveWorkspace, toolAgyRun},
-	toolAgyResolveWorkspace: {toolAgyListProjects, toolAgyRun},
+	toolAgyListProjects:      {toolAgyResolveWorkspace, toolAgyRun},
+	toolAgyResolveWorkspace:  {toolAgyListProjects, toolAgyRun},
+	toolAgyListConversations: {toolAgyListProjects, toolListSessions},
 }
 
 // mentions reports whether desc names tool as a whole word. A plain substring
