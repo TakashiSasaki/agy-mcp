@@ -190,12 +190,12 @@ func TestCloudWaitAndRetentionUseSeparateReceipt(t *testing.T) {
 func TestCloudAdmissionRequiresSupportedWorker(t *testing.T) {
 	m, _ := testCloudWorker(t)
 	gate, intent, err := m.cloudAdmission(StartRequest{Project: workerTestProject}, "agy")
-	var refusal *StartError
+	refusal, isRefusal := errors.AsType[*StartError](err)
 	want := "cloud_sync_unsupported"
 	if runtime.GOOS == cloudLinux {
 		want = "cloud_sync_unavailable"
 	}
-	if gate != nil || intent != nil || !errors.As(err, &refusal) ||
+	if gate != nil || intent != nil || !isRefusal ||
 		refusal.Code != want || refusal.JobStarted == nil || *refusal.JobStarted {
 		t.Fatalf("expected pre-admission refusal %s: gate=%v intent=%+v err=%v", want, gate, intent, err)
 	}
