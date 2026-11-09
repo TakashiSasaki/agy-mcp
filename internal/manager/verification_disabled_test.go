@@ -149,3 +149,39 @@ func TestVerificationDisabled(t *testing.T) {
 		})
 	}
 }
+
+// Mutation guard: removing the default unsupported_testcase_execution_attribute
+// branch in testcaseExecution or the unsupported case in end() turns unknown
+// status/result attributes into passing testcases.
+func TestVerificationUnknownExecutionAttributes(t *testing.T) {
+	for _, report := range []string{
+		`<testsuite tests="1" failures="0"><testcase name="bad" status="fail"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" status="failed"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" status="error"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" status="skipped"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" status=""/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" result="failed"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" result="skipped"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" result="cancelled"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" result=""/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="bad" status="run" result="skipped"/></testsuite>`,
+		`<testsuite xmlns:foreign="urn:diagnostics" tests="1" failures="0"><testcase name="bad" foreign:status="run"/></testsuite>`,
+		`<testsuite xmlns:foreign="urn:diagnostics" tests="1" failures="0"><testcase name="bad" foreign:result="completed"/></testsuite>`,
+	} {
+		out := parseJUnit([]byte(report))
+		if out.Complete || out.VerificationOutcome != "unknown" || out.Tests != 1 || out.Passed != 0 || !slices.Contains(out.Warnings, "unsupported_testcase_execution_attribute") {
+			t.Fatalf("unsupported execution attribute accepted: %s -> %+v", report, out)
+		}
+	}
+	for _, report := range []string{
+		`<testsuite tests="1" failures="0"><testcase name="ok" status="run"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="ok" result="completed"/></testsuite>`,
+		`<testsuite tests="1" failures="0"><testcase name="ok" status="run" result="completed"/></testsuite>`,
+	} {
+		out := parseJUnit([]byte(report))
+		if !out.Complete || out.VerificationOutcome != "passed" || out.Tests != 1 || out.Passed != 1 || len(out.Warnings) != 0 {
+			t.Fatalf("valid execution attribute rejected: %s -> %+v", report, out)
+		}
+	}
+}
+

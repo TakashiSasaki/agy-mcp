@@ -102,6 +102,44 @@ func TestParseGoTestJSONBuildFailures(t *testing.T) {
 	if got.VerificationOutcome != "unknown" {
 		t.Fatalf("post-failure output should invalidate: %+v", got)
 	}
+	// MEASURED against Go 1.27.0 (go test -json -gcflags=-m): JSONPrinter.Printf
+	// emits build-output without build-fail when compilation succeeds with
+	// diagnostics. Such non-failing build-output must remain valid.
+	passWithBuildDiagnostics := parseGoTestJSON(goEvents(
+		output,
+		goVerificationEvent{Action: "build-output", ImportPath: "p.test", Output: "# p.test\n_testmain.go:1: can inline init\n"},
+		goEvent("start", "p", ""),
+		goEvent("run", "p", "TestOne"),
+		goEvent("pass", "p", "TestOne"),
+		goEvent("pass", "p", ""),
+	))
+	if !passWithBuildDiagnostics.Complete || passWithBuildDiagnostics.VerificationOutcome != "passed" || passWithBuildDiagnostics.Tests != 1 || passWithBuildDiagnostics.Passed != 1 || passWithBuildDiagnostics.PackageFailures != 0 {
+		t.Fatalf("non-failing build-output rejected: %+v", passWithBuildDiagnostics)
+	}
+	// When FailedBuild references a build that emitted build-output without a
+	// terminal build-fail event, the build failure stream is incomplete.
+	unfinishedFailedBuild := parseGoTestJSON(goEvents(output, goEvent("start", "p", ""), fail))
+	if unfinishedFailedBuild.Complete || unfinishedFailedBuild.VerificationOutcome != "unknown" || unfinishedFailedBuild.PackageFailures != 1 {
+		t.Fatalf("unfinished FailedBuild should be incomplete: %+v", unfinishedFailedBuild)
+	}
+	// Per Go 1.27 src/cmd/go/internal/load/printer.go, build-output always carries
+	// non-empty Output and build-fail never carries Output.
+	emptyBuildOutput := parseGoTestJSON(goEvents(
+		goVerificationEvent{Action: "build-output", ImportPath: build.ImportPath},
+		goEvent("start", "p", ""),
+		goEvent("run", "p", "TestOne"),
+		goEvent("pass", "p", "TestOne"),
+		goEvent("pass", "p", ""),
+	))
+	if emptyBuildOutput.Complete || emptyBuildOutput.VerificationOutcome != "unknown" {
+		t.Fatalf("empty build-output should invalidate: %+v", emptyBuildOutput)
+	}
+	buildFailWithOutput := parseGoTestJSON(goEvents(
+		goVerificationEvent{Action: "build-fail", ImportPath: build.ImportPath, Output: "unexpected"},
+	))
+	if buildFailWithOutput.Complete || buildFailWithOutput.VerificationOutcome != "unknown" {
+		t.Fatalf("build-fail with Output should invalidate: %+v", buildFailWithOutput)
+	}
 }
 
 func TestParseGoTestJSONInterleavedPackages(t *testing.T) {

@@ -11,10 +11,12 @@ import (
 )
 
 const (
-	goActionOutput = "output"
-	goActionPass   = "pass"
-	goActionFail   = "fail"
-	goActionSkip   = "skip"
+	goActionOutput      = "output"
+	goActionPass        = "pass"
+	goActionFail        = "fail"
+	goActionSkip        = "skip"
+	goActionBuildOutput = "build-output"
+	goActionBuildFail   = "build-fail"
 )
 
 // Event contracts follow Go 1.27.3 src/cmd/test2json/main.go and
@@ -143,7 +145,7 @@ func (p *goVerificationParser) failure(test, class, kind, detail string) {
 }
 
 func (p *goVerificationParser) consume(event goVerificationEvent) {
-	if event.Action == "build-output" || event.Action == "build-fail" {
+	if event.Action == goActionBuildOutput || event.Action == goActionBuildFail {
 		p.build(event)
 		return
 	}
@@ -179,7 +181,8 @@ func (p *goVerificationParser) consume(event goVerificationEvent) {
 }
 
 func (p *goVerificationParser) build(event goVerificationEvent) {
-	if event.ImportPath == "" || event.Package != "" || event.Test != "" || event.FailedBuild != "" {
+	if event.ImportPath == "" || event.Package != "" || event.Test != "" || event.FailedBuild != "" ||
+		(event.Action == goActionBuildOutput && event.Output == "") || (event.Action == goActionBuildFail && event.Output != "") {
 		p.warn("invalid_go_build_event")
 		return
 	}
@@ -193,7 +196,7 @@ func (p *goVerificationParser) build(event goVerificationEvent) {
 		return
 	}
 	build.output = goVerificationTail(build.output, event.Output)
-	build.failed = event.Action == "build-fail"
+	build.failed = event.Action == goActionBuildFail
 }
 
 func (p *goVerificationParser) test(pkg *goVerificationPackage, event goVerificationEvent) {
@@ -259,6 +262,9 @@ func (p *goVerificationParser) endPackage(pkg *goVerificationPackage, event goVe
 		detail := pkg.output
 		if event.FailedBuild != "" {
 			if build := p.builds[event.FailedBuild]; build != nil {
+				if !build.failed {
+					p.warn("unfinished_go_build")
+				}
 				build.referenced = true
 				detail = goVerificationTail(build.output, detail)
 			}

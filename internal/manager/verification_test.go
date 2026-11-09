@@ -1,6 +1,9 @@
 package manager
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // Mutation guards: complete-report/counter checks in parseJUnit and explicit
 // exception-type matching. A narrative timeout never becomes a product verdict.
@@ -41,3 +44,59 @@ func TestVerificationReportVerdicts(t *testing.T) {
 		})
 	}
 }
+
+// Mutation guards: markSkipped DecodeElement consumption, failure Nested check,
+// and skipping invalid nested elements inside an open testcase preserve outer
+// testcase closure and prevent nested elements inside skipped/failure from passing.
+func TestVerificationNestedResultAndTestcaseDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name, xml, warning               string
+		tests, passed, failed, skipped   int
+		wantFailures                     int
+	}{
+		{
+			name:    "element nested inside skipped",
+			xml:     `<testsuite tests="2" skipped="1"><testcase name="ok"/><testcase name="skip"><skipped><system-out>nested</system-out></skipped></testcase></testsuite>`,
+			warning: "invalid_report_element",
+			tests:   2, passed: 1, failed: 0, skipped: 1, wantFailures: 0,
+		},
+		{
+			name:    "testcase nested inside skipped before outer failure",
+			xml:     `<testsuite tests="1" failures="1"><testcase name="outer"><skipped><testcase name="inner"/></skipped><failure message="boom">outer failed</failure></testcase></testsuite>`,
+			warning: "invalid_report_element",
+			tests:   1, passed: 0, failed: 1, skipped: 0, wantFailures: 1,
+		},
+		{
+			name:    "testcase nested inside testcase before outer failure",
+			xml:     `<testsuite tests="1" failures="1"><testcase name="outer"><testcase name="inner"/><failure message="boom">outer failed</failure></testcase></testsuite>`,
+			warning: "invalid_testcase_nesting",
+			tests:   1, passed: 0, failed: 1, skipped: 0, wantFailures: 1,
+		},
+		{
+			name:    "suite with testcase nested inside testcase before outer failure",
+			xml:     `<testsuite tests="1" failures="1"><testcase name="outer"><testsuite><testcase name="inner"/></testsuite><failure message="boom">outer failed</failure></testcase></testsuite>`,
+			warning: "invalid_suite_nesting",
+			tests:   1, passed: 0, failed: 1, skipped: 0, wantFailures: 1,
+		},
+		{
+			name:    "element nested inside failure",
+			xml:     `<testsuite tests="1" failures="1"><testcase name="bad"><failure message="boom"><system-out>nested</system-out></failure></testcase></testsuite>`,
+			warning: "invalid_failure_detail",
+			tests:   1, passed: 0, failed: 1, skipped: 0, wantFailures: 1,
+		},
+		{
+			name:    "orphan failure containing testcase",
+			xml:     `<testsuite tests="1" failures="0"><failure><testcase name="fake"/></failure><testcase name="ok"/></testsuite>`,
+			warning: "orphan_test_result",
+			tests:   1, passed: 1, failed: 0, skipped: 0, wantFailures: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := parseJUnit([]byte(tc.xml))
+			if out.Complete || out.VerificationOutcome != "unknown" || out.Tests != tc.tests || out.Passed != tc.passed || out.Failed != tc.failed || out.Skipped != tc.skipped || len(out.Failures) != tc.wantFailures || !slices.Contains(out.Warnings, tc.warning) {
+				t.Fatalf("nested structure handling mismatch: %+v", out)
+			}
+		})
+	}
+}
+
