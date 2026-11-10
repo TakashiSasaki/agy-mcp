@@ -40,7 +40,7 @@ func (m *Manager) CreateProject(ctx context.Context, root string) (ProjectCreati
 	if !rootInfo.IsDir() {
 		return ProjectCreation{}, fmt.Errorf("project root must be a directory")
 	}
-	// MEASURED against AGY 1.5.3: --new-project stores file:// followed by
+	// MEASURED against AGY 1.5.4: --new-project stores file:// followed by
 	// the raw path. Reject paths that the reader would misinterpret before
 	// AGY writes an unusable registration.
 	if resource, ok := projectResourcePath("file://" + root); !ok || resource != root {
@@ -120,7 +120,7 @@ func (m *Manager) registerProjectFolder(ctx context.Context, root string) error 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	// MEASURED against AGY 1.5.3: startup writes the registration before
+	// MEASURED against AGY 1.5.4: startup writes the registration before
 	// opening the terminal UI. A detached process with empty stdin exits
 	// without a turn. The caller checks the registration, not CLI messages.
 	cmd := probeCmd(ctx, agy, "--new-project", "--remote-control=false", "--remote-agent=false")

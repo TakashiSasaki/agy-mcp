@@ -5,7 +5,7 @@ After=antigravity-cli-daemon.service
 [Service]
 Type=simple
 WorkingDirectory=%h
-Environment="AGY_MCP_AGY_PATH=%h/.local/opt/agy/1.5.3/agy"
+Environment="AGY_MCP_AGY_PATH=%h/.local/opt/agy/1.5.4/agy"
 Environment="AGY_CLI_DISABLE_AUTO_UPDATE=true"
 Environment="AGY_MCP_STATE_DIR=%h/.local/state/agy-mcp"
 ExecStart=%h/go/bin/agy-mcp sync-worker

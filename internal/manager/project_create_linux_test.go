@@ -41,7 +41,7 @@ func TestCreateProjectReusesNativeRegistration(t *testing.T) {
 set -eu
 [ "$AGY_CLI_DISABLE_AUTO_UPDATE" = "true" ]
 if [ "$1" = "--version" ]; then
-  printf '%s\n' 1.5.3
+  printf '%s\n' 1.5.4
   exit 0
 fi
 [ "$#" = 3 ]

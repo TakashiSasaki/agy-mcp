@@ -51,7 +51,7 @@ Every job runs `agy --output-format stream-json`, and the supervisor decodes tha
 
 Every new `agy_run` or `agy_run_sync` request supplies `prompt` and `project`. Select a registered cloud project ID or unique name from `agy_list_projects(sync_filter: "cloud_only")`. Optional `title` sets the conversation display title. Omission keeps an existing title or derives one from the prompt preview. `cwd` still determines execution. Continuing an already-cloud conversation requires its current cloud project. A continuation waits for any prior job on the same conversation to settle its sync.
 
-Job execution `state` and `cloud_sync_state` are independent. A finished job may still be `pending` or temporarily `unavailable` for sync. Poll or wait on its existing `job_id`. `confirmed` is a receipt that the Remote Control daemon persisted the required project, title and conversation revision. `failed` with `cloud_sync_reason` reports a terminal sync failure, such as AGY exiting without a conversation ID. Existing jobs without sync intent remain readable. Cloud job admission requires a qualified AGY 1.5.3 installation and the Linux systemd [sync worker](docs/self-hosting.md#required-cloud-job-sync).
+Job execution `state` and `cloud_sync_state` are independent. A finished job may still be `pending` or temporarily `unavailable` for sync. Poll or wait on its existing `job_id`. `confirmed` is a receipt that the Remote Control daemon persisted the required project, title and conversation revision. `failed` with `cloud_sync_reason` reports a terminal sync failure, such as AGY exiting without a conversation ID. Existing jobs without sync intent remain readable. Cloud job admission requires AGY 1.5.4 and the Linux systemd [sync worker](docs/self-hosting.md#required-cloud-job-sync).
 
 `agy_run` and `agy_run_sync` also take optional per-run controls: pick the `model`, reasoning `effort` (`low`/`medium`/`high`/`xhigh`/`max`), execution `mode` (`accept-edits`/`auto`; `plan` is refused, see the constraints below), a named `agent`, `sandbox` terminal restrictions, and a `json_schema` to constrain the result to structured output. Those run-shaping values are forwarded to `agy`; `idempotency_key` is handled only by agy-mcp and is never forwarded.
 
@@ -422,14 +422,14 @@ implies that an interrupted long-running job took zero seconds.
 `agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
 
 `agy_create_project(root)` accepts an existing absolute directory on the server.
-It uses a [write-protected AGY 1.5.3 installation](docs/self-hosting.md#required-cloud-job-sync) on
+It uses a [write-protected AGY 1.5.4 installation](docs/self-hosting.md#required-cloud-job-sync) on
 Linux to register one folder. AGY derives a new project's display name from
 that folder. The tool returns the stored `project_id` for use as
 `project` on a later run. A retry for the same folder returns its unique
 eligible registration with `created: false`. If the folder has multiple
 registrations, select an ID from `agy_list_projects`. The tool verifies the
 host's AGY registration. A subsequent job reports conversation sync separately
-in `cloud_sync_state`. Paths that AGY 1.5.3 would store as ambiguous file URIs,
+in `cloud_sync_state`. Paths that AGY 1.5.4 would store as ambiguous file URIs,
 such as paths containing `#`, are refused before creation.
 
 `agy_adopt_conversation(conversation_id, project, title?, restart_daemon?)` attaches

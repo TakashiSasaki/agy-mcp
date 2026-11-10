@@ -11,11 +11,13 @@ In either deployment, a separate supervisor runs Antigravity CLI (`agy`) for eac
 
 ## Required cloud job sync
 
-Both run tools require a registered cloud project and a live sync worker. The initial supported configuration uses AGY 1.5.3, Linux and the existing `antigravity-cli-daemon.service` systemd user unit. Set up and sign in to AGY, register the cloud project and start Remote Control before enabling new job admission. Tool discovery and existing job reads remain available while the worker is offline.
+Both run tools require a registered cloud project and a live sync worker. The supported configuration uses AGY 1.5.4, Linux and the existing `antigravity-cli-daemon.service` systemd user unit. Set up and sign in to AGY, register the cloud project and start Remote Control before enabling new job admission. Tool discovery and existing job reads remain available while the worker is offline.
+
+Cloud job sync and project creation support one AGY CLI release at a time. Pin the newest release that passes project registration, job execution and cloud sync checks. Change the qualified version and the service pin together when advancing to a verified release.
 
 Use one canonical local `AGY_MCP_STATE_DIR` per AGY profile. Set the same directory in the worker, the HTTP server and the tunnel child. The worker records this association in the profile's private `.agy-mcp-sync` directory. A separate job store needs a separate AGY profile. Keep the same installed executable for the worker and both transports.
 
-Keep a verified AGY 1.5.3 executable at a versioned path. Use that path in `AGY_MCP_AGY_PATH` for the worker and both MCP transports, and in `ExecStart` for `antigravity-cli-daemon.service`. Set `AGY_CLI_DISABLE_AUTO_UPDATE=true` in each service's environment. The CLI can replace its own executable even at a versioned path, so keep the pin and its directory unwritable to the service account. Check the pinned executable with `--version` before starting the services. [AGY updater settings](https://antigravity.google/docs/cli/troubleshooting/#resolve-self-updater-locks-and-failures)
+Keep a verified AGY 1.5.4 executable at a versioned path. Use the same executable in `AGY_MCP_AGY_PATH` for the worker and both MCP transports, and in `ExecStart` for `antigravity-cli-daemon.service`. Set `AGY_CLI_DISABLE_AUTO_UPDATE=true` in each service's environment. The CLI can replace its own executable even at a versioned path, so keep the pin and its directory unwritable to the service account. Check the pinned executable with `--version` before starting the services. [AGY updater settings](https://antigravity.google/docs/cli/troubleshooting/#resolve-self-updater-locks-and-failures)
 
 Copy [the sync worker unit](../deploy/agy-mcp-sync.service) to the systemd user unit directory and adapt its AGY path, agy-mcp path and job store to the installation. On hosts with a Remote Control watchdog, wrap its existing command with `agy-mcp sync-watchdog -- <command>`, using the same job store. The [watchdog drop-in](../deploy/agy-sync-watchdog.conf) shows this host's configuration. Run `systemctl --user daemon-reload` and `systemctl --user enable --now agy-mcp-sync.service`. Bring up the MCP transports using the same binary. From MCP, list cloud projects, submit a disposable job with one of those IDs and wait on the returned `job_id` until its sync settles.
 
@@ -42,7 +44,7 @@ git clone --branch codex/local-enhancements https://github.com/TakashiSasaki/agy
 cd agy-mcp
 git rev-parse HEAD
 
-agy_bin="$HOME/.local/opt/agy/1.5.3/agy"  # Verified CLI installed at the pinned path above.
+agy_bin="$HOME/.local/opt/agy/1.5.4/agy"  # Verified CLI installed at the pinned path above.
 agy_mcp_bin="$HOME/.local/bin/agy-mcp"
 agy_state_dir="$HOME/.local/state/agy-mcp"
 install -d -m 700 "$agy_state_dir"

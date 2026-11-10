@@ -19,7 +19,7 @@ import (
 
 const (
 	cloudLinux           = "linux"
-	cloudAGYVersion      = "1.5.3"
+	cloudAGYVersion      = "1.5.4" // Single qualified release. See docs/self-hosting.md.
 	cloudProfileDir      = ".agy-mcp-sync"
 	cloudWorkerFile      = "worker.json"
 	cloudStoreFile       = "store.json"
