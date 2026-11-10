@@ -63,6 +63,7 @@ func TestRequestLoggingOutcomesAndPrivacy(t *testing.T) {
 		{name: "untrusted categories", outcome: "ok", state: manager.StateFailed, reason: manager.ReasonUnknown,
 			result: &mcp.CallToolResult{StructuredContent: json.RawMessage(`{"state":"failed","failure_reason":"secret-category"}`)}},
 		{name: "untrusted state", outcome: "ok", result: &mcp.CallToolResult{StructuredContent: json.RawMessage(`{"state":"secret-state"}`)}},
+		{name: "untrusted cloud state", outcome: "ok", result: &mcp.CallToolResult{StructuredContent: json.RawMessage(`{"cloud_sync_state":"secret-cloud-state"}`)}},
 		{name: "nil result", outcome: "ok"},
 		{name: "typed nil result", outcome: "ok", result: (*mcp.CallToolResult)(nil)},
 	} {
@@ -276,6 +277,7 @@ func TestRequestLoggingRealServer(t *testing.T) {
 	dir, err := store.Create(jobstore.Meta{
 		ID: requestLogTestJobID, StartedAt: time.Now(), Timeout: time.Second,
 		ArtifactDirs: []string{reports},
+		Cloud:        &jobstore.CloudIntent{ProjectID: "secret-project"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +294,12 @@ func TestRequestLoggingRealServer(t *testing.T) {
 	}
 	mgr := manager.New(config.Config{StateDir: stateDir, DefaultTimeout: time.Minute, MaxConcurrency: 4})
 	var buf bytes.Buffer
-	srv := newServer(mgr, log.New(&buf, "", 0))
+	srv := newServerWithJobStarter(mgr, log.New(&buf, "", 0), func(manager.StartRequest) (manager.Job, error) {
+		return manager.Job{}, &manager.StartError{
+			Code: "cloud_sync_unavailable", NextAction: "check_configuration",
+			JobStarted: new(false), Err: errors.New("secret-worker-error"),
+		}
+	})
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(t.Context(), st, nil)
 	if err != nil {
@@ -329,6 +336,10 @@ func TestRequestLoggingRealServer(t *testing.T) {
 			t.Fatalf("%s lost the validation response: %+v", tool, out)
 		}
 	}
+	out := call(toolAgyRun, map[string]any{"prompt": "secret-prompt", "project": "secret-project"}, true)
+	if out["start_error_code"] != "cloud_sync_unavailable" || out["job_started"] != false {
+		t.Fatalf("lost the worker refusal: %+v", out)
+	}
 	page := call(toolAgyGetResult, map[string]any{"job_id": requestLogTestJobID, "max_bytes": 4}, false)
 	call(toolAgyGetResult, map[string]any{"job_id": requestLogTestJobID, "cursor": page["next_cursor"]}, false)
 	call(toolAgyVerification, map[string]any{"job_id": requestLogTestJobID, "path": report}, false)
@@ -339,7 +350,7 @@ func TestRequestLoggingRealServer(t *testing.T) {
 func assertRequestLoggingCompletions(t *testing.T, buf *bytes.Buffer, toolCount int) {
 	t.Helper()
 	foundCatalog, foundStatus := false, false
-	startErrors := make(map[string]bool)
+	startErrors := make(map[[2]string]bool)
 	var pages []bool
 	foundVerification := false
 	entries := readRequestLogs(t, buf)
@@ -352,11 +363,12 @@ func assertRequestLoggingCompletions(t *testing.T, buf *bytes.Buffer, toolCount 
 			foundCatalog = entry.ToolCount != nil && *entry.ToolCount == toolCount && entry.CatalogSHA256 != ""
 		}
 		if entry.Tool == toolAgyStatus {
-			foundStatus = entry.Outcome == "ok" && entry.JobID == requestLogTestJobID && entry.JobState == manager.StateFailed && entry.FailureReason == manager.ReasonTimeout
+			foundStatus = entry.Outcome == "ok" && entry.JobID == requestLogTestJobID && entry.JobState == manager.StateFailed &&
+				entry.FailureReason == manager.ReasonTimeout && entry.CloudSyncState == jobstore.CloudPending
 		}
 		switch entry.Tool {
 		case toolAgyRun, toolAgyRunSync:
-			startErrors[entry.Tool] = entry.Outcome == "tool_error" && entry.StartErrorCode == startInvalidArgument && entry.JobStarted != nil && !*entry.JobStarted
+			startErrors[[2]string{entry.Tool, entry.StartErrorCode}] = entry.Outcome == "tool_error" && entry.JobStarted != nil && !*entry.JobStarted
 		case toolAgyGetResult:
 			if entry.Outcome == "ok" && entry.JobID == requestLogTestJobID && entry.ResultComplete != nil {
 				pages = append(pages, *entry.ResultComplete)
@@ -368,7 +380,8 @@ func assertRequestLoggingCompletions(t *testing.T, buf *bytes.Buffer, toolCount 
 	if !foundCatalog || !foundStatus {
 		t.Fatalf("missing real-server catalog/failed-job diagnostics: %s", buf)
 	}
-	if !startErrors[toolAgyRun] || !startErrors[toolAgyRunSync] || !slices.Equal(pages, []bool{false, true}) || !foundVerification {
+	if !startErrors[[2]string{toolAgyRun, startInvalidArgument}] || !startErrors[[2]string{toolAgyRunSync, startInvalidArgument}] ||
+		!startErrors[[2]string{toolAgyRun, "cloud_sync_unavailable"}] || !slices.Equal(pages, []bool{false, true}) || !foundVerification {
 		t.Fatalf("missing start, pagination or verification diagnostics: %s", buf)
 	}
 	if strings.Contains(buf.String(), "secret-") {

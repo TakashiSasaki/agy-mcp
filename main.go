@@ -19,6 +19,9 @@ import (
 	"github.com/tphakala/agy-mcp/v2/internal/supervisor"
 )
 
+// EX_CONFIG: deploy/agy-mcp-sync.service does not restart on this status.
+const syncWorkerConfigExit = 78
+
 func main() {
 	// stdout is reserved for the JSON-RPC stream in stdio mode. Force the
 	// standard logger to stderr so a stray log line cannot corrupt the protocol.
@@ -62,6 +65,9 @@ func main() {
 	if len(os.Args) >= 2 && (os.Args[1] == "sync-worker" || os.Args[1] == "sync-watchdog") {
 		if err := runSyncService(os.Args[1:]); err != nil {
 			log.Print(err)
+			if errors.Is(err, manager.ErrCloudAGYVersion) {
+				os.Exit(syncWorkerConfigExit)
+			}
 			os.Exit(1)
 		}
 		return

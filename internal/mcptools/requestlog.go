@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tphakala/agy-mcp/v2/internal/jobstore"
 	"github.com/tphakala/agy-mcp/v2/internal/manager"
 )
 
@@ -178,6 +179,11 @@ func (entry *requestLogEntry) addResult(result mcp.Result) {
 			}
 		}
 		switch entry.Tool {
+		case toolAgyRun, toolAgyRunSync, toolAgyStatus, toolAgyWait:
+			switch output.CloudSyncState {
+			case jobstore.CloudPending, jobstore.CloudUnavailable, jobstore.CloudConfirmed, jobstore.CloudFailed:
+				entry.CloudSyncState = output.CloudSyncState
+			}
 		case toolAgyGetResult:
 			entry.ResultComplete = output.Complete
 		case toolAgyVerification:
@@ -221,6 +227,8 @@ func (entry *requestLogEntry) addStartError(structured any) {
 		"conversation_busy", "conversation_cache_unavailable", "capacity_exceeded",
 		"idempotency_conflict", "idempotency_in_progress", "agy_unavailable",
 		"quota_low", "quota_mapping_unknown", "unsupported_platform",
+		"cloud_sync_unsupported", "cloud_sync_unavailable", "cloud_sync_busy",
+		"cloud_project_invalid", "cloud_project_mismatch", "cloud_conversation_unavailable",
 		"start_failed", "start_indeterminate", "wait_interrupted":
 		entry.StartErrorCode, entry.JobStarted = output.Code, output.JobStarted
 		if loggedJobID.MatchString(output.JobID) {

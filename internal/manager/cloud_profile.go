@@ -29,6 +29,10 @@ const (
 	remoteControlService = "antigravity-cli-daemon.service"
 )
 
+// ErrCloudAGYVersion indicates that the worker found an unqualified CLI
+// version. Retrying startup cannot help until the installation changes.
+var ErrCloudAGYVersion = errors.New("unsupported AGY version for cloud job sync")
+
 type cloudWorkerIdentity struct {
 	PID      int       `json:"pid"`
 	BootID   string    `json:"boot_id"`
@@ -178,8 +182,11 @@ func (m *Manager) identifyCloudWorker(ctx context.Context) (cloudWorkerIdentity,
 		return identity, err
 	}
 	version, err := agyver.Parse(raw)
-	if err != nil || version.String() != cloudAGYVersion {
-		return identity, fmt.Errorf("cloud job sync requires qualified AGY %s", cloudAGYVersion)
+	if err != nil {
+		return identity, fmt.Errorf("cannot verify AGY version for cloud job sync (requires %s): %w", cloudAGYVersion, err)
+	}
+	if version.String() != cloudAGYVersion {
+		return identity, fmt.Errorf("%w: found %s, requires qualified AGY %s", ErrCloudAGYVersion, version, cloudAGYVersion)
 	}
 	pid := os.Getpid()
 	ticks, ok := readStartTimeTicks(pid)

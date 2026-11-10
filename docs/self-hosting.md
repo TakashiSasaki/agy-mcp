@@ -15,9 +15,13 @@ Both run tools require a registered cloud project and a live sync worker. The in
 
 Use one canonical local `AGY_MCP_STATE_DIR` per AGY profile. Set the same directory in the worker, the HTTP server and the tunnel child. The worker records this association in the profile's private `.agy-mcp-sync` directory. A separate job store needs a separate AGY profile. Keep the same installed executable for the worker and both transports.
 
+Keep a verified AGY 1.5.3 executable at a versioned path outside the path managed by the CLI updater. Use that path in `AGY_MCP_AGY_PATH` for the worker and both MCP transports, and in `ExecStart` for `antigravity-cli-daemon.service`. Check the pinned executable with `--version` before starting the services.
+
 Copy [the sync worker unit](../deploy/agy-mcp-sync.service) to the systemd user unit directory and adapt its AGY path, agy-mcp path and job store to the installation. On hosts with a Remote Control watchdog, wrap its existing command with `agy-mcp sync-watchdog -- <command>`, using the same job store. The [watchdog drop-in](../deploy/agy-sync-watchdog.conf) shows this host's configuration. Run `systemctl --user daemon-reload` and `systemctl --user enable --now agy-mcp-sync.service`. Bring up the MCP transports using the same binary. From MCP, list cloud projects, submit a disposable job with one of those IDs and wait on the returned `job_id` until its sync settles.
 
 The worker keeps working after an MCP client disconnects. During a drain or restart, new submissions may return `cloud_sync_busy` and `job_started: false`. Retry the same request and key after maintenance. Keep normal conversation writes on the MCP path. To run turns directly from the browser or CLI, stop the sync worker first and start it after those turns finish.
+
+If the configured AGY executable is replaced with an unqualified release, the worker refuses to start. The journal reports the detected and required versions, and the supplied systemd unit stops retrying on exit status 78 (`CONFIG`). Restore the qualified path across the services, reload any changed units and start the worker. Check a previously submitted job by its original ID; retry a refused submission with the same request and key.
 
 For an upgrade or rollback, stop intake and drain existing execution. Let pending sync settle before stopping the worker when possible. Keep the job store, sync receipts and profile maintenance record. Restore the previous binary and the matching service configuration together, including the watchdog command. When restoring a cloud-capable build, start the worker before admitting jobs and verify any pending job by its original ID. If the worker stopped during maintenance, let it restore Remote Control from its journal before rolling back.
 
@@ -38,7 +42,7 @@ git clone --branch codex/local-enhancements https://github.com/TakashiSasaki/agy
 cd agy-mcp
 git rev-parse HEAD
 
-agy_bin="$(realpath "$(type -P agy)")"
+agy_bin="$HOME/.local/opt/agy/1.5.3/agy"  # Verified CLI installed at the pinned path above.
 agy_mcp_bin="$HOME/.local/bin/agy-mcp"
 agy_state_dir="$HOME/.local/state/agy-mcp"
 install -d -m 700 "$agy_state_dir"
