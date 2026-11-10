@@ -31,6 +31,7 @@ func TestCreateProjectReusesNativeRegistration(t *testing.T) {
 			t.Setenv("AGY_CREATE_TEST_REGISTRATION", filepath.Join(m.projectsDir, projectID+".json"))
 			t.Setenv("AGY_CREATE_TEST_CALLS", calls)
 			t.Setenv("AGY_CREATE_TEST_EXIT", tc.exit)
+			t.Setenv("AGY_CLI_DISABLE_AUTO_UPDATE", "false")
 			m.cfg.AgyPath = filepath.Join(fixtures, "agy")
 			const script = `#!/bin/sh
 set -eu
@@ -42,6 +43,7 @@ fi
 [ "$1" = "--new-project" ]
 [ "$2" = "--remote-control=false" ]
 [ "$3" = "--remote-agent=false" ]
+[ "$AGY_CLI_DISABLE_AUTO_UPDATE" = "true" ]
 [ "$PWD" = "$AGY_CREATE_TEST_ROOT" ]
 [ ! -t 0 ]
 printf '%s\n' created >> "$AGY_CREATE_TEST_CALLS"

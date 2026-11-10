@@ -118,6 +118,7 @@ func (m *Manager) registerProjectFolder(ctx context.Context, root string) error 
 	// without a turn. The caller checks the registration, not CLI messages.
 	cmd := probeCmd(ctx, agy, "--new-project", "--remote-control=false", "--remote-agent=false")
 	cmd.Dir = root
+	cmd.Env = append(cmd.Environ(), "AGY_CLI_DISABLE_AUTO_UPDATE=true")
 	proc.ConfigureSession(cmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("AGY project registration interrupted: %w; retry with the same folder to recover an existing registration", err)

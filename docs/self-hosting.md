@@ -15,7 +15,7 @@ Both run tools require a registered cloud project and a live sync worker. The in
 
 Use one canonical local `AGY_MCP_STATE_DIR` per AGY profile. Set the same directory in the worker, the HTTP server and the tunnel child. The worker records this association in the profile's private `.agy-mcp-sync` directory. A separate job store needs a separate AGY profile. Keep the same installed executable for the worker and both transports.
 
-Keep a verified AGY 1.5.3 executable at a versioned path outside the path managed by the CLI updater. Use that path in `AGY_MCP_AGY_PATH` for the worker and both MCP transports, and in `ExecStart` for `antigravity-cli-daemon.service`. Check the pinned executable with `--version` before starting the services.
+Keep a verified AGY 1.5.3 executable at a versioned path. Use that path in `AGY_MCP_AGY_PATH` for the worker and both MCP transports, and in `ExecStart` for `antigravity-cli-daemon.service`. Set `AGY_CLI_DISABLE_AUTO_UPDATE=true` in each service's environment. The CLI can replace its own executable even at a versioned path, so keep the pin and its directory unwritable to the service account. Check the pinned executable with `--version` before starting the services. [AGY updater settings](https://antigravity.google/docs/cli/troubleshooting/#resolve-self-updater-locks-and-failures)
 
 Copy [the sync worker unit](../deploy/agy-mcp-sync.service) to the systemd user unit directory and adapt its AGY path, agy-mcp path and job store to the installation. On hosts with a Remote Control watchdog, wrap its existing command with `agy-mcp sync-watchdog -- <command>`, using the same job store. The [watchdog drop-in](../deploy/agy-sync-watchdog.conf) shows this host's configuration. Run `systemctl --user daemon-reload` and `systemctl --user enable --now agy-mcp-sync.service`. Bring up the MCP transports using the same binary. From MCP, list cloud projects, submit a disposable job with one of those IDs and wait on the returned `job_id` until its sync settles.
 
@@ -65,6 +65,7 @@ On a fresh install, build and stage the executable next to its final path so the
 )
 
 export AGY_MCP_AGY_PATH="$agy_bin"
+export AGY_CLI_DISABLE_AUTO_UPDATE=true
 export AGY_MCP_STATE_DIR="$agy_state_dir"
 "$agy_mcp_bin" doctor
 ```
@@ -175,6 +176,7 @@ Description=Secure MCP Tunnel for agy-mcp
 Type=simple
 WorkingDirectory=%h
 Environment="AGY_MCP_AGY_PATH=$agy_bin"
+Environment="AGY_CLI_DISABLE_AUTO_UPDATE=true"
 Environment="AGY_MCP_STATE_DIR=$agy_state_dir"
 ExecStart="$tunnel_client_bin" run --profile-dir "$profile_dir" --profile agy --health.url-file "$health_url_file"
 Restart=on-failure
@@ -235,6 +237,7 @@ Description=agy-mcp Streamable HTTP server
 Type=simple
 WorkingDirectory=%h
 Environment="AGY_MCP_AGY_PATH=$agy_bin"
+Environment="AGY_CLI_DISABLE_AUTO_UPDATE=true"
 Environment="AGY_MCP_STATE_DIR=$agy_state_dir"
 EnvironmentFile=%h/.config/agy-mcp/http.env
 ExecStart="$agy_mcp_bin" -http 127.0.0.1:8765
