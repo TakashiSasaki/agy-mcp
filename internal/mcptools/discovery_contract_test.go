@@ -15,11 +15,17 @@ import (
 // Mutation guards: runInputSchema's enums, static defaults and examples, plus
 // addStartTool's argument guide. The assertions use the catalog clients receive.
 func TestRunDiscoveryContract(t *testing.T) {
+	if !strings.Contains(serverInstructions[:512], projectSelectionGuide) {
+		t.Error("project selection sequence must appear in the first 512 characters of server instructions")
+	}
 	for _, tool := range listRegisteredTools(t) {
 		if tool.Name != toolAgyRun && tool.Name != toolAgyRunSync {
 			continue
 		}
 		t.Run(tool.Name, func(t *testing.T) {
+			if !strings.Contains(tool.Description, projectSelectionGuide) {
+				t.Error("tool description lacks the conditional project selection sequence")
+			}
 			data, err := json.Marshal(tool.InputSchema)
 			if err != nil {
 				t.Fatal(err)

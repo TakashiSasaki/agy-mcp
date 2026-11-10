@@ -37,6 +37,15 @@ type ProjectInfo struct {
 	LastActiveTime    string            `json:"last_active_time,omitempty" jsonschema:"RFC3339 timestamp of the most recent conversation turn or update in this project"`
 }
 
+// MatchesQuery applies the same substring filter to each resource of a project.
+func (p *ProjectInfo) MatchesQuery(query string) bool {
+	q := strings.ToLower(query)
+	return strings.Contains(strings.ToLower(p.Name), q) ||
+		strings.Contains(strings.ToLower(p.ID), q) ||
+		strings.Contains(strings.ToLower(p.RepositoryURL), q) ||
+		strings.Contains(strings.ToLower(filepath.Base(p.Root)), q)
+}
+
 // ResolveWorkspaceResult carries a path only for a unique selection. Resolved
 // and Ambiguous are mutually exclusive; candidates never authorize execution.
 type ResolveWorkspaceResult struct {
@@ -108,16 +117,8 @@ func (m *Manager) ListProjects(query string, syncFilter ...string) ([]ProjectInf
 			}
 		}
 
-		// If a query is provided, filter by Name, ID, or RepositoryURL
-		if query != "" {
-			q := strings.ToLower(query)
-			nameMatch := strings.Contains(strings.ToLower(proj.Name), q)
-			idMatch := strings.Contains(strings.ToLower(proj.ID), q)
-			repoMatch := strings.Contains(strings.ToLower(proj.RepositoryURL), q)
-			baseMatch := strings.Contains(strings.ToLower(filepath.Base(proj.Root)), q)
-			if !nameMatch && !idMatch && !repoMatch && !baseMatch {
-				continue
-			}
+		if query != "" && !proj.MatchesQuery(query) {
+			continue
 		}
 		out = append(out, *proj)
 	}

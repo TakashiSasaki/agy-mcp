@@ -40,7 +40,7 @@ func addTool[In, Out any](s *toolServer, tool *mcp.Tool, handler mcp.ToolHandler
 // new job state for a request that never started would break the job contract.
 func addStartTool[In, Out any](s *toolServer, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
 	tool.InputSchema = runInputSchema[In]()
-	tool.Description += reviewEvidenceGuide + runArgumentGuide
+	tool.Description += "\n\n" + projectSelectionGuide + reviewEvidenceGuide + runArgumentGuide
 	if tool.Name == toolAgyRunSync {
 		tool.Description += inlineWaitGuide
 	}

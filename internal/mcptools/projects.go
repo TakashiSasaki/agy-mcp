@@ -10,6 +10,7 @@ import (
 const (
 	toolAgyCreateProject    = "agy_create_project"
 	toolAgyListProjects     = "agy_list_projects"
+	toolAgySelectProject    = "agy_select_project"
 	toolAgyResolveWorkspace = "agy_resolve_workspace"
 )
 
@@ -43,6 +44,15 @@ type resolveWorkspaceOutput struct {
 }
 
 func registerProjects(s *toolServer, mgr *manager.Manager) {
+	addTool(s, &mcp.Tool{
+		Name:        toolAgySelectProject,
+		Title:       "Choose a cloud project",
+		Annotations: annReadLocal,
+		Description: "Use when the job's cloud project is unclear. Ask the user to pick from registered cloud projects in a form when the client supports it. If the result contains candidates, show their labels and wait for the user's choice. Pass the selected ID as project to agy_run or agy_run_sync. If the user declines or cancels, stop. This tool only selects the cloud destination. Use agy_resolve_workspace separately if the execution directory is unclear. Use agy_list_projects for project and worktree details.",
+	}, func(_ context.Context, req *mcp.CallToolRequest, in selectProjectInput) (*mcp.CallToolResult, selectProjectOutput, error) {
+		return selectCloudProject(mgr, req, in)
+	})
+
 	addTool(s, &mcp.Tool{
 		Name:        toolAgyListProjects,
 		Title:       "List registered projects",

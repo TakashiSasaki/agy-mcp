@@ -20,7 +20,7 @@ import (
 // exclusive, what a field defaults to, and what happens on expiry. Keeping that
 // here rather than in the tool description avoids restating the schema in prose.
 type runInput struct {
-	Project           string `json:"project" jsonschema:"registered cloud project ID or unique name; required on every run. Discover targets with agy_list_projects and sync_filter cloud_only"`
+	Project           string `json:"project" jsonschema:"registered cloud project ID or unique name from the request, conversation, or agy_select_project; required on every run"`
 	Title             string `json:"title,omitempty" jsonschema:"conversation title to assign after execution; omit to keep its title or derive one from the prompt preview"`
 	ExpectedGitBranch string `json:"expected_git_branch,omitempty" jsonschema:"optional exact Git branch name required before fresh execution, e.g. main or feature/task; a mismatch or unavailable Git state refuses with workspace_mismatch and job_started false. Omit for no branch precondition. Part of idempotency identity; an existing job replays without rechecking. This preflight is not a lock against later changes"`
 	ExpectedGitHead   string `json:"expected_git_head,omitempty" jsonschema:"optional full 40- or 64-character hexadecimal Git commit ID required before fresh execution; use head_full from agy_resolve_workspace or git rev-parse HEAD, not the short head display. Hex case is normalized. Mismatch or unavailable Git state refuses with workspace_mismatch and job_started false. Part of idempotency identity; existing jobs replay without rechecking. Does not prevent later branch or file changes"`
@@ -665,17 +665,20 @@ var serverVersion = sync.OnceValue(func() string {
 // these tools. It deliberately encodes no single client's conventions or policy
 // (model choice, working-directory habits, review etiquette); those belong in
 // that client's own configuration, not in a server shared by everyone.
-const serverInstructions = `agy runs an agent on the server host with permission checks disabled. cwd and dirs are server-side workspaces, not confinement; sandbox and a no-edit prompt do not establish read-only access. agy_info(tool: agy_run, include_instructions: true) returns raw tool_json and full instructions; its default reports host and defaults. partial false describes provenance, not correctness or passing tests.
+const serverInstructions = `agy runs on the server host with permission checks disabled. cwd and dirs are not confinement. Sandbox and prompts do not establish read-only access. partial false is not correctness evidence. agy_info with tool returns tool_json, and include_instructions adds full instructions.
+
+` + projectSelectionGuide + `
 
 Read the live schema with agy_info(tool: agy_run). server_version identifies the connected build. A job's git_head identifies its execution worktree revision.
 
-- Start a new job with prompt and project. Find a registered cloud project with agy_list_projects(sync_filter: cloud_only) and choose cwd separately. Both run tools schedule cloud sync after execution.
+- Start a new job with prompt and project, and choose cwd separately. Both run tools schedule cloud sync after execution.
 - Use agy_create_project when asked to register an existing server-side folder. Pass its project_id to the run tools. AGY names new projects after the folder.
 - Use agy_run for background work. agy_run_sync waits inline for execution and cloud sync within wait. Check state and cloud_sync_state separately. confirmed means the Remote Control daemon holds the job's persisted revision. If either phase is pending, use agy_wait or agy_status with the same job_id.
 - Continue a prior thread with its original conversation_id, cloud project and a new idempotency_key after sync settles. Use agy_adopt_conversation to move or refresh an existing idle conversation outside the job flow.
 - Fan out freely within the concurrency cap while admission is open. Fresh runs can share cwd. Simultaneous runs on the SAME conversation_id are refused.
 - Use agy_list_jobs for retained MCP jobs, agy_list_conversations for Antigravity history, and list_sessions for the latest CLI-cached ID per workspace. Use agy_get_conversation to verify a known conversation's sync status.
 - On a start refusal, read start_error_code, job_started and next_action. workspace_mismatch with job_started false means Git preflight blocked the run. Resolve the intended workspace and revision before submitting again.
+- If agy_select_project is unavailable, use agy_list_projects with sync_filter cloud_only and ask in chat.
 
 Delegation examples
 
