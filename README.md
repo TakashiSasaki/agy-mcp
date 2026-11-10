@@ -422,8 +422,9 @@ implies that an interrupted long-running job took zero seconds.
 `agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
 
 `agy_create_project(root)` accepts an existing absolute directory on the server.
-It uses AGY 1.5.3 on Linux to register one folder and derives a new project's
-display name from that folder. It returns the stored `project_id` for use as
+It uses a [write-protected AGY 1.5.3 installation](docs/self-hosting.md#required-cloud-job-sync) on
+Linux to register one folder. AGY derives a new project's display name from
+that folder. The tool returns the stored `project_id` for use as
 `project` on a later run. A retry for the same folder returns its unique
 eligible registration with `created: false`. If the folder has multiple
 registrations, select an ID from `agy_list_projects`. The tool verifies the

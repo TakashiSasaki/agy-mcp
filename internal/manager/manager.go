@@ -182,6 +182,9 @@ type Job struct {
 // cannot park the tool call that triggered it.
 const versionCheckTimeout = 10 * time.Second
 
+// A version probe can launch AGY's native updater before returning its banner.
+const agyDisableAutoUpdate = "AGY_CLI_DISABLE_AUTO_UPDATE=true"
+
 // versionKillGrace is how long after the deadline kill the probe waits before
 // abandoning its output pipes, so a descendant that inherited them cannot hold
 // the probe open past its timeout.
@@ -263,6 +266,7 @@ func readAgyVersion(ctx context.Context, agy string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, versionCheckTimeout)
 	defer cancel()
 	cmd := probeCmd(ctx, agy, "--version")
+	cmd.Env = append(cmd.Environ(), agyDisableAutoUpdate)
 	// Without this, killing the process on deadline does not unblock the output
 	// copy: the output copy reads through a pipe whose write end agy's descendants
 	// inherit, so a grandchild that outlives the kill holds the read open and the

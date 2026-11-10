@@ -10,6 +10,9 @@ import (
 // Removing the pre-launch reuse check would invoke AGY again after both a
 // successful creation and a lost response with a registration on disk.
 func TestCreateProjectReusesNativeRegistration(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("AGY project creation requires an unprivileged service")
+	}
 	for _, tc := range []struct {
 		name, exit string
 	}{
@@ -32,9 +35,11 @@ func TestCreateProjectReusesNativeRegistration(t *testing.T) {
 			t.Setenv("AGY_CREATE_TEST_CALLS", calls)
 			t.Setenv("AGY_CREATE_TEST_EXIT", tc.exit)
 			t.Setenv("AGY_CLI_DISABLE_AUTO_UPDATE", "false")
-			m.cfg.AgyPath = filepath.Join(fixtures, "agy")
+			binDir := t.TempDir()
+			m.cfg.AgyPath = filepath.Join(binDir, "agy")
 			const script = `#!/bin/sh
 set -eu
+[ "$AGY_CLI_DISABLE_AUTO_UPDATE" = "true" ]
 if [ "$1" = "--version" ]; then
   printf '%s\n' 1.5.3
   exit 0
@@ -43,7 +48,6 @@ fi
 [ "$1" = "--new-project" ]
 [ "$2" = "--remote-control=false" ]
 [ "$3" = "--remote-agent=false" ]
-[ "$AGY_CLI_DISABLE_AUTO_UPDATE" = "true" ]
 [ "$PWD" = "$AGY_CREATE_TEST_ROOT" ]
 [ ! -t 0 ]
 printf '%s\n' created >> "$AGY_CREATE_TEST_CALLS"
@@ -53,6 +57,20 @@ exit "$AGY_CREATE_TEST_EXIT"
 			if err := os.WriteFile(m.cfg.AgyPath, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := m.CreateProject(t.Context(), root); err == nil || !strings.Contains(err.Error(), "write-protected") {
+				t.Fatalf("writable AGY installation was accepted: %v", err)
+			}
+			if err := os.Chmod(m.cfg.AgyPath, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(binDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Chmod(binDir, 0o700); err != nil {
+					t.Error(err)
+				}
+			})
 			created, err := m.CreateProject(t.Context(), root)
 			if tc.exit == "0" {
 				if err != nil || !created.Created || created.ProjectID != projectID || created.Root != root {

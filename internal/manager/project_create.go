@@ -108,6 +108,13 @@ func (m *Manager) registerProjectFolder(ctx context.Context, root string) error 
 	if err != nil {
 		return err
 	}
+	agy, err = filepath.EvalSymlinks(agy)
+	if err != nil {
+		return err
+	}
+	if err := checkProjectCLIPin(agy); err != nil {
+		return err
+	}
 	if err := m.checkCloudAGYVersion(ctx, agy); err != nil {
 		return err
 	}
@@ -118,10 +125,28 @@ func (m *Manager) registerProjectFolder(ctx context.Context, root string) error 
 	// without a turn. The caller checks the registration, not CLI messages.
 	cmd := probeCmd(ctx, agy, "--new-project", "--remote-control=false", "--remote-agent=false")
 	cmd.Dir = root
-	cmd.Env = append(cmd.Environ(), "AGY_CLI_DISABLE_AUTO_UPDATE=true")
+	cmd.Env = append(cmd.Environ(), agyDisableAutoUpdate)
 	proc.ConfigureSession(cmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("AGY project registration interrupted: %w; retry with the same folder to recover an existing registration", err)
+	}
+	return nil
+}
+
+// AGY 1.5.3 was observed replacing its executable during isolated launches
+// despite the documented updater setting. Check the actual executable path.
+func checkProjectCLIPin(agy string) error {
+	if os.Geteuid() == 0 {
+		return fmt.Errorf("project creation requires an unprivileged AGY service")
+	}
+	for _, path := range []string{agy, filepath.Dir(agy)} {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o222 != 0 {
+			return fmt.Errorf("project creation requires a write-protected AGY executable and containing directory")
+		}
 	}
 	return nil
 }

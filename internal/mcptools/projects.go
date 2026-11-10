@@ -87,7 +87,7 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: new(false), IdempotentHint: true, OpenWorldHint: new(true),
 		},
-		Description: "Register an existing server-side folder as a project with AGY 1.5.3 on Linux, without starting an agent turn. AGY names a new project after the folder. A unique existing eligible registration for that exact folder is returned instead of duplicating it. Multiple or ineligible registrations are refused; inspect agy_list_projects. Pass the returned project_id to agy_run and choose its cwd separately. This operation verifies the local project registration. Conversation sync is reported by the job tools.",
+		Description: "Register an existing server-side folder as a project with a write-protected AGY 1.5.3 installation on Linux, without starting an agent turn. AGY names a new project after the folder. A unique existing eligible registration for that exact folder is returned instead of duplicating it. Multiple or ineligible registrations are refused; inspect agy_list_projects. Pass the returned project_id to agy_run and choose its cwd separately. This operation verifies the local project registration. Conversation sync is reported by the job tools.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in createProjectInput) (*mcp.CallToolResult, manager.ProjectCreation, error) {
 		created, err := mgr.CreateProject(ctx, in.Root)
 		return nil, created, err
