@@ -46,6 +46,7 @@ Every job runs `agy --output-format stream-json`, and the supervisor decodes tha
 - `agy_usage`: report the remaining `agy` quota per quota group (for example `Gemini Models`, `Gemini 4 Argon`, and `Claude and GPT models`) with a level of `ok`, `low`, `critical` or `exhausted`. It spends no model quota. See [Quota](#quota).
 - `list_sessions`: list known conversations so review threads can be continued. By default, it excludes defunct or ephemeral workspaces (/tmp, /var/tmp, scratch); supports pagination via `limit` and `offset`.
 - `agy_list_projects`: discover and list registered Antigravity projects and repositories under /data with their paths, git remote URLs, default branches, and active linked worktrees.
+- `agy_create_project`: register an existing server-side folder as an Antigravity project and return its ID without a model turn.
 - `agy_resolve_workspace`: resolve a project name, project ID, repository URL, or directory path and optional branch into an unambiguous concrete filesystem directory for `agy_run`.
 
 Every new `agy_run` or `agy_run_sync` request supplies `prompt` and `project`. Select a registered cloud project ID or unique name from `agy_list_projects(sync_filter: "cloud_only")`. Optional `title` sets the conversation display title. Omission keeps an existing title or derives one from the prompt preview. `cwd` still determines execution. Continuing an already-cloud conversation requires its current cloud project. A continuation waits for any prior job on the same conversation to settle its sync.
@@ -419,6 +420,16 @@ implies that an interrupted long-running job took zero seconds.
 `execution_cwd`, `git_branch`, `git_head` (short commit SHA), and `git_dirty` in job status outputs capture the concrete directory and Git metadata at job invocation time, allowing callers to verify which branch and commit were active during execution.
 
 `agy_list_projects` and `agy_resolve_workspace` allow clients to discover registered Antigravity projects and `/data` repositories, inspect linked worktrees, and resolve ambiguous project or branch names to concrete working directory paths.
+
+`agy_create_project(root)` accepts an existing absolute directory on the server.
+It uses AGY 1.5.3 on Linux to register one folder and derives a new project's
+display name from that folder. It returns the stored `project_id` for use as
+`project` on a later run. A retry for the same folder returns its unique
+eligible registration with `created: false`. If the folder has multiple
+registrations, select an ID from `agy_list_projects`. The tool verifies the
+host's AGY registration. A subsequent job reports conversation sync separately
+in `cloud_sync_state`. Paths that AGY 1.5.3 would store as ambiguous file URIs,
+such as paths containing `#`, are refused before creation.
 
 `agy_adopt_conversation(conversation_id, project, title?, restart_daemon?)` attaches
 an existing local conversation to a registered cloud project. Use a project ID

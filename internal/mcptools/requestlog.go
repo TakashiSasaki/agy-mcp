@@ -122,7 +122,7 @@ func loggedToolName(name string) string {
 	switch name {
 	case toolAgyRun, toolAgyRunSync, toolAgyStatus, toolAgyWait, toolAgyCancel,
 		toolAgyUsage, toolListModels, toolListAgents, toolListSessions,
-		toolAgyListArtifacts, toolAgyReadArtifact, toolAgyListProjects, toolAgyResolveWorkspace,
+		toolAgyListArtifacts, toolAgyReadArtifact, toolAgyCreateProject, toolAgyListProjects, toolAgyResolveWorkspace,
 		toolAgyListJobs, toolAgyGetResult, toolAgyInfo, toolAgyEvents, toolAgyLogs, toolAgyVerification,
 		toolAgyListConversations, toolAgyGetConversation, toolAgyAdoptConversation, toolAgyRestartSyncDaemon:
 		return name

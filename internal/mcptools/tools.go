@@ -670,6 +670,7 @@ const serverInstructions = `agy runs an agent on the server host with permission
 Read the live schema with agy_info(tool: agy_run). server_version identifies the connected build. A job's git_head identifies its execution worktree revision.
 
 - Start a new job with prompt and project. Find a registered cloud project with agy_list_projects(sync_filter: cloud_only) and choose cwd separately. Both run tools schedule cloud sync after execution.
+- Use agy_create_project when asked to register an existing server-side folder. Pass its project_id to the run tools. AGY names new projects after the folder.
 - Use agy_run for background work. agy_run_sync waits inline for execution and cloud sync within wait. Check state and cloud_sync_state separately. confirmed means the Remote Control daemon holds the job's persisted revision. If either phase is pending, use agy_wait or agy_status with the same job_id.
 - Continue a prior thread with its original conversation_id, cloud project and a new idempotency_key after sync settles. Use agy_adopt_conversation to move or refresh an existing idle conversation outside the job flow.
 - Fan out freely within the concurrency cap while admission is open. Fresh runs can share cwd. Simultaneous runs on the SAME conversation_id are refused.

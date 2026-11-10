@@ -177,16 +177,8 @@ func (m *Manager) identifyCloudWorker(ctx context.Context) (cloudWorkerIdentity,
 	if err != nil {
 		return identity, err
 	}
-	raw, err := m.readAgyVersion(ctx, agy)
-	if err != nil {
+	if err := m.checkCloudAGYVersion(ctx, agy); err != nil {
 		return identity, err
-	}
-	version, err := agyver.Parse(raw)
-	if err != nil {
-		return identity, fmt.Errorf("cannot verify AGY version for cloud job sync (requires %s): %w", cloudAGYVersion, err)
-	}
-	if version.String() != cloudAGYVersion {
-		return identity, fmt.Errorf("%w: found %s, requires qualified AGY %s", ErrCloudAGYVersion, version, cloudAGYVersion)
 	}
 	pid := os.Getpid()
 	ticks, ok := readStartTimeTicks(pid)
@@ -195,6 +187,21 @@ func (m *Manager) identifyCloudWorker(ctx context.Context) (cloudWorkerIdentity,
 	}
 	return cloudWorkerIdentity{PID: pid, BootID: readBootID(), Ticks: ticks, Store: store,
 		AGYPath: agy, AGYSize: info.Size(), AGYMTime: info.ModTime()}, nil
+}
+
+func (m *Manager) checkCloudAGYVersion(ctx context.Context, agy string) error {
+	raw, err := m.readAgyVersion(ctx, agy)
+	if err != nil {
+		return err
+	}
+	version, err := agyver.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("cannot verify AGY version for cloud job sync (requires %s): %w", cloudAGYVersion, err)
+	}
+	if version.String() != cloudAGYVersion {
+		return fmt.Errorf("%w: found %s, requires qualified AGY %s", ErrCloudAGYVersion, version, cloudAGYVersion)
+	}
+	return nil
 }
 
 // StartCloudJob is the MCP job admission path. StartJob also serves internal

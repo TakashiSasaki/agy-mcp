@@ -349,7 +349,7 @@ func (m *Manager) resolveProjectTarget(query, current string) (*ProjectInfo, err
 	if dir == "" {
 		dir = defaultProjectsConfigDir()
 	}
-	projects, _ := discoverRegisteredProjects(dir)
+	projects, _, _ := discoverRegisteredProjects(dir)
 	query = strings.TrimSpace(query)
 	if query == "" {
 		for _, project := range projects {

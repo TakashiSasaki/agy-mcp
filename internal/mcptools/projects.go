@@ -8,9 +8,14 @@ import (
 )
 
 const (
+	toolAgyCreateProject    = "agy_create_project"
 	toolAgyListProjects     = "agy_list_projects"
 	toolAgyResolveWorkspace = "agy_resolve_workspace"
 )
+
+type createProjectInput struct {
+	Root string `json:"root" jsonschema:"absolute path to one existing folder on the server; AGY derives a new project name from this folder"`
+}
 
 type listProjectsInput struct {
 	Query      string `json:"query,omitempty" jsonschema:"optional query substring to filter projects by name, id, repository URL, or folder name"`
@@ -74,5 +79,17 @@ func registerProjects(s *toolServer, mgr *manager.Manager) {
 			Candidates: res.Candidates,
 			Error:      res.Error,
 		}, nil
+	})
+
+	addTool(s, &mcp.Tool{
+		Name:  toolAgyCreateProject,
+		Title: "Register an Antigravity project",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: new(false), IdempotentHint: true, OpenWorldHint: new(true),
+		},
+		Description: "Register an existing server-side folder as a project with AGY 1.5.3 on Linux, without starting an agent turn. AGY names a new project after the folder. A unique existing eligible registration for that exact folder is returned instead of duplicating it. Multiple or ineligible registrations are refused; inspect agy_list_projects. Pass the returned project_id to agy_run and choose its cwd separately. This operation verifies the local project registration. Conversation sync is reported by the job tools.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in createProjectInput) (*mcp.CallToolResult, manager.ProjectCreation, error) {
+		created, err := mgr.CreateProject(ctx, in.Root)
+		return nil, created, err
 	})
 }

@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -70,7 +71,7 @@ func (m *Manager) ListProjects(query string, syncFilter ...string) ([]ProjectInf
 		dataDir = "/data"
 	}
 
-	projects, registeredRoots := discoverRegisteredProjects(projDir)
+	projects, registeredRoots, _ := discoverRegisteredProjects(projDir)
 	discoverDataProjects(dataDir, projects, registeredRoots)
 
 	// Fetch conversation counts and last active times from SQLite DB if available
@@ -159,12 +160,17 @@ type projectRegistration struct {
 	} `json:"projectResources"`
 }
 
-func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInfo, roots map[string]bool) {
+// Discovery can show readable entries when another registration is damaged.
+// Creation requires a complete scan so it does not duplicate an unseen entry.
+func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInfo, roots map[string]bool, incomplete error) {
 	projects = make(map[projectKey]*ProjectInfo)
 	roots = make(map[string]bool)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return projects, roots
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		return projects, roots, err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -172,11 +178,19 @@ func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInf
 		}
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
+			incomplete = fmt.Errorf("read project registration %s: %w", entry.Name(), err)
 			continue
 		}
 		var registration projectRegistration
-		if err := json.Unmarshal(data, &registration); err != nil || (registration.ID == "" && registration.Name == "") {
+		if err := json.Unmarshal(data, &registration); err != nil {
+			incomplete = fmt.Errorf("decode project registration %s: %w", entry.Name(), err)
 			continue
+		}
+		if registration.ID == "" {
+			incomplete = fmt.Errorf("project registration %s has no ID", entry.Name())
+			if registration.Name == "" {
+				continue
+			}
 		}
 		for _, resource := range registration.ProjectResources.Resources {
 			uri := resource.GitFolder.FolderURI
@@ -221,7 +235,7 @@ func discoverRegisteredProjects(dir string) (projects map[projectKey]*ProjectInf
 			roots[root] = true
 		}
 	}
-	return projects, roots
+	return projects, roots, incomplete
 }
 
 func discoverDataProjects(dir string, projects map[projectKey]*ProjectInfo, registeredRoots map[string]bool) {
